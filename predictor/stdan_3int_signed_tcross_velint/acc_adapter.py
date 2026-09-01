@@ -417,6 +417,7 @@ class STDAN3IntACCAdapter:
         controller_dt: Optional[float] = None,
         lane_membership_fn: Optional[Callable[[int, np.ndarray], np.ndarray]] = None,
         model_yaw: Optional[float] = None,
+        cutin_probability_threshold: float = 0.0,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -474,6 +475,7 @@ class STDAN3IntACCAdapter:
                     ego_lane_threshold=ego_lane_threshold,
                     mode_lane_memberships=mode_lane_memberships,
                     lane_membership_source=lane_membership_source,
+                    cutin_probability_threshold=cutin_probability_threshold,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

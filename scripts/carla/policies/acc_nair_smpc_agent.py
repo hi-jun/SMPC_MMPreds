@@ -74,6 +74,7 @@ class ACCNairSMPCAgent(object):
         self.mode_probabilities = self._parse_mode_probabilities(smpc_config)
         self.predictor_type = self._parse_predictor_type(smpc_config)
         self.best_mode_only = self._parse_best_mode_only(smpc_config)
+        self.cutin_probability_threshold = self._parse_cutin_probability_threshold(smpc_config)
         self.enable_wandb_logging = os.getenv("ACC_NAIR_WANDB", "0") == "1"
         self._wandb = None
         self.goal_location = goal_location
@@ -636,6 +637,7 @@ class ACCNairSMPCAgent(object):
                 controller_dt=self.DT,
                 lane_membership_fn=lane_membership_fn,
                 model_yaw=self._stdan_model_yaw,
+                cutin_probability_threshold=self.cutin_probability_threshold,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -1036,6 +1038,17 @@ class ACCNairSMPCAgent(object):
             or "opt_k" in config
             or "kopt" in config
         )
+
+    @staticmethod
+    def _parse_cutin_probability_threshold(smpc_config):
+        """Read ``cutin_gate<value>`` from the config string (default: disabled).
+
+        Cut-in modes below this probability generate no collision-avoidance
+        constraint, so the ego keeps speed instead of yielding to an unlikely
+        merge.  See ``gate_unlikely_cutin_modes``.
+        """
+        match = re.search(r"cutin_gate([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else 0.0
 
     @staticmethod
     def _parse_mode_probabilities(smpc_config):

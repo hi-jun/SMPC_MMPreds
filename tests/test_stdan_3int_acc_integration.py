@@ -399,5 +399,119 @@ class TestSTDAN3IntACCIntegration(unittest.TestCase):
         self.assertAlmostEqual(ngsim[-1, 1], 5.0)
 
 
+class TestCutInProbabilityGate(unittest.TestCase):
+    """Low-probability cut-in modes must stop generating longitudinal constraints.
+
+    This is the 1D ACC projection of the vanishing chance constraint from
+    Benciolini et al. (T-IV 2023): a candidate trajectory whose estimated
+    probability is negligible should not restrict the ego vehicle at all.
+    """
+
+    HORIZON = 3
+
+    @staticmethod
+    def _raw(intention_prob, cutin_d_profile, other_d=3.5):
+        """Right-adjacent target; raw mode 1 (LLC) is the cut-in candidate."""
+        s = np.array([20.0, 22.0, 24.0])
+        stay = np.column_stack((s, np.full_like(s, other_d)))
+        cutin = np.column_stack((s, np.asarray(cutin_d_profile, dtype=float)))
+        return {
+            "vehicle_id": 10,
+            "raw_intention_prob": np.asarray(intention_prob, dtype=float),
+            "pred_traj_frenet": np.stack((stay, cutin, stay)),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+
+    def _process(self, raw, current_d=3.5, relation=REL_RIGHT_ADJACENT, **kwargs):
+        return process_vehicle_prediction(
+            raw,
+            relation,
+            current_frenet_state=np.array([18.0, current_d, 8.0]),
+            horizon=self.HORIZON,
+            dt=0.2,
+            ego_lane_threshold=0.5,
+            **kwargs
+        )
+
+    @staticmethod
+    def _mode(processed, name):
+        for mode in processed.mode_predictions:
+            if mode.mode_name == name:
+                return mode
+        return None
+
+    def test_low_probability_cutin_is_active_without_gate(self):
+        raw = self._raw([0.90, 0.05, 0.05], [3.5, 0.0, 0.0])
+        cutin = self._mode(self._process(raw), "cutin")
+
+        self.assertIsNotNone(cutin)
+        self.assertAlmostEqual(cutin.probability, 0.05, places=6)
+        self.assertTrue(cutin.active_mask.any(), "baseline: cut-in constrains the ego")
+
+    def test_low_probability_cutin_is_gated_out(self):
+        raw = self._raw([0.90, 0.05, 0.05], [3.5, 0.0, 0.0])
+        processed = self._process(raw, cutin_probability_threshold=0.10)
+        cutin = self._mode(processed, "cutin")
+
+        self.assertIsNotNone(cutin)
+        self.assertFalse(cutin.active_mask.any(), "gated cut-in must not constrain")
+
+        prediction, _ = build_multitarget_lead_prediction(
+            [processed],
+            ego_state=np.array([0.0, 10.0]),
+            horizon=self.HORIZON,
+            desired_speed=15.0,
+            num_modes=2,
+        )
+        self.assertFalse(prediction.active_mask.any())
+
+    def test_high_probability_cutin_survives_gate(self):
+        raw = self._raw([0.30, 0.60, 0.10], [3.5, 0.0, 0.0])
+        cutin = self._mode(self._process(raw, cutin_probability_threshold=0.10), "cutin")
+
+        self.assertIsNotNone(cutin)
+        self.assertAlmostEqual(cutin.probability, 0.60, places=6)
+        self.assertTrue(cutin.active_mask.any(), "likely cut-in must still constrain")
+
+    def test_gate_never_disables_ego_lane_lead(self):
+        s = np.array([20.0, 22.0, 24.0])
+        ahead = np.column_stack((s, np.zeros_like(s)))
+        raw = {
+            "vehicle_id": 11,
+            "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
+            "pred_traj_frenet": np.stack((ahead, ahead, ahead)),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+        processed = self._process(
+            raw, current_d=0.0, relation=REL_EGO_LANE, cutin_probability_threshold=0.9
+        )
+
+        self.assertIsNone(self._mode(processed, "cutin"))
+        lead = self._mode(processed, "lk")
+        self.assertIsNotNone(lead)
+        self.assertAlmostEqual(lead.probability, 0.02, places=6)
+        self.assertTrue(lead.active_mask.all(), "ego-lane lead must never be gated")
+
+    def test_gate_preserves_current_ego_lane_occupancy(self):
+        """A target already straddling the ego lane stays constrained at step 0."""
+        raw = self._raw([0.90, 0.05, 0.05], [3.5, 0.0, 0.0])
+        processed = self._process(raw, current_d=0.3, cutin_probability_threshold=0.10)
+
+        self.assertFalse(self._mode(processed, "cutin").active_mask.any())
+        lk = self._mode(processed, "lk")
+        self.assertTrue(lk.active_mask[0], "observed encroachment must survive the gate")
+
+    def test_threshold_zero_is_a_no_op(self):
+        raw = self._raw([0.90, 0.05, 0.05], [3.5, 0.0, 0.0])
+        baseline = self._mode(self._process(raw), "cutin")
+        gated = self._mode(self._process(raw, cutin_probability_threshold=0.0), "cutin")
+
+        np.testing.assert_array_equal(baseline.active_mask, gated.active_mask)
+
+
 if __name__ == "__main__":
     unittest.main()

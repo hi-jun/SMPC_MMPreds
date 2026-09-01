@@ -261,6 +261,34 @@ def _acc_probabilities_from_mode_specs(
     }
 
 
+def gate_unlikely_cutin_modes(
+    mode_predictions: Sequence[ACCModePrediction],
+    threshold: float,
+) -> List[str]:
+    """Stop unlikely cut-in modes from generating collision-avoidance constraints.
+
+    Mirrors the vanishing chance constraint of Benciolini et al. (T-IV 2023):
+    a candidate trajectory whose estimated probability is negligible should not
+    restrict the ego vehicle.  Clearing ``active_mask`` is the 1D ACC equivalent
+    of the safety ellipse collapsing to a point, since the controller skips every
+    mode/step whose mask is unset.
+
+    Only ``cutin`` modes are gated.  They exist solely for adjacent-lane targets,
+    so an ego-lane lead vehicle can never be relaxed away.  A target already
+    occupying the ego lane also keeps its step-0 constraint, because that step is
+    taken from the measured position and is therefore shared by the ``lk`` mode.
+    """
+    threshold = float(threshold)
+    if threshold <= 0.0:
+        return []
+    gated = []
+    for mode in mode_predictions:
+        if mode.mode_name == "cutin" and mode.probability < threshold:
+            mode.active_mask[:] = False
+            gated.append(mode.mode_name)
+    return gated
+
+
 def process_vehicle_prediction(
     raw_prediction: dict,
     relation_to_ego_lane: str,
@@ -272,6 +300,7 @@ def process_vehicle_prediction(
     use_trajectory_aware_cutin_mapping: bool = False,
     mode_lane_memberships: Optional[np.ndarray] = None,
     lane_membership_source: str = "frenet_d_threshold",
+    cutin_probability_threshold: float = 0.0,
 ) -> ACCProcessedPrediction:
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     raw_map = {name: float(raw_probs[idx]) for idx, name in enumerate(INTENTION_NAMES)}
@@ -360,6 +389,10 @@ def process_vehicle_prediction(
         for idx, mode in enumerate(mode_predictions):
             mode.probability = float(norm[idx])
 
+    gated_cutin_modes = gate_unlikely_cutin_modes(
+        mode_predictions, cutin_probability_threshold
+    )
+
     start_idx, end_idx = ego_lane_interval(np.any(memberships, axis=0))
     return ACCProcessedPrediction(
         vehicle_id=vehicle_id,
@@ -377,6 +410,8 @@ def process_vehicle_prediction(
             "lane_membership_source": lane_membership_source,
             "trajectory_suggested_cutin_raw_idx": trajectory_cutin_raw_idx,
             "used_trajectory_aware_cutin_mapping": bool(use_trajectory_aware_cutin_mapping),
+            "cutin_probability_threshold": float(cutin_probability_threshold),
+            "gated_cutin_modes": gated_cutin_modes,
         },
         raw_prediction=raw_prediction,
     )
