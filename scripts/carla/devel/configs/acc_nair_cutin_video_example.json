@@ -1,0 +1,19 @@
+{
+  "scenario": "cutin",
+  "name": "cutin_h10_s50_p09_visualize_fixed",
+  "probability": 0.9,
+  "env": {
+    "GRB_LICENSE_FILE": "/home/core-dev/gurobi.lic",
+    "GUROBI_HOME": "/opt/gurobi1302/linux64",
+    "GUROBI_VERSION": "130",
+    "MPLCONFIGDIR": "/tmp/mplconfig"
+  },
+  "runner_args": {
+    "steps": 50,
+    "horizon": 10
+  },
+  "video_args": {
+    "fps": 20
+  },
+  "video_name": "cutin_h10_s50_p09_visualize_fixed.mp4"
+}

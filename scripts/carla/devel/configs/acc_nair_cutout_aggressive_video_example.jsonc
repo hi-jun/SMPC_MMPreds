@@ -1,0 +1,41 @@
+{
+  // cut-out experiment.
+  // Predictor modes:
+  //   mode 0: lane_keeping, probability = 1 - probability
+  //   mode 1: cutout,       probability = probability
+  "scenario": "cutout",
+  "name": "cutout_aggressive_h10_s50_p09",
+
+  // This maps to runner arg --cutout-probability.
+  // With 0.9, mode probabilities become [P(lane_keeping)=0.1, P(cutout)=0.9].
+  "probability": 0.9,
+
+  // When true, run_acc_nair_experiment_video.py pre-fills these runner cfg values:
+  //   cutout_start_delay=0.0     -> SyntheticCutOutConfig.cutout_start_delay
+  //   cutout_duration=0.8        -> SyntheticCutOutConfig.cutout_duration
+  //   ego_v0=10.0                -> smoke runner initial ego speed
+  //   target_v0=7.0              -> smoke runner initial target speed
+  //   initial_gap_margin=0.0     -> smoke runner initial lead distance margin
+  // Values in runner_args below override this preset one by one.
+  "aggressive": true,
+
+  "env": {
+    "GRB_LICENSE_FILE": "/home/core-dev/gurobi.lic",
+    "GUROBI_HOME": "/opt/gurobi1302/linux64",
+    "GUROBI_VERSION": "130",
+    "MPLCONFIGDIR": "/tmp/mplconfig"
+  },
+
+  "runner_args": {
+    // Common smoke runner cfg.
+    "steps": 50,
+    "horizon": 10
+  },
+
+  "video_args": {
+    // Visualizer cfg.
+    "fps": 20
+  },
+
+  "video_name": "cutout_aggressive_h10_s50_p09.mp4"
+}

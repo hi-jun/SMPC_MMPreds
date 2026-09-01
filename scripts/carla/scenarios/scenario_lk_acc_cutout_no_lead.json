@@ -1,0 +1,57 @@
+{
+  "carla_params": {
+    "fps": 20,
+    "intersection_csv_loc": "cutin_route.csv",
+    "map_str": "Town04",
+    "max_sim_time_s": 12.0,
+    "spawn_settle_realtime": false,
+    "spawn_settle_s": 1.5,
+    "weather_str": "ClearNoon"
+  },
+  "drone_viz_params": {
+    "overlay_ego_info": true,
+    "overlay_gmm": false,
+    "overlay_mode_probs": false,
+    "overlay_traj_hist": true,
+    "save_avi": false,
+    "visualize_opencv": false,
+    "x": -12.9,
+    "z": 50.0
+  },
+  "vehicle_params": [
+    {
+      "cutout_direction": "left",
+      "goal_left_offset": -3.5,
+      "goal_longitudinal_offset": 220.0,
+      "init_speed": 10.0,
+      "intersection_goal_node_idx": 0,
+      "intersection_start_node_idx": 0,
+      "lane_change_distance": 18.0,
+      "lane_change_distance_other_lane": 120.0,
+      "lane_change_distance_same_lane": 5.0,
+      "lane_change_trigger_distance": 25.0,
+      "nominal_speed": 10.0,
+      "policy_type": "distance_triggered_cutout",
+      "role": "target_cutout",
+      "start_left_offset": -3.5,
+      "start_longitudinal_offset": 40.0,
+      "vehicle_color": "186, 0, 0",
+      "vehicle_type": "vehicle.audi.tt"
+    },
+    {
+      "N": 15,
+      "goal_left_offset": -3.5,
+      "goal_longitudinal_offset": 220.0,
+      "init_speed": 12.0,
+      "intersection_goal_node_idx": 0,
+      "intersection_start_node_idx": 0,
+      "nominal_speed": 12.0,
+      "policy_type": "acc_nair_smpc",
+      "role": "ego",
+      "start_left_offset": -3.5,
+      "start_longitudinal_offset": 0.0,
+      "vehicle_color": "0, 128, 0",
+      "vehicle_type": "vehicle.audi.tt"
+    }
+  ]
+}

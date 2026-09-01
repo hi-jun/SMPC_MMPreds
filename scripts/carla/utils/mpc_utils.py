@@ -1,4 +1,26 @@
 import time
+import glob
+import os
+import re
+
+
+def _configure_gurobi_version():
+    if os.getenv("GUROBI_VERSION"):
+        return
+
+    gurobi_home = os.getenv("GUROBI_HOME")
+    if not gurobi_home:
+        return
+
+    for lib_path in glob.glob(os.path.join(gurobi_home, "lib", "libgurobi*.so")):
+        match = re.match(r"libgurobi(\d+)\.so$", os.path.basename(lib_path))
+        if match:
+            os.environ["GUROBI_VERSION"] = match.group(1)
+            return
+
+
+_configure_gurobi_version()
+
 import casadi as ca
 import numpy as np
 from itertools import product

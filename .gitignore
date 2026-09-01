@@ -10,6 +10,8 @@
 log/*/
 log/*.*
 *.csv*
+!scripts/carla/scenarios/cutin_route.csv
+!scripts/carla/scenarios/cutin_blocked_route.csv
 results/*/
 
 # Byte-compiled / optimized / DLL files
@@ -141,3 +143,27 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# --- ACC/SMPC 작업 추가 (2026-09-01) ---
+# 작업 노트/리포트 (로컬 보관, 디스크에서 삭제되지 않음)
+*.md
+!README.md
+
+# 논문 PDF
+*.pdf
+
+# wandb 실행 로그 (64MB+)
+wandb/
+*.wandb
+
+# 중첩 git 저장소 / 중복 결과 트리
+AV_SMPC_Demos/
+SMPC_MMPreds/
+
+# 수동 백업 사본 (git 히스토리로 대체)
+backups/
+*.bak
+*.bak_*
+
+# 루트 밖 results 트리도 무시
+**/results/*/

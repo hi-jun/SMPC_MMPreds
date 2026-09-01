@@ -1,0 +1,118 @@
+{
+  "aggressive_cutin": {
+    "lane_change_distance": [
+      8.0,
+      12.0,
+      16.0
+    ],
+    "lane_change_distance_same_lane": [
+      0.0,
+      2.0,
+      4.0
+    ],
+    "outer_blocker_count": [
+      3,
+      4
+    ],
+    "outer_blocker_spacing": [
+      8.0,
+      10.0,
+      12.0
+    ],
+    "outer_blocker_speed_delta": [
+      -1.0,
+      -2.0
+    ],
+    "target_lead_gap": [
+      12.0,
+      16.0,
+      20.0
+    ],
+    "target_lead_speed_delta": [
+      -3.0,
+      -4.0
+    ]
+  },
+  "common": {
+    "ego_speed": [
+      10.0,
+      12.0,
+      14.0
+    ],
+    "target_speed": [
+      8.0,
+      10.0,
+      12.0
+    ],
+    "target_start_gap": [
+      35.0,
+      40.0,
+      45.0
+    ],
+    "trigger_distance": [
+      20.0,
+      25.0,
+      30.0
+    ]
+  },
+  "cutin": {
+    "lane_change_distance": [
+      18.0,
+      24.0,
+      30.0
+    ],
+    "lane_change_distance_same_lane": [
+      4.0,
+      6.0,
+      8.0
+    ],
+    "outer_blocker_count": [
+      2,
+      3,
+      4
+    ],
+    "outer_blocker_spacing": [
+      10.0,
+      14.0,
+      18.0
+    ],
+    "outer_blocker_speed_delta": [
+      -1.0,
+      -2.0
+    ],
+    "target_lead_gap": [
+      18.0,
+      24.0,
+      30.0
+    ],
+    "target_lead_speed_delta": [
+      -2.0,
+      -3.0
+    ]
+  },
+  "cutout": {
+    "cutout_direction": [
+      "left"
+    ],
+    "lane_change_distance": [
+      12.0,
+      18.0,
+      24.0
+    ],
+    "lane_change_distance_same_lane": [
+      2.0,
+      5.0,
+      8.0
+    ],
+    "lead_gap": [
+      24.0,
+      32.0,
+      45.0
+    ],
+    "lead_speed": [
+      7.0,
+      9.0,
+      11.0
+    ]
+  }
+}

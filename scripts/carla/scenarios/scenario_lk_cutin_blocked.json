@@ -1,0 +1,108 @@
+{
+	"carla_params" : {
+		"map_str"              : "Town04",
+		"weather_str"          : "ClearNoon",
+		"fps"                  : 20,
+		"intersection_csv_loc" : "cutin_blocked_route.csv",
+		"max_sim_time_s"       : 16.0
+	},
+	"drone_viz_params" : {
+		"x"                  : -9.4,
+		"z"                  : 50.0,
+		"visualize_opencv"   : false,
+		"save_avi"           : false,
+		"overlay_gmm"        : false,
+		"overlay_ego_info"   : true,
+		"overlay_mode_probs" : false,
+		"overlay_traj_hist"  : true
+	},
+	"vehicle_params" : [
+		{
+			"role"                        : "target_cutin",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "186, 0, 0",
+			"policy_type"                 : "distance_triggered_lane_change",
+			"intersection_start_node_idx" : 0,
+			"intersection_goal_node_idx"  : 0,
+			"start_left_offset"           : 3.5,
+			"goal_left_offset"            : 3.5,
+			"start_longitudinal_offset"   : 35.0,
+			"goal_longitudinal_offset"    : 210.0,
+			"nominal_speed"               : 10.0,
+			"init_speed"                  : 10.0,
+			"lane_change_trigger_distance" : 30.0,
+			"lane_change_distance_same_lane" : 5.0,
+			"lane_change_distance_other_lane" : 100.0,
+			"lane_change_distance"        : 25.0
+		},
+		{
+			"role"                        : "target_front_slow",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "255, 180, 0",
+			"policy_type"                 : "fixed_lane_speed",
+			"intersection_start_node_idx" : 0,
+			"intersection_goal_node_idx"  : 0,
+			"start_left_offset"           : 3.5,
+			"goal_left_offset"            : 3.5,
+			"start_longitudinal_offset"   : 70.0,
+			"goal_longitudinal_offset"    : 210.0,
+			"nominal_speed"               : 4.0,
+			"init_speed"                  : 4.0
+		},
+		{
+			"role"                        : "target_oncoming_0",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "40, 90, 220",
+			"policy_type"                 : "fixed_lane_speed",
+			"intersection_start_node_idx" : 1,
+			"intersection_goal_node_idx"  : 1,
+			"start_left_offset"           : 0.0,
+			"goal_left_offset"            : 0.0,
+			"start_longitudinal_offset"   : 80.0,
+			"goal_longitudinal_offset"    : 220.0,
+			"nominal_speed"               : 3.0,
+			"init_speed"                  : 3.0
+		},
+		{
+			"role"                        : "target_oncoming_1",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "40, 90, 220",
+			"policy_type"                 : "fixed_lane_speed",
+			"intersection_start_node_idx" : 1,
+			"intersection_goal_node_idx"  : 1,
+			"start_left_offset"           : 0.0,
+			"goal_left_offset"            : 0.0,
+			"start_longitudinal_offset"   : 120.0,
+			"goal_longitudinal_offset"    : 220.0,
+			"nominal_speed"               : 3.0,
+			"init_speed"                  : 3.0
+		},
+		{
+			"role"                        : "target_oncoming_2",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "40, 90, 220",
+			"policy_type"                 : "fixed_lane_speed",
+			"intersection_start_node_idx" : 1,
+			"intersection_goal_node_idx"  : 1,
+			"start_left_offset"           : 0.0,
+			"goal_left_offset"            : 0.0,
+			"start_longitudinal_offset"   : 160.0,
+			"goal_longitudinal_offset"    : 220.0,
+			"nominal_speed"               : 3.0,
+			"init_speed"                  : 3.0
+		},
+		{
+			"role"                        : "ego",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "0, 128, 0",
+			"intersection_start_node_idx" : 0,
+			"intersection_goal_node_idx"  : 0,
+			"start_left_offset"           : 0.0,
+			"goal_left_offset"            : 0.0,
+			"start_longitudinal_offset"   : 0.0,
+			"goal_longitudinal_offset"    : 210.0,
+			"nominal_speed"               : 12.0,
+			"init_speed"                  : 12.0
+		}
+	]
+}

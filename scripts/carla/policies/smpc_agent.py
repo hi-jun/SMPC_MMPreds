@@ -11,16 +11,13 @@ CARLA_ROOT = os.getenv("CARLA_ROOT")
 if CARLA_ROOT is None:
     raise ValueError("CARLA_ROOT must be defined.")
 
-sys.path.append(CARLA_ROOT + "/PythonAPI/carla/agents/")
-from navigation.global_route_planner import GlobalRoutePlanner
-from navigation.global_route_planner_dao import GlobalRoutePlannerDAO
-
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
 from evaluation.gmm_prediction import GMMPrediction
 
 scriptdir = os.path.abspath(__file__).split('carla')[0] + 'carla/'
 sys.path.append(scriptdir)
+from utils.carla_compat import make_global_route_planner
 from utils import frenet_trajectory_handler as fth
 from utils import mpc_utils as smpc
 from utils.low_level_control import LowLevelControl
@@ -49,8 +46,7 @@ class SMPCAgent(object):
         self.nominal_speed_mps  = nominal_speed_mps
         self.N=N
         self.N_modes=N_modes
-        self.planner = GlobalRoutePlanner( GlobalRoutePlannerDAO(self.map, sampling_resolution=0.5) )
-        self.planner.setup()
+        self.planner = make_global_route_planner(self.map, sampling_resolution=0.5)
         self.lf, self.lr = vehicle_name_to_lf_lr(self.vehicle.type_id)
         self._low_level_control = LowLevelControl(vehicle)
         self.time=0

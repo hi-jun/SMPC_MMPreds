@@ -1,0 +1,42 @@
+{
+  // cut-in experiment.
+  // Predictor modes:
+  //   mode 0: lane_keeping, probability = 1 - probability
+  //   mode 1: cutin,        probability = probability
+  "scenario": "cutin",
+  "name": "cutinaggressive_h10_s50_p09_predictor_changed",
+
+  // This maps to runner arg --cutin-probability.
+  // With 0.9, mode probabilities become [P(lane_keeping)=0.1, P(cutin)=0.9].
+  "probability": 0.7,
+
+  // When true, run_acc_nair_experiment_video.py pre-fills these runner cfg values:
+  //   cutin_start_delay=0.0      -> SyntheticCutInConfig.cutin_start_delay
+  //   cutin_duration=0.8         -> SyntheticCutInConfig.cutin_duration
+  //   ego_v0=13.0                -> smoke runner initial ego speed
+  //   target_s0=22.0             -> smoke runner initial target longitudinal position
+  //   target_v0=8.0              -> smoke runner initial target speed
+  //   actual_target_accel=-1.0   -> closed-loop target acceleration
+  // Values in runner_args below override this preset one by one.
+  "aggressive": true,
+
+  "env": {
+    "GRB_LICENSE_FILE": "/home/core-dev/gurobi.lic",
+    "GUROBI_HOME": "/opt/gurobi1302/linux64",
+    "GUROBI_VERSION": "130",
+    "MPLCONFIGDIR": "/tmp/mplconfig"
+  },
+
+  "runner_args": {
+    // Common smoke runner cfg.
+    "steps": 50,
+    "horizon": 10
+  },
+
+  "video_args": {
+    // Visualizer cfg.
+    "fps": 20
+  },
+
+  "video_name": "cutinaggressive_h10_s50_p09_predictor_changed.mp4"
+}

@@ -9,12 +9,9 @@ CARLA_ROOT = os.getenv("CARLA_ROOT")
 if CARLA_ROOT is None:
     raise ValueError("CARLA_ROOT must be defined.")
 
-sys.path.append(CARLA_ROOT + "/PythonAPI/carla/agents/")
-from navigation.global_route_planner import GlobalRoutePlanner
-from navigation.global_route_planner_dao import GlobalRoutePlannerDAO
-
 scriptdir = os.path.abspath(__file__).split('carla')[0] + 'carla/'
 sys.path.append(scriptdir)
+from utils.carla_compat import make_global_route_planner
 from utils import frenet_trajectory_handler as fth
 from utils.low_level_control import LowLevelControl
 from utils.vehicle_geometry_utils import vehicle_name_to_lf_lr
@@ -33,8 +30,7 @@ class MPCAgent(object):
         self.vehicle = vehicle
         self.world   = vehicle.get_world()
         carla_map     = self.world.get_map()
-        planner = GlobalRoutePlanner( GlobalRoutePlannerDAO(carla_map, sampling_resolution=0.5) )
-        planner.setup()
+        planner = make_global_route_planner(carla_map, sampling_resolution=0.5)
 
         # Get the high-level route using Carla's API (basically A* search over road segments).
         init_waypoint = carla_map.get_waypoint(self.vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving))
@@ -119,7 +115,7 @@ class MPCAgent(object):
                            'psi0'    : psi,
                            'v0'      : speed}
             update_dict.update( self._get_reference_traj(**update_dict) )
-            update_dict['tv_refs'], update_dict['tv_Rs']  = self._get_target_vehicles(x, y)
+            update_dict['tv_refs'], update_dict['tv_Rs'] = self._get_target_vehicles(x, y)
 
             if self.warm_start:
                 update_dict['acc_prev']   = self.warm_start['u_ws'][0, 0]
@@ -276,7 +272,7 @@ class MPCAgent(object):
             return np.column_stack((x_preds, y_preds)), R_preds
 
         tv_refs = []
-        Rs =[]
+        Rs = []
         for idx in range(self.NUM_TVS):
             if idx < len(act_ids_drel_ordered):
                 actor = all_actors.find( act_ids_drel_ordered[idx][0] )

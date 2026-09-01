@@ -1,0 +1,6 @@
+# Each line contains a start pose and goal pose in the same orientation.
+# start_x (m), start_y (m), start_yaw (deg), goal_x (m), goal_y (m), goal_yaw (deg)
+# Row 0: northbound ego/cut-in lanes.
+-9.4, -170.0, 90, -9.4, 120.0, 90
+# Row 1: southbound opposite-lane traffic.
+1.1, 90.0, -90, 1.1, -190.0, -90

@@ -24,6 +24,7 @@ from policies.static_agent import StaticAgent
 from policies.smpc_agent import SMPCAgent
 from policies.mpc_agent import MPCAgent
 from policies.bl_smpc_agent import BLSMPCAgent
+from policies.distance_triggered_lane_change_agent import DistanceTriggeredLaneChangeAgent
 
 from rasterizer.agent_history import AgentHistory
 from rasterizer.sem_box_rasterizer import SemBoxRasterizer
@@ -79,7 +80,7 @@ class VehicleParams:
     role          : str # either "ego" [dynamic, our agent], "static" [nonmoving vehicle], or "target" [dynamic vehicle, other agent]
     vehicle_type  : str # currently use one of {"vehicle.audi.tt", "vehicle.mercedes-benz.coupe"}
     vehicle_color : str # currently use "246, 246, 246" for static, "186, 0, 0" for ego, and "65, 63, 197" for dynamic
-    policy_type   : str # {"static", mpc", "smpc", "blsmpc"} -> which control policy to use for this agent
+    policy_type   : str # {"static", mpc", "smpc", "blsmpc", "distance_triggered_lane_change"} -> which control policy to use for this agent
 
     # Initial state and goal location selection.
     intersection_start_node_idx : int        # {0, 1, 2, 3} -> corresponds to a direction in the intersection_json above
@@ -98,6 +99,12 @@ class VehicleParams:
 
     # SMPC specific parameters (ignored for any other policy_type).
     smpc_config : str = "full" # "var_risk", "open_loop", "fixed_risk"
+
+    # Distance-triggered lane change parameters.
+    lane_change_trigger_distance : float = 30.0
+    lane_change_distance_same_lane : float = 5.0
+    lane_change_distance_other_lane : float = 100.0
+    lane_change_distance : float = 25.0
 
 @dataclass(frozen=True)
 class PredictionParams:
@@ -139,6 +146,16 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform):
                         dt=vehicle_params.dt,
                         N_modes=vehicle_params.num_modes,
                         nominal_speed_mps=vehicle_params.nominal_speed)
+    elif vehicle_params.policy_type == "distance_triggered_lane_change":
+        return DistanceTriggeredLaneChangeAgent(vehicle_actor, goal_transform.location, \
+                        N=vehicle_params.N,
+                        dt=vehicle_params.dt,
+                        N_modes=vehicle_params.num_modes,
+                        nominal_speed_mps=vehicle_params.nominal_speed,
+                        trigger_distance_m=vehicle_params.lane_change_trigger_distance,
+                        distance_same_lane=vehicle_params.lane_change_distance_same_lane,
+                        distance_other_lane=vehicle_params.lane_change_distance_other_lane,
+                        distance_lane_change=vehicle_params.lane_change_distance)
     elif vehicle_params.policy_type == "blsmpc":
         return BLSMPCAgent(vehicle_actor, goal_transform.location, \
                         N=vehicle_params.N,
@@ -404,6 +421,10 @@ class RunIntersectionScenario:
                                     "feasibility",
                                     "solve_times"]:
                         self.results_dict[act_key][arr_key] = np.array(self.results_dict[act_key][arr_key])
+                for idx_act, (act, policy) in enumerate(zip(self.vehicle_actors, self.vehicle_policies)):
+                    if hasattr(policy, "get_cut_in_log"):
+                        act_key = f"{act.attributes['role_name']}_{idx_act}"
+                        self.results_dict[act_key]["policy_log"] = policy.get_cut_in_log()
                 pkl_name = os.path.join(self.savedir, "scenario_result.pkl")
                 pickle.dump(self.results_dict, open(pkl_name, "wb"))
                 ran_successfully = True

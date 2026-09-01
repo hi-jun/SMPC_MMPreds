@@ -2,6 +2,7 @@ import os
 import glob
 import json
 import pdb
+import re
 
 
 
@@ -24,6 +25,8 @@ def run_without_tvs(scene, scenario_dict, ego_init_dict, savedir, get_cl=False):
             continue
             # vehicles_params_list.append( VehicleParams(**vp_dict) )
         elif "target" in vp_dict["role"]:
+            pass
+        elif "traffic" in vp_dict["role"]:
             pass
         elif vp_dict["role"] == "ego":
             if get_cl:
@@ -49,7 +52,7 @@ def run_without_tvs(scene, scenario_dict, ego_init_dict, savedir, get_cl=False):
                                         pred_params,
                                         savedir)
     
-    runner.run_scenario()
+    return runner.run_scenario()
 
 def run_with_tvs(scene, scenario_dict, ego_init_dict, ego_policy_config, savedir):
     if scene =="intersection":
@@ -73,6 +76,12 @@ def run_with_tvs(scene, scenario_dict, ego_init_dict, ego_policy_config, savedir
     elif ego_policy_config == "mpc":
         policy_type = "mpc"
         policy_config = ""
+    elif ego_policy_config == "fixed_lane_speed":
+        policy_type = "fixed_lane_speed"
+        policy_config = ""
+    elif ego_policy_config.startswith("acc_nair_smpc"):
+        policy_type = "acc_nair_smpc"
+        policy_config = ego_policy_config
     else:
         raise ValueError(f"Invalid ego policy config: {ego_policy_config}")
 
@@ -83,11 +92,25 @@ def run_with_tvs(scene, scenario_dict, ego_init_dict, ego_policy_config, savedir
             # continue
         elif "target" in vp_dict["role"]:
             vehicles_params_list.append( VehicleParams(**vp_dict) )
+        elif "traffic" in vp_dict["role"]:
+            vehicles_params_list.append( VehicleParams(**vp_dict) )
         elif vp_dict["role"] == "ego":
          
             vp_dict.update(ego_init_dict)
             vp_dict["policy_type"] = policy_type
             vp_dict["smpc_config"] = policy_config
+            if policy_type == "acc_nair_smpc":
+                vp_dict["N"] = int(vp_dict.get("N", 10))
+                if ("best_mode" in ego_policy_config
+                        or "const_lead" in ego_policy_config
+                        or "constant_lead" in ego_policy_config):
+                    vp_dict["num_modes"] = 1
+                else:
+                    mode_match = re.search(r"(?:num_modes|modes|mode)[_-]?(\d+)", ego_policy_config)
+                    if mode_match:
+                        vp_dict["num_modes"] = int(mode_match.group(1))
+                    else:
+                        vp_dict["num_modes"] = 2
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         else:
 
@@ -105,7 +128,7 @@ def run_with_tvs(scene, scenario_dict, ego_init_dict, ego_policy_config, savedir
                                      vehicles_params_list,
                                      pred_params,
                                      savedir)
-    runner.run_scenario()
+    return runner.run_scenario()
 
 if __name__ == '__main__':
     scenario_folder = os.path.join( os.path.dirname( os.path.abspath(__file__)  ), "scenarios/" )
