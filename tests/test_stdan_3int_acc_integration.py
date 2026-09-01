@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.join(ROOT, "scripts", "carla"))
 from predictor.stdan_3int_signed_tcross_velint.acc_adapter import STDAN3IntACCAdapter  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
     REL_EGO_LANE,
+    chance_tolerance,
+    cutin_clearance_scale,
     REL_LEFT_ADJACENT,
     REL_RIGHT_ADJACENT,
     build_multitarget_lead_prediction,
@@ -24,7 +26,10 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa:
 from utils.acc_nair_smpc import (  # noqa: E402
     MultimodalLeadPrediction,
     NairACCConfig,
+    NairACCSMPC,
     OldACCReferenceAdapter,
+    required_standoff,
+    safety_function,
 )
 
 
@@ -511,6 +516,110 @@ class TestCutInProbabilityGate(unittest.TestCase):
         gated = self._mode(self._process(raw, cutin_probability_threshold=0.0), "cutin")
 
         np.testing.assert_array_equal(baseline.active_mask, gated.active_mask)
+
+
+class TestCutInClearanceRamp(unittest.TestCase):
+    """Standoff shrinks continuously with the cut-in probability.
+
+    Benciolini et al. (T-IV 2023) Sec. V-B: the forbidden region scales with
+    sqrt(zeta(beta_j)), and Remark 5 requires the footprint to sit inside that
+    scaling so an unlikely mode stops reserving space entirely.
+    """
+
+    REF = 0.95
+    HORIZON = 3
+
+    def test_chance_tolerance_matches_closed_form(self):
+        for beta in (0.95, 0.50, 0.10, 0.02):
+            self.assertAlmostEqual(chance_tolerance(beta), -2.0 * np.log(1.0 - beta), places=9)
+        self.assertAlmostEqual(np.sqrt(chance_tolerance(0.95)), 2.4478, places=3)
+
+    def test_scale_is_monotone_and_vanishes(self):
+        scales = [cutin_clearance_scale(p, self.REF) for p in (0.95, 0.50, 0.20, 0.10, 0.02)]
+        self.assertTrue(all(a > b for a, b in zip(scales, scales[1:])), scales)
+        self.assertAlmostEqual(scales[0], 1.0, places=9)
+        self.assertAlmostEqual(scales[1], 0.4810, places=3)
+        self.assertAlmostEqual(scales[4], 0.0821, places=3)
+        self.assertLess(cutin_clearance_scale(1e-6, self.REF), 0.01)
+
+    def test_scale_is_capped_at_one_and_disabled_by_default(self):
+        self.assertEqual(cutin_clearance_scale(0.99, self.REF), 1.0)
+        self.assertEqual(cutin_clearance_scale(0.02, 0.0), 1.0)
+
+    def test_ramp_only_touches_cutin_modes(self):
+        gate = TestCutInProbabilityGate()
+        processed = gate._process(
+            gate._raw([0.60, 0.30, 0.10], [3.5, 0.0, 0.0]),
+            cutin_clearance_ramp_ref=self.REF,
+        )
+        by_name = {m.mode_name: m for m in processed.mode_predictions}
+        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
+        self.assertLess(by_name["cutin"].clearance_scale, 1.0)
+
+    def test_ego_lane_lead_is_never_ramped(self):
+        s = np.array([20.0, 22.0, 24.0])
+        ahead = np.column_stack((s, np.zeros_like(s)))
+        raw = {
+            "vehicle_id": 11,
+            "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
+            "pred_traj_frenet": np.stack((ahead, ahead, ahead)),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+        processed = TestCutInProbabilityGate()._process(
+            raw, current_d=0.0, relation=REL_EGO_LANE, cutin_clearance_ramp_ref=self.REF
+        )
+        for mode in processed.mode_predictions:
+            self.assertEqual(mode.clearance_scale, 1.0, mode.mode_name)
+
+    def test_ramp_reaches_the_controller_prediction(self):
+        gate = TestCutInProbabilityGate()
+        processed = gate._process(
+            gate._raw([0.90, 0.05, 0.05], [3.5, 0.0, 0.0]),
+            cutin_clearance_ramp_ref=self.REF,
+        )
+        prediction, _ = build_multitarget_lead_prediction(
+            [processed],
+            ego_state=np.array([0.0, 10.0]),
+            horizon=self.HORIZON,
+            desired_speed=15.0,
+            num_modes=2,
+        )
+        active = prediction.active_mask
+        self.assertTrue(active.any())
+        scaled = prediction.clearance_scale[active]
+        self.assertTrue(np.all(scaled < 1.0), scaled)
+        self.assertTrue(np.all(prediction.clearance_scale[~active] == 1.0))
+
+    def test_required_gap_shrinks_with_the_scale(self):
+        config = NairACCConfig(horizon=self.HORIZON, dt=0.2, d0=3.0, time_headway=1.3,
+                               vehicle_length=4.5)
+        ego, lead = np.array([0.0, 8.0]), np.array([100.0, 8.0])
+        standoff = required_standoff(ego, config)
+        self.assertAlmostEqual(standoff, 4.5 + 3.0 + 1.3 * 8.0, places=9)
+
+        full = safety_function(ego, lead, config)
+        scale = cutin_clearance_scale(0.05, self.REF)
+        ramped = safety_function(ego, lead, config, clearance_scale=scale)
+        self.assertAlmostEqual(full, 100.0 - standoff, places=9)
+        self.assertAlmostEqual(ramped, 100.0 - scale * standoff, places=9)
+        self.assertGreater(ramped, full)
+
+    def test_symbolic_margin_agrees_with_numeric(self):
+        config = NairACCConfig(horizon=self.HORIZON, dt=0.2, d0=3.0, time_headway=1.3,
+                               vehicle_length=4.5)
+        controller = NairACCSMPC(config)
+        ego, lead = np.array([0.0, 8.0]), np.array([100.0, 8.0])
+        for scale in (1.0, 0.48, 0.08, 0.0):
+            self.assertAlmostEqual(
+                controller._symbolic_safety_margin(
+                    float(lead[0]), float(ego[0]), float(ego[1]), clearance_scale=scale
+                ),
+                safety_function(ego, lead, config, clearance_scale=scale),
+                places=9,
+                msg=f"scale={scale}",
+            )
 
 
 if __name__ == "__main__":

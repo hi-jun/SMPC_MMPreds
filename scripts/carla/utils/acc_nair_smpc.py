@@ -354,6 +354,7 @@ class MultimodalLeadPrediction:
     policy_tree: Optional[PolicySharingTree] = None
     prediction_tree: Optional[PolicySharingTree] = None
     active_mask: Optional[np.ndarray] = None
+    clearance_scale: Optional[np.ndarray] = None
     k_group_map: Optional[np.ndarray] = None
     k_group_names: Optional[List[str]] = None
 
@@ -410,6 +411,15 @@ class MultimodalLeadPrediction:
             expected = (self.num_modes, horizon + 1)
             if self.active_mask.shape != expected:
                 raise ValueError("active_mask must have shape %s" % (expected,))
+        if self.clearance_scale is None:
+            self.clearance_scale = np.ones((self.num_modes, horizon + 1), dtype=float)
+        else:
+            self.clearance_scale = np.asarray(self.clearance_scale, dtype=float)
+            expected = (self.num_modes, horizon + 1)
+            if self.clearance_scale.shape != expected:
+                raise ValueError("clearance_scale must have shape %s" % (expected,))
+            if np.any(self.clearance_scale < 0.0) or np.any(self.clearance_scale > 1.0):
+                raise ValueError("clearance_scale entries must lie in [0, 1]")
         if self.k_group_map is not None:
             self.k_group_map = np.asarray(self.k_group_map, dtype=int)
             expected = (self.num_modes, horizon)
@@ -563,6 +573,7 @@ class CachedOpenLoopFixedQP:
     a_ref_param: Any
     probability_param: Any
     tightening_param: Any
+    clearance_scale_param: Any
     brake_slope_param: Any
     brake_intercept_param: Any
     brake_v_min_param: Any
@@ -591,6 +602,7 @@ class CachedFeedbackScalarChanceQP:
     a_ref_param: Any
     probability_param: Any
     tightening_param: Any
+    clearance_scale_param: Any
     safety_std_param: Any
     brake_slope_param: Any
     brake_intercept_param: Any
@@ -1029,6 +1041,7 @@ class NairACCSMPC:
                         prediction.means[mode, step],
                         self.config,
                         linearization_speed=x0[1],
+                        clearance_scale=float(prediction.clearance_scale[mode, step]),
                     )
                     if eta_levels is not None:
                         tightening_values[mode, step] = (
@@ -1134,23 +1147,33 @@ class NairACCSMPC:
             brake_slope=0.0,
             brake_intercept=0.0,
             tightening=0.0,
-            slack=0.0):
+            slack=0.0,
+            clearance_scale=1.0):
         if self.config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
             d_brake = brake_slope * ego_v + brake_intercept
             clearance = self.config.d0 + d_brake
         else:
             clearance = self.config.d0 + self.config.time_headway * ego_v
+        # ``clearance_scale`` multiplies the whole deterministic standoff, footprint
+        # included.  Benciolini et al. (T-IV 2023) Remark 5: leaving the footprint
+        # outside the confidence scaling keeps a fixed exclusion zone alive even for
+        # a disbelieved mode.  ``tightening`` stays outside because the risk
+        # allocation already carries the mode probability.
         return (
             lead_s
             - ego_s
-            - self.config.vehicle_length
-            - clearance
+            - clearance_scale * (self.config.vehicle_length + clearance)
             - tightening
             + slack
         )
 
-    def _symbolic_min_clearance_margin(self, lead_s, ego_s, slack=0.0):
-        return lead_s - ego_s - self.config.vehicle_length - self.config.d0 + slack
+    def _symbolic_min_clearance_margin(self, lead_s, ego_s, slack=0.0, clearance_scale=1.0):
+        return (
+            lead_s
+            - ego_s
+            - clearance_scale * (self.config.vehicle_length + self.config.d0)
+            + slack
+        )
 
     def _add_symbolic_safety_constraints(
             self,
@@ -1164,7 +1187,8 @@ class NairACCSMPC:
             brake_v_max=None,
             enforce_brake_speed_band=True,
             tightening=0.0,
-            slack=0.0):
+            slack=0.0,
+            clearance_scale=1.0):
         opti.subject_to(
             self._symbolic_safety_margin(
                 lead_s,
@@ -1174,11 +1198,17 @@ class NairACCSMPC:
                 brake_intercept=brake_intercept,
                 tightening=tightening,
                 slack=slack,
+                clearance_scale=clearance_scale,
             )
             >= 0.0
         )
         if self.config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
-            opti.subject_to(self._symbolic_min_clearance_margin(lead_s, ego_s, slack=slack) >= 0.0)
+            opti.subject_to(
+                self._symbolic_min_clearance_margin(
+                    lead_s, ego_s, slack=slack, clearance_scale=clearance_scale
+                )
+                >= 0.0
+            )
             if (
                     self.config.brake_distance_bound_mode == BRAKE_DISTANCE_BOUND_HARD_BAND
                     and enforce_brake_speed_band):
@@ -1267,6 +1297,7 @@ class NairACCSMPC:
         opti.set_value(problem.a_ref_param, reference.a_ref)
         opti.set_value(problem.probability_param, prediction.probabilities.reshape((num_modes, 1)))
         opti.set_value(problem.tightening_param, tightening)
+        opti.set_value(problem.clearance_scale_param, prediction.clearance_scale)
         opti.set_value(problem.brake_slope_param, brake_slope)
         opti.set_value(problem.brake_intercept_param, brake_intercept)
         opti.set_value(problem.brake_v_min_param, brake_v_min)
@@ -1354,6 +1385,7 @@ class NairACCSMPC:
         a_ref_param = opti.parameter(num_modes, horizon)
         probability_param = opti.parameter(num_modes)
         tightening_param = opti.parameter(num_modes, horizon + 1)
+        clearance_scale_param = opti.parameter(num_modes, horizon + 1)
         brake_slope_param = opti.parameter(num_modes, horizon + 1)
         brake_intercept_param = opti.parameter(num_modes, horizon + 1)
         brake_v_min_param = opti.parameter(num_modes, horizon + 1)
@@ -1404,6 +1436,7 @@ class NairACCSMPC:
                     enforce_brake_speed_band=step > 0,
                     tightening=tightening_param[mode, step],
                     slack=slack_var,
+                    clearance_scale=clearance_scale_param[mode, step],
                 )
 
         objective = self.config.slack_weight * slack_var ** 2
@@ -1446,6 +1479,7 @@ class NairACCSMPC:
             a_ref_param=a_ref_param,
             probability_param=probability_param,
             tightening_param=tightening_param,
+            clearance_scale_param=clearance_scale_param,
             brake_slope_param=brake_slope_param,
             brake_intercept_param=brake_intercept_param,
             brake_v_min_param=brake_v_min_param,
@@ -1548,6 +1582,7 @@ class NairACCSMPC:
         opti.set_value(problem.a_ref_param, reference.a_ref)
         opti.set_value(problem.probability_param, prediction.probabilities.reshape((num_modes, 1)))
         opti.set_value(problem.tightening_param, tightening)
+        opti.set_value(problem.clearance_scale_param, prediction.clearance_scale)
         opti.set_value(problem.safety_std_param, safety_stds)
         opti.set_value(problem.brake_slope_param, brake_slope)
         opti.set_value(problem.brake_intercept_param, brake_intercept)
@@ -1720,6 +1755,7 @@ class NairACCSMPC:
         a_ref_param = opti.parameter(num_modes, horizon)
         probability_param = opti.parameter(num_modes)
         tightening_param = opti.parameter(num_modes, horizon + 1)
+        clearance_scale_param = opti.parameter(num_modes, horizon + 1)
         safety_std_param = opti.parameter(num_modes, horizon + 1)
         brake_slope_param = opti.parameter(num_modes, horizon + 1)
         brake_intercept_param = opti.parameter(num_modes, horizon + 1)
@@ -1845,6 +1881,7 @@ class NairACCSMPC:
                     enforce_brake_speed_band=step > 0,
                     tightening=tightening,
                     slack=slack_var[mode, step],
+                    clearance_scale=clearance_scale_param[mode, step],
                 )
 
         opti.minimize(objective)
@@ -1871,6 +1908,7 @@ class NairACCSMPC:
             a_ref_param=a_ref_param,
             probability_param=probability_param,
             tightening_param=tightening_param,
+            clearance_scale_param=clearance_scale_param,
             safety_std_param=safety_std_param,
             brake_slope_param=brake_slope_param,
             brake_intercept_param=brake_intercept_param,
@@ -2028,6 +2066,7 @@ class NairACCSMPC:
                         state[1],
                         tightening=tightening,
                         slack=slack_at(mode, step),
+                        clearance_scale=float(prediction.clearance_scale[mode, step]),
                     )
 
         x_ref = reference.x_ref
@@ -2057,6 +2096,7 @@ class NairACCSMPC:
                             brake_v_max=brake_v_max[mode, step],
                             enforce_brake_speed_band=step > 0,
                             slack=slack_at(mode, step),
+                            clearance_scale=float(prediction.clearance_scale[mode, step]),
                         )
                     if step > 0:
                         opti.subject_to(state[1] >= self.config.v_min)
@@ -2355,6 +2395,7 @@ class NairACCSMPC:
                     lead_sample[step],
                     self.config,
                     linearization_speed=x0[1],
+                    clearance_scale=float(prediction.clearance_scale[mode, step]),
                 )
                 return float(value + slack[mode, step])
             return fun
@@ -2452,6 +2493,7 @@ class NairACCSMPC:
                         prediction.means[mode, step],
                         self.config,
                         linearization_speed=x0[1],
+                        clearance_scale=float(prediction.clearance_scale[mode, step]),
                     )
                     desired = reference.a_ref[mode, step] - 0.25 * min(0.0, gap)
                 else:
@@ -2474,6 +2516,7 @@ class NairACCSMPC:
                             prediction.means[mode, step],
                             self.config,
                             linearization_speed=x0[1],
+                            clearance_scale=float(prediction.clearance_scale[mode, step]),
                         ),
                     )
         policy.K[:] = 0.0
@@ -2539,13 +2582,25 @@ def clearance_gap(ego_state, lead_state, config):
     )
 
 
-def safety_function(ego_state, lead_state, config, linearization_speed=None):
+def required_standoff(ego_state, config):
+    """Deterministic distance the ego must keep behind the lead, footprint included."""
+    ego_state = np.asarray(ego_state, dtype=float)
+    if config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
+        clearance = config.d0 + exact_brake_distance(ego_state[1], config)
+    else:
+        clearance = config.d0 + config.time_headway * ego_state[1]
+    return float(config.vehicle_length + clearance)
+
+
+def safety_function(ego_state, lead_state, config, linearization_speed=None, clearance_scale=1.0):
     del linearization_speed
     ego_state = np.asarray(ego_state, dtype=float)
-    gap = clearance_gap(ego_state, lead_state, config)
-    if config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
-        return float(gap - config.d0 - exact_brake_distance(ego_state[1], config))
-    return float(gap - config.d0 - config.time_headway * ego_state[1])
+    lead_state = np.asarray(lead_state, dtype=float)
+    return float(
+        lead_state[0]
+        - ego_state[0]
+        - float(clearance_scale) * required_standoff(ego_state, config)
+    )
 
 
 def safety_std(lead_covariance, config):

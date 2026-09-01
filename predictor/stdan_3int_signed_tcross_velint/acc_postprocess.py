@@ -29,6 +29,7 @@ class ACCModePrediction:
     raw_mode_indices: Sequence[int]
     ego_lane_membership_split_step: int
     lead_covariance: Optional[np.ndarray] = None
+    clearance_scale: float = 1.0
 
     @property
     def branch_step(self) -> int:
@@ -261,6 +262,61 @@ def _acc_probabilities_from_mode_specs(
     }
 
 
+def chance_tolerance(beta: float) -> float:
+    """zeta(beta) = -2 ln(1 - beta): the squared-Mahalanobis price of confidence beta.
+
+    A 2-D Gaussian puts probability ``beta`` inside the ellipse
+    ``(z-mu)' Sigma^-1 (z-mu) <= zeta``, so ``sqrt(zeta)`` is how many standard
+    deviations the forbidden region must span.  Benciolini et al. (T-IV 2023),
+    Sec. V-B, eq. (17).
+    """
+    beta = float(np.clip(beta, 1.0e-9, 1.0 - 1.0e-9))
+    return float(-2.0 * np.log(1.0 - beta))
+
+
+def cutin_clearance_scale(probability: float, reference_beta: float) -> float:
+    """Shrink a cut-in mode's standoff in proportion to how much we believe it.
+
+    Implements ``beta_j = g(mu_j)`` with ``g(p) = p`` from Benciolini et al.
+    (T-IV 2023), Sec. V-B, whose ellipse semi-axis is ``(sigma + l_o) sqrt(zeta(beta_j))``.
+    Remark 5 is the point: the deterministic footprint sits *inside* the square
+    root, so an unlikely mode stops reserving space instead of leaving a fixed
+    exclusion zone forever.
+
+    ``reference_beta`` normalises the ramp, since the ACC standoff is a tuned
+    time-gap rather than a raw ellipse: a mode at ``reference_beta`` keeps its
+    present standoff.  The result is capped at 1.0, so the ramp can only relax a
+    constraint, never tighten one.  Returns 1.0 when disabled.
+    """
+    reference_beta = float(reference_beta)
+    if reference_beta <= 0.0:
+        return 1.0
+    scale = np.sqrt(chance_tolerance(probability) / chance_tolerance(reference_beta))
+    return float(min(scale, 1.0))
+
+
+def ramp_cutin_clearance(
+    mode_predictions: Sequence[ACCModePrediction],
+    reference_beta: float,
+) -> Dict[str, float]:
+    """Attach a probability-proportional standoff scale to each cut-in mode.
+
+    Scoped to ``cutin`` modes on purpose.  An ego-lane lead sits directly in the
+    ego path with no lateral escape, so relaxing its standoff would cut the
+    margin to a vehicle that really is there; a cut-in mode is a hypothesis about
+    a vehicle that is still in the next lane.
+    """
+    if float(reference_beta) <= 0.0:
+        return {}
+    scales = {}
+    for mode in mode_predictions:
+        if mode.mode_name != "cutin":
+            continue
+        mode.clearance_scale = cutin_clearance_scale(mode.probability, reference_beta)
+        scales[mode.mode_name] = mode.clearance_scale
+    return scales
+
+
 def gate_unlikely_cutin_modes(
     mode_predictions: Sequence[ACCModePrediction],
     threshold: float,
@@ -301,6 +357,7 @@ def process_vehicle_prediction(
     mode_lane_memberships: Optional[np.ndarray] = None,
     lane_membership_source: str = "frenet_d_threshold",
     cutin_probability_threshold: float = 0.0,
+    cutin_clearance_ramp_ref: float = 0.0,
 ) -> ACCProcessedPrediction:
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     raw_map = {name: float(raw_probs[idx]) for idx, name in enumerate(INTENTION_NAMES)}
@@ -392,6 +449,9 @@ def process_vehicle_prediction(
     gated_cutin_modes = gate_unlikely_cutin_modes(
         mode_predictions, cutin_probability_threshold
     )
+    cutin_clearance_scales = ramp_cutin_clearance(
+        mode_predictions, cutin_clearance_ramp_ref
+    )
 
     start_idx, end_idx = ego_lane_interval(np.any(memberships, axis=0))
     return ACCProcessedPrediction(
@@ -412,6 +472,8 @@ def process_vehicle_prediction(
             "used_trajectory_aware_cutin_mapping": bool(use_trajectory_aware_cutin_mapping),
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,
+            "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),
+            "cutin_clearance_scales": cutin_clearance_scales,
         },
         raw_prediction=raw_prediction,
     )
@@ -442,6 +504,7 @@ def build_multitarget_lead_prediction(
             covariances=np.zeros((1, horizon + 1, 2, 2)),
             mode_names=["default"],
             active_mask=active_mask,
+            clearance_scale=np.ones((1, horizon + 1)),
         )
         return prediction, []
 
@@ -456,6 +519,7 @@ def build_multitarget_lead_prediction(
     means = np.zeros((len(scenarios), horizon + 1, 2), dtype=float)
     covariances = np.zeros((len(scenarios), horizon + 1, 2, 2), dtype=float)
     active_mask = np.zeros((len(scenarios), horizon + 1), dtype=bool)
+    clearance_scale = np.ones((len(scenarios), horizon + 1), dtype=float)
     mode_names = []
     probabilities = []
     metadata = []
@@ -492,6 +556,7 @@ def build_multitarget_lead_prediction(
             else:
                 covariances[scenario_out_idx, step] = base_cov
             active_mask[scenario_out_idx, step] = True
+            clearance_scale[scenario_out_idx, step] = float(selected.clearance_scale)
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
             effective_lead_keys.append((int(selected.vehicle_id), str(selected.mode_name)))
@@ -529,6 +594,7 @@ def build_multitarget_lead_prediction(
         mode_names=mode_names,
         policy_tree=policy_tree,
         active_mask=active_mask,
+        clearance_scale=clearance_scale,
         k_group_map=k_group_map,
         k_group_names=k_group_names,
     )

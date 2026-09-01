@@ -75,6 +75,7 @@ class ACCNairSMPCAgent(object):
         self.predictor_type = self._parse_predictor_type(smpc_config)
         self.best_mode_only = self._parse_best_mode_only(smpc_config)
         self.cutin_probability_threshold = self._parse_cutin_probability_threshold(smpc_config)
+        self.cutin_clearance_ramp_ref = self._parse_cutin_clearance_ramp_ref(smpc_config)
         self.enable_wandb_logging = os.getenv("ACC_NAIR_WANDB", "0") == "1"
         self._wandb = None
         self.goal_location = goal_location
@@ -638,6 +639,7 @@ class ACCNairSMPCAgent(object):
                 lane_membership_fn=lane_membership_fn,
                 model_yaw=self._stdan_model_yaw,
                 cutin_probability_threshold=self.cutin_probability_threshold,
+                cutin_clearance_ramp_ref=self.cutin_clearance_ramp_ref,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -1048,6 +1050,17 @@ class ACCNairSMPCAgent(object):
         merge.  See ``gate_unlikely_cutin_modes``.
         """
         match = re.search(r"cutin_gate([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_cutin_clearance_ramp_ref(smpc_config):
+        """Read ``cutin_ramp<value>`` from the config string (default: disabled).
+
+        The value is the reference confidence at which a cut-in mode keeps its
+        present standoff; less likely modes shrink theirs continuously.  See
+        ``cutin_clearance_scale``.
+        """
+        match = re.search(r"cutin_ramp([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else 0.0
 
     @staticmethod
