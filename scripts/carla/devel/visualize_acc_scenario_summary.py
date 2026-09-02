@@ -172,7 +172,10 @@ def _plot_run(fig, axes, data, title, target_log):
     )
 
 
-def make_figure(before_dir: Path, after_dir: Path, output_path: Path):
+def make_figure(before_dir: Path, after_dir: Path, output_path: Path,
+                before_label: str = "Before: full-history gated STDAN",
+                after_label: str = "After: partial-history + CARLA waypoint occupancy",
+                suptitle: str = "STDAN ACC scenario comparison"):
     before = _load_summary(before_dir)
     after = _load_summary(after_dir)
     before_data = _series(_ego_steps(before))
@@ -181,9 +184,9 @@ def make_figure(before_dir: Path, after_dir: Path, output_path: Path):
         raise RuntimeError("Both summaries must contain ego policy steps.")
 
     fig, axes = plt.subplots(4, 2, figsize=(15, 11), constrained_layout=True)
-    _plot_run(fig, axes[:, 0], before_data, "Before: full-history gated STDAN", _target_log(before))
-    _plot_run(fig, axes[:, 1], after_data, "After: partial-history + CARLA waypoint occupancy", _target_log(after))
-    fig.suptitle("STDAN ACC scenario comparison", fontsize=14)
+    _plot_run(fig, axes[:, 0], before_data, before_label, _target_log(before))
+    _plot_run(fig, axes[:, 1], after_data, after_label, _target_log(after))
+    fig.suptitle(suptitle, fontsize=14)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
@@ -195,8 +198,12 @@ def main():
     parser.add_argument("--before", required=True)
     parser.add_argument("--after", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--before-label", default="Before: full-history gated STDAN")
+    parser.add_argument("--after-label", default="After: partial-history + CARLA waypoint occupancy")
+    parser.add_argument("--suptitle", default="STDAN ACC scenario comparison")
     args = parser.parse_args()
-    print(make_figure(Path(args.before), Path(args.after), Path(args.output)))
+    print(make_figure(Path(args.before), Path(args.after), Path(args.output),
+                args.before_label, args.after_label, args.suptitle))
 
 
 if __name__ == "__main__":
