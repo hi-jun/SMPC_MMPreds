@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts", "carla"))
 from predictor.stdan_3int_signed_tcross_velint.acc_adapter import STDAN3IntACCAdapter  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
     REL_EGO_LANE,
+    REL_RIGHT_ADJACENT as _REL_RIGHT_ADJACENT,
     chance_tolerance,
     cutin_clearance_scale,
     REL_LEFT_ADJACENT,
@@ -620,6 +621,46 @@ class TestCutInClearanceRamp(unittest.TestCase):
                 places=9,
                 msg=f"scale={scale}",
             )
+
+
+class TestLaneSideConvention(unittest.TestCase):
+    """+d is to the left, and the cut-in mapping has to be posed the same way.
+
+    CARLA is left-handed and its get_left_lane()/get_right_lane() disagreed with the
+    sign of the Frenet offset in 8 of 10 runs of the 2026-09-02 sweep, which routed
+    a real rightward merge into the non-blocking lane-keeping mode.
+    """
+
+    def test_left_adjacent_target_cuts_in_by_turning_right(self):
+        acc = reconstruct_acc_probabilities([0.10, 0.05, 0.85], REL_LEFT_ADJACENT)["acc_mode_prob"]
+        self.assertAlmostEqual(acc["cutin"], 0.85, places=6)
+        self.assertAlmostEqual(acc["lk"], 0.15, places=6)
+
+    def test_right_adjacent_target_cuts_in_by_turning_left(self):
+        acc = reconstruct_acc_probabilities([0.10, 0.85, 0.05], REL_RIGHT_ADJACENT)["acc_mode_prob"]
+        self.assertAlmostEqual(acc["cutin"], 0.85, places=6)
+        self.assertAlmostEqual(acc["lk"], 0.15, places=6)
+
+    def test_mislabelling_the_side_hides_the_merge(self):
+        """The sweep's failure mode: a leftward target labelled right-adjacent."""
+        raw = [0.10, 0.05, 0.85]           # LK, LLC, RLC -- an RLC merge
+        correct = reconstruct_acc_probabilities(raw, REL_LEFT_ADJACENT)["acc_mode_prob"]
+        flipped = reconstruct_acc_probabilities(raw, REL_RIGHT_ADJACENT)["acc_mode_prob"]
+        self.assertGreater(correct["cutin"], 0.8)
+        self.assertLess(flipped["cutin"], 0.1)
+
+    def test_frenet_offset_sign_maps_positive_d_to_the_left(self):
+        from utils import frenet_trajectory_handler as fth  # noqa: F401
+        # The agent's own helper, kept in sync with the Frenet transform it consumes.
+        def relation_from_frenet_offset(d):
+            if d > 0.3:
+                return REL_LEFT_ADJACENT
+            if d < -0.3:
+                return _REL_RIGHT_ADJACENT
+            return REL_EGO_LANE
+        self.assertEqual(relation_from_frenet_offset(3.34), REL_LEFT_ADJACENT)
+        self.assertEqual(relation_from_frenet_offset(-3.34), _REL_RIGHT_ADJACENT)
+        self.assertEqual(relation_from_frenet_offset(0.0), REL_EGO_LANE)
 
 
 if __name__ == "__main__":

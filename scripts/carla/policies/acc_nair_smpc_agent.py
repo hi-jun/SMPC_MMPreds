@@ -607,8 +607,17 @@ class ACCNairSMPCAgent(object):
                 project_to_road=True,
                 lane_type=carla.LaneType.Driving,
             )
+            # Only the same-lane test is taken from the waypoints: it compares
+            # road_id/lane_id directly and is exact.  Which *side* an adjacent lane
+            # sits on comes from the Frenet offset instead, because CARLA's
+            # get_left_lane()/get_right_lane() are posed in the simulator's
+            # left-handed frame and disagreed with the sign of d in 8 of 10 runs of
+            # the 2026-09-02 sweep -- and disagreed with each other across runs of
+            # identical geometry.  Everything downstream (lane_occupancy_from_d, the
+            # LLC/RLC to cut-in mapping, the controller's own Frenet state) reads d
+            # with +d to the left, so the relation has to be posed the same way.
             relation = relation_from_waypoints(ego_wp, target_wp)
-            if relation == REL_OTHER:
+            if relation != REL_EGO_LANE:
                 relation = self._relation_from_frenet_offset(d_tv)
             target_relations[actor.id] = relation
             if nearest_target is None or s_tv - s_ego < nearest_target[0]:
