@@ -186,6 +186,13 @@ def original_nair_acc_config(
 
     Source defaults are from ``scripts/carla/utils/mpc_utils.py::SMPC_MMPreds``:
     N=10, DT=0.2, V_MIN=0, V_MAX=15, A_MIN=-3, A_MAX=2,
+
+    ``v_max`` deviates from that source and is raised to 20.  The source value of
+    15 sits below the speeds the ACC scenarios ask for: an ego spawned at 16 m/s
+    leaves the desired speed permanently above the state bound, so the tracking
+    error never reaches zero and the cost keeps commanding acceleration.  In the
+    2026-09-02 sweep every ego-16 run collided under all three policies for this
+    reason, while every ego-14 run was collision free.
     A_DOT_MIN=-1.5, A_DOT_MAX=1.5, TIGHTENING=1.64,
     NOISE_STD=[0.1, .1, .01, .1, .01], Q=[5, 2.5, 10, 1], R=[10, 1000].
     """
@@ -195,7 +202,7 @@ def original_nair_acc_config(
         dt=dt,
         desired_speed=desired_speed,
         v_min=0.0,
-        v_max=15.0,
+        v_max=20.0,
         a_min=-3.0,
         a_max=2.0,
         jerk_limit=1.5,
