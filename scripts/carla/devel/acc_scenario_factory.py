@@ -15,6 +15,7 @@ SCENARIO_DIR = CARLA_SCRIPT_DIR / "scenarios"
 LANE_WIDTH_M = 3.5
 DEFAULT_LANE_SHIFT_RIGHT = 1
 DEFAULT_SPAWN_SETTLE_S = 1.5
+DEFAULT_CRUISE_WARMUP_S = 0.0
 
 
 RECOMMENDED_SWEEP_RANGES = {
@@ -58,7 +59,8 @@ def _base_carla_params(
         max_sim_time_s=12.0,
         spawn_settle_s=DEFAULT_SPAWN_SETTLE_S,
         spawn_settle_realtime=False,
-        timeout_period=30.0):
+        timeout_period=30.0,
+        cruise_warmup_s=DEFAULT_CRUISE_WARMUP_S):
     return {
         "map_str": "Town04",
         "weather_str": "ClearNoon",
@@ -68,6 +70,7 @@ def _base_carla_params(
         "max_sim_time_s": float(max_sim_time_s),
         "spawn_settle_s": float(spawn_settle_s),
         "spawn_settle_realtime": bool(spawn_settle_realtime),
+        "cruise_warmup_s": float(cruise_warmup_s),
     }
 
 
@@ -118,6 +121,21 @@ def _vehicle(
     return vehicle
 
 
+def _apply_cruise_warmup_offsets(vehicles, ego_speed, cruise_warmup_s):
+    # Every vehicle cruises at its own nominal speed during the warmup, so the
+    # configured gaps would be partly consumed before control begins. Push each
+    # vehicle forward by the distance the ego gains on it during the warmup:
+    # the ego shifts by zero and every gap is back at its configured value the
+    # moment the warmup ends. Goals are left alone -- they sit far beyond what
+    # anything reaches inside max_sim_time_s.
+    if cruise_warmup_s <= 0.0:
+        return vehicles
+    for vehicle in vehicles:
+        shift = (float(ego_speed) - float(vehicle["nominal_speed"])) * float(cruise_warmup_s)
+        vehicle["start_longitudinal_offset"] = float(vehicle["start_longitudinal_offset"]) + shift
+    return vehicles
+
+
 def _common_params(params):
     merged = {
         "ego_speed": 12.0,
@@ -132,10 +150,54 @@ def _common_params(params):
         "lane_shift_right": DEFAULT_LANE_SHIFT_RIGHT,
         "spawn_settle_s": DEFAULT_SPAWN_SETTLE_S,
         "spawn_settle_realtime": False,
+        "cruise_warmup_s": DEFAULT_CRUISE_WARMUP_S,
+        "approach_time_s": 0.0,
+        "ego_gap_at_trigger": 0.0,
         "carla_timeout_period": 30.0,
     }
     merged.update(params or {})
+    # Expressing the approach phase as a duration instead of a distance keeps it
+    # equal across ego speeds. The cut-in vehicle closes on its own lead the
+    # whole time, so a distance-based gap would leave that lead gap -- and the
+    # merge urgency it represents -- different for every ego speed.
+    approach_time_s = float(merged.get("approach_time_s") or 0.0)
+    if approach_time_s > 0.0:
+        closing = float(merged["ego_speed"]) - float(merged["target_speed"])
+        if closing <= 0.0:
+            raise ValueError(
+                "approach_time_s needs ego_speed > target_speed so the ego closes "
+                f"on the cut-in vehicle (got {merged['ego_speed']} vs {merged['target_speed']})")
+        merged["target_start_gap"] = float(merged["trigger_distance"]) + approach_time_s * closing
     return merged
+
+
+def _apply_lead_gap_trigger(p):
+    """Cut-in kinds: the cut-in vehicle starts its lane change when it is
+    ``trigger_distance`` behind the lead in its own lane (NGSIM's
+    lead-gap-at-manoeuvre-start), not when the ego gets close.  Tying the
+    trigger to the ego made a cautious ego delay the manoeuvre until the cut-in
+    vehicle ran into its own lead.  The moment of the manoeuvre then follows
+    from the lead geometry alone, and ``ego_gap_at_trigger`` places the ego so
+    that its gap to the cut-in vehicle at that moment is the calibrated value.
+    """
+    target_speed = float(p["target_speed"])
+    lead_speed = max(1.0, target_speed + float(p["target_lead_speed_delta"]))
+    closing_on_lead = target_speed - lead_speed
+    if closing_on_lead <= 0.0:
+        raise ValueError(
+            "lead-gap trigger needs target_speed > target lead speed "
+            f"(got {target_speed} vs {lead_speed})")
+    t_star = (float(p["target_lead_gap"]) - float(p["trigger_distance"])) / closing_on_lead
+    if t_star <= 0.0:
+        raise ValueError(
+            "target_lead_gap must exceed trigger_distance for the cut-in vehicle to "
+            f"reach the trigger (got {p['target_lead_gap']} vs {p['trigger_distance']})")
+    p["lane_change_trigger_mode"] = "lead_gap"
+    p["approach_time_s"] = t_star
+    ego_gap = float(p.get("ego_gap_at_trigger") or 0.0)
+    if ego_gap > 0.0:
+        p["target_start_gap"] = ego_gap + t_star * (float(p["ego_speed"]) - target_speed)
+    return p
 
 
 def _traffic_goal_s(p, start_s, speed):
@@ -183,6 +245,7 @@ def make_cutin_scenario(params=None, aggressive=False, ego_lead=False):
     right_lane_target_left_offset = _right_shifted_left_offset(
         p.get("right_lane_target_left_offset", -3.5), p)
 
+    _apply_lead_gap_trigger(p)
     vehicles = [
         _vehicle(
             "target_cutin",
@@ -193,6 +256,7 @@ def make_cutin_scenario(params=None, aggressive=False, ego_lead=False):
             p["target_speed"],
             "186, 0, 0",
             lane_change_trigger_distance=p["trigger_distance"],
+            lane_change_trigger_mode="lead_gap",
             lane_change_distance_same_lane=p["lane_change_distance_same_lane"],
             lane_change_distance_other_lane=120.0,
             lane_change_distance=p["lane_change_distance"],
@@ -268,9 +332,11 @@ def make_cutin_scenario(params=None, aggressive=False, ego_lead=False):
             p["spawn_settle_s"],
             p["spawn_settle_realtime"],
             p["carla_timeout_period"],
+            cruise_warmup_s=p["cruise_warmup_s"],
         ),
         "drone_viz_params": _base_drone_params(p["lane_shift_right"], p["lane_width"]),
-        "vehicle_params": vehicles,
+        "vehicle_params": _apply_cruise_warmup_offsets(
+            vehicles, p["ego_speed"], p["cruise_warmup_s"]),
     }
 
 
@@ -329,9 +395,11 @@ def make_cutout_scenario(params=None, with_lead=False):
             p["spawn_settle_s"],
             p["spawn_settle_realtime"],
             p["carla_timeout_period"],
+            cruise_warmup_s=p["cruise_warmup_s"],
         ),
         "drone_viz_params": _base_drone_params(p["lane_shift_right"], p["lane_width"]),
-        "vehicle_params": vehicles,
+        "vehicle_params": _apply_cruise_warmup_offsets(
+            vehicles, p["ego_speed"], p["cruise_warmup_s"]),
     }
 
 

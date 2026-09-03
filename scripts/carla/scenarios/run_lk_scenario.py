@@ -69,6 +69,7 @@ class CarlaParams:
     max_sim_time_s : float = 30.0
     spawn_settle_s : float = 0.0
     spawn_settle_realtime : bool = False
+    cruise_warmup_s : float = 0.0
 
 @dataclass(frozen=True)
 class DroneVizParams:
@@ -121,6 +122,7 @@ class VehicleParams:
 
     # Distance-triggered lane change parameters.
     lane_change_trigger_distance : float = 30.0
+    lane_change_trigger_mode : str = "ego_gap"   # or "lead_gap": distance to the lead in the vehicle's own lane
     lane_change_distance_same_lane : float = 5.0
     lane_change_distance_other_lane : float = 100.0
     lane_change_distance : float = 25.0
@@ -183,6 +185,7 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform):
                         N_modes=vehicle_params.num_modes,
                         nominal_speed_mps=vehicle_params.nominal_speed,
                         trigger_distance_m=vehicle_params.lane_change_trigger_distance,
+                        trigger_mode=vehicle_params.lane_change_trigger_mode,
                         distance_same_lane=vehicle_params.lane_change_distance_same_lane,
                         distance_other_lane=vehicle_params.lane_change_distance_other_lane,
                         distance_lane_change=vehicle_params.lane_change_distance)
@@ -343,6 +346,8 @@ class RunLKScenario:
         self.spawn_settle_s = max(0.0, float(carla_params.spawn_settle_s))
         self.spawn_settle_realtime = bool(carla_params.spawn_settle_realtime)
         self.spawn_settle_log = {}
+        self.cruise_warmup_s = max(0.0, float(carla_params.cruise_warmup_s))
+        self.cruise_warmup_log = {}
         try:
             self._setup_carla_world(carla_params)
             self._setup_vehicles(vehicle_params_list, carla_params)
@@ -412,6 +417,68 @@ class RunLKScenario:
             "sim_elapsed_s": float(0.0 if sim_start is None or sim_end is None else sim_end - sim_start),
         }
 
+    def _tick_vehicles_cruising(self, sync_mode, duration_s):
+        # Hold every vehicle at its nominal speed so the predictor history fills
+        # with steady-state motion. Without this the history window covers the
+        # spawn transient -- vehicles sag to ~55% of their set speed and
+        # accelerate back -- which STDAN reads as lane-change intent.
+        warmup_ticks = int(np.ceil(float(duration_s) * self.carla_fps))
+        history_updaters = [
+            getattr(policy, "_update_agent_history")
+            for policy in self.vehicle_policies
+            if callable(getattr(policy, "_update_agent_history", None))
+        ]
+        speeds = []
+        sim_start = None
+        sim_end = None
+        for _ in range(warmup_ticks):
+            # Re-apply the target velocity every tick. A single injection decays
+            # immediately because no throttle is being commanded yet.
+            for veh_actor, init_speed in zip(self.vehicle_actors, self.vehicle_init_speeds):
+                yaw_carla = veh_actor.get_transform().rotation.yaw
+                veh_actor.set_target_velocity(carla.Vector3D(
+                    x=init_speed*np.cos(np.radians(yaw_carla)),
+                    y=init_speed*np.sin(np.radians(yaw_carla)),
+                    z=0.))
+            # Drive the low-level controllers too. They low-pass the throttle
+            # against a control_prev that starts at zero, so handing over from
+            # set_target_velocity with a cold filter drops the car ~6 m/s before
+            # the throttle catches up -- which would eat several seconds of the
+            # approach phase. Running them here warms the filter and the
+            # drivetrain while set_target_velocity still pins the speed.
+            for vehicle_actor, policy, nominal in zip(
+                    self.vehicle_actors, self.vehicle_policies, self.vehicle_init_speeds):
+                low_level = getattr(policy, "_low_level_control", None)
+                if low_level is None:
+                    continue
+                velocity = vehicle_actor.get_velocity()
+                speed = float(np.sqrt(velocity.x ** 2 + velocity.y ** 2))
+                vehicle_actor.apply_control(
+                    low_level.update(speed, 0.0, float(nominal), 0.0))
+            sync_data = sync_mode.tick(timeout=self.timeout)
+            snap = sync_data[0]
+            elapsed_seconds = getattr(snap, "elapsed_seconds", snap.timestamp.elapsed_seconds)
+            if sim_start is None:
+                sim_start = elapsed_seconds
+            sim_end = elapsed_seconds
+            # Fill the prediction histories without running any policy, so the
+            # lane-change trigger stays armed and nothing is logged yet.
+            if self.use_prediction_model:
+                self.agent_history.update(snap, self.world)
+            for update_history in history_updaters:
+                update_history()
+            ego_vel = self.vehicle_actors[self.ego_vehicle_idx].get_velocity()
+            speeds.append(float(np.linalg.norm([ego_vel.x, ego_vel.y])))
+        return {
+            "requested_s": float(duration_s),
+            "ticks": int(warmup_ticks),
+            "sim_elapsed_s": float(0.0 if sim_start is None or sim_end is None else sim_end - sim_start),
+            "history_updaters": len(history_updaters),
+            "ego_speed_min": float(min(speeds)) if speeds else None,
+            "ego_speed_max": float(max(speeds)) if speeds else None,
+            "ego_speed_final": float(speeds[-1]) if speeds else None,
+        }
+
     def run_scenario(self):
         # Return flag to indicate if this ran to completion.
         ran_successfully = False
@@ -456,6 +523,14 @@ class RunLKScenario:
 
                 for _ in range(1):
                     sync_mode.tick(timeout=self.timeout)
+
+                # Steady-state cruise so the predictor history holds real motion
+                # rather than the spawn transient before control/logging begins.
+                if self.cruise_warmup_s > 0.0:
+                    self.cruise_warmup_log = self._tick_vehicles_cruising(
+                        sync_mode,
+                        self.cruise_warmup_s,
+                    )
 
                 # Loop until all vehicles have reached their goal or we've exceeded self.max_iters.
                 for _ in range(self.max_iters):
@@ -568,6 +643,7 @@ class RunLKScenario:
                         self.results_dict[act_key]["policy_log"] = policy.get_cut_in_log()
                 self.results_dict["_prediction_log"] = self.prediction_log
                 self.results_dict["_spawn_settle_log"] = self.spawn_settle_log
+                self.results_dict["_cruise_warmup_log"] = self.cruise_warmup_log
                 self.results_dict["_collision_log"] = self.collision_events
                 self.results_dict["_collision_count"] = len(self.collision_events)
                 self.results_dict["_collision_sensor_errors"] = self.collision_sensor_errors

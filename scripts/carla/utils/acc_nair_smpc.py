@@ -669,13 +669,24 @@ class OldACCReferenceAdapter:
                 lead_v = lead_prediction.means[mode, step, 1]
                 safe_gap = self.config.vehicle_length + self.config.d0
                 safe_gap += self.config.time_headway * planned_v[step]
+                # Relax the reference by the same probability-driven factor the
+                # collision constraint uses. Leaving it out makes the tracking
+                # cost demand the full standoff while the constraint allows a
+                # scaled one, so the ego brakes harder than the risk warrants.
+                safe_gap *= float(lead_prediction.clearance_scale[mode, step])
                 target_s = lead_s - safe_gap
 
                 if target_s < s_ref[mode, step]:
                     s_ref[mode, step] = target_s
 
-                distance_to_lead = max(lead_s - s_ego, 1.0e-6)
-                usable_gap = max(target_s - s_ego, 0.0)
+                # Compare against where the ego is predicted to be at this step,
+                # not where it is now. Measuring a step-k gap from the current
+                # position inflates it by everything the ego covers in between,
+                # which keeps the blend near 1 and leaves v_ref close to the
+                # desired speed even where the lead is predicted to be in lane.
+                ego_s_at_step = base_s_ref[step]
+                distance_to_lead = max(lead_s - ego_s_at_step, 1.0e-6)
+                usable_gap = max(target_s - ego_s_at_step, 0.0)
                 blend = np.clip(usable_gap / distance_to_lead, 0.0, 1.0)
                 lead_limited_speed = blend * v_ref[mode, step] + (1.0 - blend) * lead_v
                 v_ref[mode, step] = min(v_ref[mode, step], lead_limited_speed)

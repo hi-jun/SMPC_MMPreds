@@ -30,7 +30,8 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
             trigger_distance_m=30.0,
             distance_same_lane=5.0,
             distance_other_lane=100.0,
-            distance_lane_change=25.0):
+            distance_lane_change=25.0,
+            trigger_mode="ego_gap"):
         super().__init__(
             vehicle,
             goal_location,
@@ -40,6 +41,15 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
             N_modes=N_modes)
 
         self.trigger_distance_m = trigger_distance_m
+        # "ego_gap": start when the target-lane follower (ego) is within
+        # trigger_distance_m behind.  "lead_gap": start when this vehicle is
+        # within trigger_distance_m of the lead in its own lane -- the natural
+        # cut-in motive, and independent of what the ego does, so every ego
+        # policy meets the same manoeuvre.
+        if trigger_mode not in ("ego_gap", "lead_gap"):
+            raise ValueError(f"unknown trigger_mode {trigger_mode!r}")
+        self.trigger_mode = trigger_mode
+        self.ego_gap_at_start = None
         self.distance_same_lane = distance_same_lane
         self.distance_other_lane = distance_other_lane
         self.distance_lane_change = distance_lane_change
@@ -59,9 +69,15 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
     def run_step(self, pred_dict):
         if not self.lane_change_started:
             ego_actor = self._find_ego_actor()
-            trigger_distance = self._longitudinal_trigger_distance(self.vehicle, ego_actor)
+            ego_gap = self._longitudinal_trigger_distance(self.vehicle, ego_actor)
+            if self.trigger_mode == "lead_gap":
+                lead = self._find_same_lane_front_lead()
+                trigger_distance = None if lead is None else float(lead[1])
+            else:
+                trigger_distance = ego_gap
             if trigger_distance is not None and trigger_distance <= self.trigger_distance_m:
                 self.trigger_distance_at_start = trigger_distance
+                self.ego_gap_at_start = ego_gap
                 self.trigger_time_s = self._get_elapsed_seconds()
                 self._switch_to_lane_change_route(ego_actor)
                 self.lane_change_started = True
@@ -73,7 +89,9 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
     def get_cut_in_log(self):
         return {
             "trigger_time_s": self.trigger_time_s,
+            "trigger_mode": self.trigger_mode,
             "trigger_distance_at_start": self.trigger_distance_at_start,
+            "ego_gap_at_start": self.ego_gap_at_start,
             "ego_lane_id": self.ego_lane_id,
             "target_initial_lane_id": self.target_initial_lane_id,
             "target_final_lane_id": self.target_final_lane_id,
@@ -149,6 +167,17 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
         forward_x = math.cos(target_yaw)
         forward_y = math.sin(target_yaw)
         best = None
+        # While the lane change is under way the vehicle is committed to the
+        # target lane: it must not keep pacing the lead it is leaving behind
+        # (it would brake to that lead's speed mid-manoeuvre), and it may still
+        # be lateral of both lane centres, so the lead search moves to the
+        # target lane and drops the lateral-offset test.
+        # Once started, the search stays on the target lane for good: the
+        # waypoint lookup flickers between lanes around the boundary, and a
+        # single tick back on the old lane would re-cap on the lead being passed.
+        target_lane_id = getattr(self, "ego_lane_id", None) if self.lane_change_started else None
+        lane_id_ref = target_waypoint.lane_id if target_lane_id is None else target_lane_id
+        changing = target_lane_id is not None and not self.lane_change_completed
 
         for actor in self.world.get_actors().filter("vehicle*"):
             if actor.id == self.vehicle.id:
@@ -160,7 +189,8 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
                 project_to_road=True,
                 lane_type=carla.LaneType.Driving)
             if not self._is_same_lane_front_candidate(
-                    target_waypoint, actor_waypoint):
+                    target_waypoint, actor_waypoint,
+                    lane_id=lane_id_ref, check_lateral=not changing):
                 continue
 
             dx = actor_location.x - target_location.x
@@ -179,10 +209,12 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
         return best
 
     @staticmethod
-    def _is_same_lane_front_candidate(target_waypoint, actor_waypoint):
+    def _is_same_lane_front_candidate(target_waypoint, actor_waypoint,
+                                      lane_id=None, check_lateral=True):
         if target_waypoint is None or actor_waypoint is None:
             return False
-        if target_waypoint.lane_id != actor_waypoint.lane_id:
+        reference_lane_id = target_waypoint.lane_id if lane_id is None else lane_id
+        if reference_lane_id != actor_waypoint.lane_id:
             return False
 
         yaw_diff = DistanceTriggeredLaneChangeAgent._angle_diff_deg(
@@ -191,6 +223,8 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
         if abs(yaw_diff) > SPEED_CAP_YAW_THRESHOLD_DEG:
             return False
 
+        if not check_lateral:
+            return True
         lateral_offset = DistanceTriggeredLaneChangeAgent._lateral_offset_to_waypoint(
             actor_waypoint, target_waypoint)
         return abs(lateral_offset) <= SPEED_CAP_LATERAL_THRESHOLD_M

@@ -419,6 +419,11 @@ class STDAN3IntACCAdapter:
         model_yaw: Optional[float] = None,
         cutin_probability_threshold: float = 0.0,
         cutin_clearance_ramp_ref: float = 0.0,
+        cutin_clearance_tlc_ref: float = 0.0,
+        gap_recovery_elapsed: Optional[Dict[int, float]] = None,
+        gap_recovery_s: float = 0.0,
+        gap_recovery_floor: float = 0.6,
+        gap_recovery_start_scale: Optional[Dict[int, float]] = None,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -478,6 +483,15 @@ class STDAN3IntACCAdapter:
                     lane_membership_source=lane_membership_source,
                     cutin_probability_threshold=cutin_probability_threshold,
                     cutin_clearance_ramp_ref=cutin_clearance_ramp_ref,
+                    cutin_clearance_tlc_ref=cutin_clearance_tlc_ref,
+                    gap_recovery_elapsed_s=(
+                        None if gap_recovery_elapsed is None
+                        else gap_recovery_elapsed.get(target_id)),
+                    gap_recovery_s=gap_recovery_s,
+                    gap_recovery_floor=gap_recovery_floor,
+                    gap_recovery_start_scale=(
+                        None if gap_recovery_start_scale is None
+                        else gap_recovery_start_scale.get(target_id)),
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

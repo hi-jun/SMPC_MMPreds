@@ -286,6 +286,12 @@ def _build_command(
         str(args.max_runs_per_group),
         "--spawn-settle-s",
         str(args.spawn_settle_s),
+        "--cruise-warmup-s",
+        str(args.cruise_warmup_s),
+        "--approach-time-s",
+        str(args.approach_time_s),
+        "--ego-gap-at-trigger",
+        str(args.ego_gap_at_trigger),
         "--max-sim-time",
         str(args.max_sim_time),
         "--ego-horizons",
@@ -475,6 +481,9 @@ def main() -> int:
     parser.add_argument("--carla-timeout-period", type=float, default=30.0)
     parser.add_argument("--server-cleanup-s", type=float, default=2.0)
     parser.add_argument("--spawn-settle-s", type=float, default=6.0)
+    parser.add_argument("--cruise-warmup-s", type=float, default=0.0)
+    parser.add_argument("--approach-time-s", type=float, default=0.0)
+    parser.add_argument("--ego-gap-at-trigger", type=float, default=22.0)
     parser.add_argument("--max-sim-time", type=float, default=25.0)
     parser.add_argument("--ego-horizon", type=int, default=15)
     parser.add_argument("--max-runs-per-group", type=int, default=0,

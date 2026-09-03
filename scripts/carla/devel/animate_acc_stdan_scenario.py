@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pickle
 from pathlib import Path
 from typing import Optional
@@ -369,12 +370,16 @@ def _series(
         "accel_cmd": [],
         "gap": [],
         "safe_dist": [],
+        "safe_dist_relaxed": [],
+        "feasible": [],
+        "chance_margin": [],
         "LK": [],
         "LLC": [],
         "RLC": [],
         "acc_lk": [],
         "acc_cutin": [],
         "acc_cutout": [],
+        "cutin_predicted": [],
     }
     for step in steps:
         time_s = _float(step.get("time_s"))
@@ -395,15 +400,41 @@ def _series(
         values["ego_v"].append(ego_v)
         values["target_s"].append(target_s)
         values["target_d"].append(_float(step.get("target_d")))
+        # Only a vehicle actually in the ego lane counts as the lead; before the
+        # cut-in vehicle crosses, the logged target is the next-lane car and its
+        # speed must not be drawn as a lead's.
         values["target_v"].append(
-            _float(effective_lead.get("speed")) if effective_lead else _float(step.get("target_v"))
+            _float(effective_lead.get("speed")) if effective_lead else float("nan")
         )
+        # The predictor has the cut-in vehicle entering the ego lane within the
+        # horizon (its predicted trajectory, whose length is the horizon), while
+        # it is still in the next lane.
+        occupancy = target.get("ego_lane_occupancy_mask") or [] if target else []
+        values["cutin_predicted"].append(bool(
+            target
+            and target.get("relation_to_ego_lane") != "ego_lane"
+            and _float(target.get("ego_lane_start_idx"), default=np.inf) < max(len(occupancy), 1)
+        ))
         values["accel_cmd"].append(_float(step.get("accel_cmd")))
         values["gap"].append(
             _gap_for_plot(0.0, effective_lead.get("gap")) if effective_lead
             else _gap_for_plot(ego_s, target_s)
         )
         values["safe_dist"].append(_safe_center_distance(ego_v))
+        # Requirement the constraint holds the ego to right now, once the
+        # gap-recovery relaxation is active; NaN while the standoff is unrelaxed.
+        scale = step.get("clearance_scale_now")
+        values["safe_dist_relaxed"].append(
+            _safe_center_distance(ego_v) * float(scale)
+            if isinstance(scale, (int, float)) and math.isfinite(float(scale)) and float(scale) < 0.999
+            else float("nan")
+        )
+        values["feasible"].append(bool(step.get("feasible")))
+        margin = step.get("chance_margin_min")
+        values["chance_margin"].append(
+            float(margin) if isinstance(margin, (int, float)) and math.isfinite(float(margin))
+            else float("nan")
+        )
         for name in ("LK", "LLC", "RLC"):
             values[name].append(_float(raw.get(name)))
         for name in ("lk", "cutin", "cutout"):
@@ -573,6 +604,20 @@ def _actual_cutin_time(actors: dict[str, dict], target_log: dict) -> float | Non
     trigger_time = _float(target_log.get("trigger_time_s"))
     return trigger_time if np.isfinite(trigger_time) else None
 
+
+def _shade_spans(ax, times, mask, color, label, alpha=0.10):
+    """Shade every contiguous span where ``mask`` is true, labelled once."""
+    start = None
+    labelled = False
+    for idx, on in enumerate(list(mask) + [False]):
+        if on and start is None:
+            start = idx
+        elif not on and start is not None:
+            ax.axvspan(times[start], times[min(idx, len(times) - 1)],
+                       color=color, alpha=alpha, zorder=0,
+                       label=None if labelled else label)
+            labelled = True
+            start = None
 
 def _draw_cutin_time(ax, cutin_time_s: float | None, label: str | None = None):
     if cutin_time_s is None or not np.isfinite(float(cutin_time_s)):
@@ -765,9 +810,10 @@ def make_animation(
     ax_prob_right = fig.add_subplot(gs[2, 0])
     ax_ctrl = fig.add_subplot(gs[1:, 1:])
     ax_ctrl_2 = ax_ctrl.twinx()
+    ax_ctrl_3 = ax_ctrl.twinx()
     fig.subplots_adjust(
         left=0.07,
-        right=0.98,
+        right=0.93,
         top=0.94,
         bottom=0.07,
         wspace=0.32,
@@ -1009,8 +1055,11 @@ def make_animation(
 
         ax_ctrl.clear()
         ax_ctrl_2.clear()
+        ax_ctrl_3.clear()
+        # clear() resets spine positions, so the third axis is re-offset every frame.
+        ax_ctrl_3.spines["right"].set_position(("axes", 1.09))
         ax_ctrl.plot(data["time_s"], data["ego_v"], color="#2ca02c", label="ego v")
-        ax_ctrl.plot(data["time_s"], data["target_v"], color="#d62728", label="lead v")
+        ax_ctrl.plot(data["time_s"], data["target_v"], color="#d62728", label="lead v (in lane)")
         ax_ctrl.plot(data["time_s"], data["gap"], color="#1f77b4", label="gap")
         ax_ctrl.plot(
             data["time_s"],
@@ -1020,6 +1069,36 @@ def make_animation(
             linewidth=1.8,
             label="safe dist",
         )
+        ax_ctrl.plot(
+            data["time_s"],
+            data["safe_dist_relaxed"],
+            color="#111111",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.7,
+            label="safe dist (relaxed)",
+        )
+        # The margin is a distance, so it shares the metre axis with the gap
+        # and the requirement it is measured against.
+        ax_ctrl.plot(
+            data["time_s"],
+            data["chance_margin"],
+            color="#d62728",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.85,
+            label="chance margin",
+        )
+        ax_ctrl.axhline(0.0, color="#d62728", linewidth=0.6, alpha=0.4)
+        # Shade the spans the solver had to slack the safety constraint on, so
+        # an infeasible stretch is visible next to the speeds that caused it.
+        _shade_spans(ax_ctrl, data["time_s"], ~np.asarray(data["feasible"], dtype=bool),
+                     "#d62728", "infeasible")
+        # Green while the predictor has the cut-in vehicle entering the ego
+        # lane within the horizon: the controller is already planning against
+        # it although it has not crossed yet.
+        _shade_spans(ax_ctrl, data["time_s"], np.asarray(data["cutin_predicted"], dtype=bool),
+                     "#2ca02c", "cut-in predicted")
         _draw_cutin_time(ax_ctrl, cutin_time_s, label="actual cut-in")
         ax_ctrl.axvline(time_s, color="0.2", linewidth=1.0)
         ax_ctrl.set_xlabel("time [s]")
@@ -1027,9 +1106,15 @@ def make_animation(
         ax_ctrl.grid(True, alpha=0.2)
         ax_ctrl_2.plot(data["time_s"], data["accel_cmd"], color="#9467bd", label="accel cmd", alpha=0.9)
         ax_ctrl_2.set_ylabel("accel cmd [m/s^2]")
+        ax_ctrl_3.plot(data["time_s"], data["acc_cutin"], color="#111111", linewidth=1.0,
+                       alpha=0.75, label="cut-in prob")
+        ax_ctrl_3.set_ylim(-0.02, 1.02)
+        ax_ctrl_3.set_ylabel("cut-in prob")
         lines, labels = ax_ctrl.get_legend_handles_labels()
         lines2, labels2 = ax_ctrl_2.get_legend_handles_labels()
-        ax_ctrl.legend(lines + lines2, labels + labels2, loc="upper right", fontsize=8)
+        lines3, labels3 = ax_ctrl_3.get_legend_handles_labels()
+        ax_ctrl.legend(lines + lines2 + lines3, labels + labels2 + labels3,
+                       loc="upper right", fontsize=8)
 
     animation = FuncAnimation(fig, update, frames=len(frames), interval=1000.0 / fps)
     output_path.parent.mkdir(parents=True, exist_ok=True)

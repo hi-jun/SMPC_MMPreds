@@ -127,6 +127,12 @@ def analyze_summary(summary):
         actual_accel = _actual_accel_from_speed_steps(steps)
     if not actual_jerk:
         actual_jerk = _jerk_from_accel_steps(steps, actual_accel)
+    # The first finite difference straddles the spawn transient, so its
+    # acceleration and jerk are physically meaningless. Every run in the
+    # 2026-09-02 sweep peaked on that sample (one hit 5324 m/s^3 against a
+    # 78 m/s^3 99th percentile), so drop it before taking any statistic.
+    actual_accel = actual_accel[1:]
+    actual_jerk = actual_jerk[1:]
     actual_accel_abs = [abs(value) for value in actual_accel]
     actual_jerk_abs = [abs(value) for value in actual_jerk]
 
@@ -173,10 +179,25 @@ def analyze_summary(summary):
         "actual_jerk_max": max(actual_jerk) if actual_jerk else None,
         "actual_jerk_abs_mean": sum(actual_jerk_abs) / len(actual_jerk_abs) if actual_jerk_abs else None,
         "actual_jerk_abs_max": max(actual_jerk_abs) if actual_jerk_abs else None,
+        "actual_jerk_abs_p99": _percentile(actual_jerk_abs, 99.0),
         "min_gap": min(min_gap) if min_gap else None,
         "target_d_min": min(target_d) if target_d else None,
         "target_d_max": max(target_d) if target_d else None,
     }
+
+
+def _percentile(values, pct):
+    # Differentiating CARLA's 20 Hz speed signal twice leaves the peak dominated
+    # by numerical noise, so report a robust upper quantile alongside the max.
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (pct / 100.0) * (len(ordered) - 1)
+    low = int(math.floor(position))
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
 def _derivative_from_step_key(steps, key):

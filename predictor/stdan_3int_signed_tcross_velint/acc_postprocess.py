@@ -29,7 +29,7 @@ class ACCModePrediction:
     raw_mode_indices: Sequence[int]
     ego_lane_membership_split_step: int
     lead_covariance: Optional[np.ndarray] = None
-    clearance_scale: float = 1.0
+    clearance_scale: float | np.ndarray = 1.0  # per-step array once gap recovery applies
 
     @property
     def branch_step(self) -> int:
@@ -317,6 +317,92 @@ def ramp_cutin_clearance(
     return scales
 
 
+def tlc_cutin_clearance(
+    mode_predictions: Sequence[ACCModePrediction],
+    reference_tlc_s: float,
+    dt: float,
+) -> Dict[str, float]:
+    """Scale a cut-in mode's standoff by how soon it reaches the ego lane.
+
+    A geometric alternative to ``ramp_cutin_clearance``: instead of asking how
+    much we believe the cut-in, it asks how long until the vehicle is actually
+    in the way.  Time-to-lane-crossing comes from the predicted lane membership,
+    so it moves smoothly with the trajectory rather than jumping with the
+    classifier -- the ACC standoff stops inheriting the predictor's chatter.
+
+    A mode reaching the ego lane now keeps its full standoff; one still
+    ``reference_tlc_s`` away reserves nothing.  Scoped to ``cutin`` modes for the
+    same reason ``ramp_cutin_clearance`` is.
+    """
+    if float(reference_tlc_s) <= 0.0:
+        return {}
+    scales = {}
+    for mode in mode_predictions:
+        if mode.mode_name != "cutin":
+            continue
+        active = np.asarray(mode.active_mask, dtype=bool).ravel()
+        if not active.any():
+            mode.clearance_scale = 0.0
+        else:
+            tlc = float(np.argmax(active)) * float(dt)
+            mode.clearance_scale = float(
+                np.clip(1.0 - tlc / float(reference_tlc_s), 0.0, 1.0))
+        scales[mode.mode_name] = mode.clearance_scale
+    return scales
+
+
+def gap_reestablish_clearance(
+    mode_predictions: Sequence[ACCModePrediction],
+    elapsed_s: Optional[float],
+    recover_s: float,
+    floor_scale: float = 0.6,
+    dt: float = 0.0,
+    start_scale: Optional[float] = None,
+) -> Dict[str, List[float]]:
+    """Ease the standoff back in after a vehicle has just entered the ego lane.
+
+    ``start_scale`` is the gap the vehicle actually had, as a fraction of the
+    full standoff, when its recovery clock started: the relaxation accepts that
+    gap and no more, so a vehicle arriving outside the standoff is not relaxed
+    at all, and one arriving at 90% starts at 90%.  ``floor_scale`` is the
+    shortest gap ever accepted.  Without ``start_scale`` the old fixed floor
+    is used.
+
+    A completed cut-in is a lead like any other, but demanding the full time gap
+    the instant it arrives asks for a deceleration the geometry cannot deliver --
+    the vehicle merges well inside ``d0 + tau*v`` by construction.  Production ACC
+    accepts the short gap and re-establishes it over a few seconds instead, which
+    also avoids braking hard for a merger that promptly accelerates away.
+
+    The caller decides *which* vehicle is recovering -- it passes an elapsed time
+    only for one whose lane entry is imminent or done -- so every active mode of
+    that vehicle is in scope. Requiring occupancy at step 0 instead would delay
+    the relaxation until the merge is complete, which is after the braking.
+    """
+    if float(recover_s) <= 0.0 or elapsed_s is None:
+        return {}
+    initial = float(floor_scale)
+    if start_scale is not None:
+        initial = float(np.clip(float(start_scale), float(floor_scale), 1.0))
+    scales = {}
+    for mode in mode_predictions:
+        active = np.asarray(mode.active_mask, dtype=bool).ravel()
+        if not active.any():
+            continue
+        # The standoff keeps growing while the ego executes the plan, so each
+        # horizon step gets the scale that will hold when the ego reaches it.
+        # One current-time scale for the whole horizon lets the plan
+        # accelerate into a requirement that is larger by the horizon end.
+        elapsed_at_step = float(elapsed_s) + float(dt) * np.arange(active.size)
+        frac = np.clip(elapsed_at_step / float(recover_s), 0.0, 1.0)
+        scale = initial + (1.0 - initial) * frac
+        mode.clearance_scale = np.minimum(
+            np.asarray(mode.clearance_scale, dtype=float), scale
+        )
+        scales[mode.mode_name] = mode.clearance_scale.tolist()
+    return scales
+
+
 def gate_unlikely_cutin_modes(
     mode_predictions: Sequence[ACCModePrediction],
     threshold: float,
@@ -358,6 +444,11 @@ def process_vehicle_prediction(
     lane_membership_source: str = "frenet_d_threshold",
     cutin_probability_threshold: float = 0.0,
     cutin_clearance_ramp_ref: float = 0.0,
+    cutin_clearance_tlc_ref: float = 0.0,
+    gap_recovery_elapsed_s: Optional[float] = None,
+    gap_recovery_s: float = 0.0,
+    gap_recovery_floor: float = 0.6,
+    gap_recovery_start_scale: Optional[float] = None,
 ) -> ACCProcessedPrediction:
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     raw_map = {name: float(raw_probs[idx]) for idx, name in enumerate(INTENTION_NAMES)}
@@ -452,6 +543,13 @@ def process_vehicle_prediction(
     cutin_clearance_scales = ramp_cutin_clearance(
         mode_predictions, cutin_clearance_ramp_ref
     )
+    tlc_clearance_scales = tlc_cutin_clearance(
+        mode_predictions, cutin_clearance_tlc_ref, dt
+    )
+    gap_recovery_scales = gap_reestablish_clearance(
+        mode_predictions, gap_recovery_elapsed_s, gap_recovery_s, gap_recovery_floor, dt,
+        start_scale=gap_recovery_start_scale,
+    )
 
     start_idx, end_idx = ego_lane_interval(np.any(memberships, axis=0))
     return ACCProcessedPrediction(
@@ -474,6 +572,12 @@ def process_vehicle_prediction(
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),
             "cutin_clearance_scales": cutin_clearance_scales,
+            "cutin_clearance_tlc_ref": float(cutin_clearance_tlc_ref),
+            "tlc_clearance_scales": tlc_clearance_scales,
+            "gap_recovery_s": float(gap_recovery_s),
+            "gap_recovery_elapsed_s": gap_recovery_elapsed_s,
+            "gap_recovery_start_scale": gap_recovery_start_scale,
+            "gap_recovery_scales": gap_recovery_scales,
         },
         raw_prediction=raw_prediction,
     )
@@ -556,7 +660,8 @@ def build_multitarget_lead_prediction(
             else:
                 covariances[scenario_out_idx, step] = base_cov
             active_mask[scenario_out_idx, step] = True
-            clearance_scale[scenario_out_idx, step] = float(selected.clearance_scale)
+            scale = np.asarray(selected.clearance_scale, dtype=float)
+            clearance_scale[scenario_out_idx, step] = float(scale[step] if scale.ndim else scale)
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
             effective_lead_keys.append((int(selected.vehicle_id), str(selected.mode_name)))

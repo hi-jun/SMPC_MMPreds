@@ -62,6 +62,9 @@ def _param_grid(args):
         "ego_horizon": _parse_csv(args.ego_horizons, int),
         "spawn_settle_s": [args.spawn_settle_s],
         "spawn_settle_realtime": [args.spawn_settle_realtime],
+        "cruise_warmup_s": [args.cruise_warmup_s],
+        "approach_time_s": [args.approach_time_s],
+        "ego_gap_at_trigger": [args.ego_gap_at_trigger],
         "carla_timeout_period": [args.carla_timeout_period],
         "lane_shift_right": [args.lane_shift_right],
     }
@@ -351,12 +354,22 @@ def main():
     parser.add_argument("--spawn-settle-s", type=float, default=1.5)
     parser.add_argument("--spawn-settle-realtime", dest="spawn_settle_realtime", action="store_true", default=False)
     parser.add_argument("--no-spawn-settle-realtime", dest="spawn_settle_realtime", action="store_false")
+    parser.add_argument("--cruise-warmup-s", type=float, default=0.0)
+    parser.add_argument("--approach-time-s", type=float, default=0.0,
+                        help="When > 0, derive target_start_gap so the ego needs this "
+                             "many seconds to close from spawn to trigger_distance.")
+    parser.add_argument("--ego-gap-at-trigger", type=float, default=22.0,
+                        help="Cut-in kinds: ego-to-cut-in-vehicle gap [m] at the moment the "
+                             "cut-in vehicle starts its lane change; sets target_start_gap.")
     parser.add_argument("--lane-shift-right", type=int, default=1)
 
     parser.add_argument("--ego-speeds", default="12")
     parser.add_argument("--target-speeds", default="10")
     parser.add_argument("--target-start-gaps", default="35,40")
-    parser.add_argument("--trigger-distances", default="25")
+    parser.add_argument("--trigger-distances", default="17",
+                        help="Cut-in kinds: gap [m] from the cut-in vehicle to the lead in its own "
+                             "lane at which it starts the lane change (NGSIM: 12.7/17.0/23.8/34.2). "
+                             "Cut-out kinds: ego-to-vehicle gap.")
     parser.add_argument("--same-lane-distances", default=None)
     parser.add_argument("--lane-change-distances", default=None)
     parser.add_argument("--target-lead-gaps", default="24")

@@ -33,6 +33,7 @@ from utils.acc_nair_smpc import (
     VARIANT_PROPOSED,
     make_constant_accel_lead_prediction,
     original_nair_acc_config,
+    required_standoff,
     safety_function,
 )
 from utils.low_level_control import LowLevelControl
@@ -55,6 +56,11 @@ from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 class ACCNairSMPCAgent(object):
     """CARLA adapter for the 1D ACC Nair-style multimodal SMPC controller."""
 
+    # Predicted seconds-to-ego-lane at which the gap re-establishment clock starts.
+    # Waiting for the lane assignment to flip is too late: the braking is over by
+    # then. One second ahead lands the relaxation on the deceleration itself.
+    GAP_RECOVERY_ONSET_TLC_S = 1.0
+
     def __init__(
             self,
             vehicle,
@@ -76,6 +82,24 @@ class ACCNairSMPCAgent(object):
         self.best_mode_only = self._parse_best_mode_only(smpc_config)
         self.cutin_probability_threshold = self._parse_cutin_probability_threshold(smpc_config)
         self.cutin_clearance_ramp_ref = self._parse_cutin_clearance_ramp_ref(smpc_config)
+        self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
+        self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
+        # Drive the ego as the exact double integrator the MPC models.  The
+        # throttle/brake maps in LowLevelControl realise about 1.5x the
+        # commanded acceleration plus 0.9 m/s^2 at zero command on this
+        # vehicle, which turns the following loop into a limit cycle; the
+        # ``carla_actuator`` token keeps that path for comparison.
+        self.ideal_actuator = "carla_actuator" not in self.smpc_config
+        self._ideal_v_set_prev = None
+        # vehicle id -> time the gap re-establishment clock started for it
+        self._ego_lane_entry_time = {}
+        # vehicle id -> gap / full standoff when that clock started; the
+        # relaxation accepts the gap the vehicle actually arrived with
+        self._gap_recovery_start_scale = {}
+        # vehicle id -> predicted seconds until it reaches the ego lane, from the
+        # previous cycle.  Read one step late because the recovery scale has to be
+        # decided before the predictor that produces it runs.
+        self._predicted_lane_entry_s = {}
         self.enable_wandb_logging = os.getenv("ACC_NAIR_WANDB", "0") == "1"
         self._wandb = None
         self.goal_location = goal_location
@@ -448,6 +472,7 @@ class ACCNairSMPCAgent(object):
                     else int(solution.first_policy_split_step)
                 ),
                 "chance_margin_min": float(solution.chance_margin_min),
+                "clearance_scale_now": self._clearance_scale_now(prediction_bundle["prediction"]),
                 "predictor_time": prediction_bundle.get("debug", {}).get("predictor_time"),
                 "predictor_type": self.predictor_type,
                 "ego_route_debug": self._ego_route_debug,
@@ -462,7 +487,29 @@ class ACCNairSMPCAgent(object):
 
         self._remember_accel_cmd(time_s, action)
         control = self._low_level_control.update(speed, action, v_des, df_des)
+        if self.ideal_actuator:
+            # The throttle/brake stay applied so the wheels keep pace with the
+            # chassis; the velocity override just pins the speed each tick.
+            self._apply_ideal_longitudinal(speed, action, command_dt)
         return control, z0, u0, is_feasible, solve_time
+
+    def _apply_ideal_longitudinal(self, speed, action, command_dt):
+        """Integrate the accel command and pin the speed along the heading.
+
+        ``set_target_velocity`` is applied before the physics step, which then
+        moves the speed by whatever the drivetrain and drag do within the tick.
+        The difference between the speed set last tick and the speed measured
+        now is that per-tick physics effect; it is added back in advance so
+        the measured speed follows the integrated command.
+        """
+        eaten = 0.0
+        if self._ideal_v_set_prev is not None:
+            eaten = float(self._ideal_v_set_prev) - float(speed)
+        v_next = max(0.0, float(speed) + float(action) * float(command_dt) + eaten)
+        yaw = np.radians(self.vehicle.get_transform().rotation.yaw)
+        self.vehicle.set_target_velocity(carla.Vector3D(
+            x=v_next * np.cos(yaw), y=v_next * np.sin(yaw), z=0.0))
+        self._ideal_v_set_prev = v_next
 
     def get_cut_in_log(self):
         return {
@@ -633,6 +680,8 @@ class ACCNairSMPCAgent(object):
                 sampled_raw_traj_xy,
             )
 
+        gap_recovery_elapsed, gap_recovery_start_scale = self._gap_recovery_elapsed(
+            target_relations, target_states, np.array([s_ego, speed]))
         predictor_start = time.time()
         try:
             result = self.stdan_predictor.predict_acc(
@@ -649,6 +698,10 @@ class ACCNairSMPCAgent(object):
                 model_yaw=self._stdan_model_yaw,
                 cutin_probability_threshold=self.cutin_probability_threshold,
                 cutin_clearance_ramp_ref=self.cutin_clearance_ramp_ref,
+                cutin_clearance_tlc_ref=self.cutin_clearance_tlc_ref,
+                gap_recovery_elapsed=gap_recovery_elapsed,
+                gap_recovery_s=self.gap_recovery_s,
+                gap_recovery_start_scale=gap_recovery_start_scale,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -666,10 +719,16 @@ class ACCNairSMPCAgent(object):
             }
         selected_target_state = nearest_target[1] if nearest_target is not None else np.array([s_ego, 0.0, speed])
         result["selected_target_state"] = selected_target_state
+        self._cache_predicted_lane_entry(result.get("processed_targets", []))
         result["debug"] = {
             "num_targets": len(target_states),
             "relations": target_relations,
             "stdan_model_yaw": self._stdan_model_yaw,
+            # Which weights produced these predictions.  The checkpoint comes
+            # from an environment variable, so runs made in different shells
+            # can silently use different predictors; the log has to say which.
+            "stdan_ckpt": str(getattr(self.stdan_predictor, "ckpt_path", "")),
+            "gap_recovery_start_scale": dict(self._gap_recovery_start_scale),
             "predictor_time": predictor_time,
             "prediction_num_modes": int(result["prediction"].num_modes),
             "controller_config_num_modes": int(self.controller_config.num_modes),
@@ -689,6 +748,19 @@ class ACCNairSMPCAgent(object):
             "x_nominal": np.asarray(solution.x_nominal, dtype=float).round(4).tolist(),
             "u_nominal": np.asarray(solution.u_nominal, dtype=float).round(4).tolist(),
         }
+
+    @staticmethod
+    def _clearance_scale_now(prediction):
+        """Standoff scale applied to the lead the ego has right now, for plotting.
+
+        Only modes active at step 0 count, so a low-probability cut-in
+        hypothesis about a next-lane vehicle does not show up as a relaxation
+        of the gap to the vehicle actually ahead.
+        """
+        active_now = np.asarray(prediction.active_mask, dtype=bool)[:, 0]
+        if not active_now.any():
+            return float("nan")
+        return float(np.min(np.asarray(prediction.clearance_scale, dtype=float)[active_now, 0]))
 
     def _prediction_covariance_debug(self, prediction):
         covariances = np.asarray(prediction.covariances, dtype=float)
@@ -857,6 +929,62 @@ class ACCNairSMPCAgent(object):
         if waypoint is None:
             return False
         return waypoint.lane_id == ego_wp.lane_id
+
+    def _cache_predicted_lane_entry(self, processed_targets):
+        """Remember how soon each target is predicted to reach the ego lane."""
+        if self.gap_recovery_s <= 0.0:
+            return
+        entries = {}
+        for target in processed_targets:
+            start_idx = getattr(target, "ego_lane_start_idx", None)
+            if start_idx is None:
+                branch = getattr(target, "branch_info", None) or {}
+                start_idx = branch.get("ego_lane_start_idx")
+            if not isinstance(start_idx, (int, float)):
+                continue
+            entries[getattr(target, "vehicle_id", None)] = float(start_idx) * self.DT
+        self._predicted_lane_entry_s = entries
+
+    def _gap_recovery_elapsed(self, target_relations, target_states=None, ego_state=None):
+        """Seconds each vehicle has been treated as a lead, for the gap re-establishment.
+
+        Also returns, per vehicle, the gap it had as a fraction of the full
+        standoff when its clock started -- the relaxation starts from there,
+        so a vehicle arriving outside the standoff is not relaxed at all.
+
+        The clock starts when the vehicle is *about* to be in the way, not when it
+        finishes merging: by the time the lane assignment flips, the ego has
+        already done its braking and relaxing the standoff then changes nothing.
+        Production ACC switches target on recognition for the same reason.
+
+        Entries are dropped once a vehicle is neither in lane nor imminent, so one
+        that merges, leaves and merges again starts its recovery over.
+        """
+        if self.gap_recovery_s <= 0.0:
+            return None, None
+        now = self._elapsed_seconds()
+        tracked = {
+            vehicle_id for vehicle_id, relation in target_relations.items()
+            if relation == REL_EGO_LANE
+        }
+        for vehicle_id, entry_s in self._predicted_lane_entry_s.items():
+            if entry_s <= self.GAP_RECOVERY_ONSET_TLC_S:
+                tracked.add(vehicle_id)
+        for vehicle_id in list(self._ego_lane_entry_time):
+            if vehicle_id not in tracked:
+                del self._ego_lane_entry_time[vehicle_id]
+                self._gap_recovery_start_scale.pop(vehicle_id, None)
+        elapsed = {}
+        for vehicle_id in tracked:
+            if vehicle_id not in self._ego_lane_entry_time:
+                self._ego_lane_entry_time[vehicle_id] = now
+                if target_states is not None and ego_state is not None and vehicle_id in target_states:
+                    gap = float(target_states[vehicle_id][0]) - float(ego_state[0])
+                    full = required_standoff(ego_state, self.controller_config)
+                    self._gap_recovery_start_scale[vehicle_id] = float(
+                        np.clip(gap / max(full, 1.0e-6), 0.0, 1.0))
+            elapsed[vehicle_id] = max(0.0, now - self._ego_lane_entry_time[vehicle_id])
+        return elapsed, dict(self._gap_recovery_start_scale)
 
     def _update_agent_history(self):
         if self.agent_history is None:
@@ -1070,6 +1198,27 @@ class ACCNairSMPCAgent(object):
         ``cutin_clearance_scale``.
         """
         match = re.search(r"cutin_ramp([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_cutin_clearance_tlc_ref(smpc_config):
+        """Read ``cutin_tlc<value>`` from the config string (default: disabled).
+
+        The value is the time-to-lane-crossing at which a cut-in mode stops
+        reserving standoff; it keeps the full standoff at zero.  See
+        ``tlc_cutin_clearance``.
+        """
+        match = re.search(r"cutin_tlc([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_gap_recovery_s(smpc_config):
+        """Read ``gap_recover<value>`` from the config string (default: disabled).
+
+        The value is how long the standoff takes to return to its full time gap
+        after a vehicle enters the ego lane.  See ``gap_reestablish_clearance``.
+        """
+        match = re.search(r"gap_recover([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else 0.0
 
     @staticmethod
