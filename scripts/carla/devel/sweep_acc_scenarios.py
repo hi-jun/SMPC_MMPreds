@@ -68,11 +68,17 @@ def _param_grid(args):
         "carla_timeout_period": [args.carla_timeout_period],
         "lane_shift_right": [args.lane_shift_right],
     }
+    if args.lane_change_times:
+        # A duration keeps the manoeuvre identical in the cut-in vehicle's frame
+        # at every TV speed; drop the distance list so it does not multiply the grid.
+        del common["lane_change_distance"]
+        common["lane_change_time_s"] = _parse_csv(args.lane_change_times)
     if args.kind in (
             "cutin",
             "aggressive_cutin",
             "cutin_with_ego_lead",
-            "aggressive_cutin_with_ego_lead"):
+            "aggressive_cutin_with_ego_lead",
+            "no_cutin_decel"):
         common.update({
             "target_lead_gap": _parse_csv(args.target_lead_gaps),
             "target_lead_speed_delta": _parse_csv(args.target_lead_speed_deltas),
@@ -332,6 +338,7 @@ def main():
                             "cutin_with_ego_lead",
                             "aggressive_cutin",
                             "aggressive_cutin_with_ego_lead",
+                            "no_cutin_decel",
                             "cutout_with_lead",
                             "cutout_no_lead",
                         ],
@@ -368,10 +375,14 @@ def main():
     parser.add_argument("--target-start-gaps", default="35,40")
     parser.add_argument("--trigger-distances", default="17",
                         help="Cut-in kinds: gap [m] from the cut-in vehicle to the lead in its own "
-                             "lane at which it starts the lane change (NGSIM: 12.7/17.0/23.8/34.2). "
+                             "lane at which it starts the lane change (NGSIM: 12.7/17.0/23.8/34.2); "
+                             "no_cutin_decel: gap at which it starts decelerating instead. "
                              "Cut-out kinds: ego-to-vehicle gap.")
     parser.add_argument("--same-lane-distances", default=None)
     parser.add_argument("--lane-change-distances", default=None)
+    parser.add_argument("--lane-change-times", default=None,
+                        help="Cut-in kinds: lane change duration [s] (CSV). Overrides "
+                             "--lane-change-distances with duration x TV speed.")
     parser.add_argument("--target-lead-gaps", default="24")
     parser.add_argument("--target-lead-speed-deltas", default="-2")
     parser.add_argument("--ego-lead-gaps", default="65")

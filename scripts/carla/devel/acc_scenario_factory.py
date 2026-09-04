@@ -153,6 +153,12 @@ def _common_params(params):
         "cruise_warmup_s": DEFAULT_CRUISE_WARMUP_S,
         "approach_time_s": 0.0,
         "ego_gap_at_trigger": 0.0,
+        # Cut-in kinds: lane change as a duration (0 = use lane_change_distance).
+        # A fixed distance takes longer at lower cut-in speeds, and the cut-in
+        # vehicle, closing on its own lead, hit that lead while still
+        # overlapping its lane (TV 11/13 m/s with 45-55 m); a duration keeps the
+        # manoeuvre identical in the cut-in vehicle's frame at every speed.
+        "lane_change_time_s": 0.0,
         "carla_timeout_period": 30.0,
     }
     merged.update(params or {})
@@ -200,6 +206,32 @@ def _apply_lead_gap_trigger(p):
     return p
 
 
+# no_cutin_decel: the cut-in vehicle never leaves its lane.  Its speed cap
+# toward the lead in its own lane (distance_triggered_lane_change_agent) is
+# re-tuned so that v_cap reaches the nominal speed exactly at
+# trigger_distance -- the vehicle starts decelerating there instead of
+# changing lane -- and it settles 4.5 + min_gap behind the lead at the
+# lead's speed.  The ego placement (ego_gap_at_trigger) is unchanged, so the
+# ego meets the same approach as in the cut-in kinds.
+NO_CUTIN_SPEED_CAP_GAIN = 0.5
+
+
+def _no_cutin_speed_cap(p, lead_speed):
+    # 4.5 is SPEED_CAP_VEHICLE_LENGTH_M of the lane-change agent.
+    min_gap = (float(p["trigger_distance"]) - 4.5
+               - (float(p["target_speed"]) - float(lead_speed)) / NO_CUTIN_SPEED_CAP_GAIN)
+    if min_gap < 1.0:
+        raise ValueError(
+            "no_cutin_decel needs a larger trigger_distance or a smaller target-to-lead "
+            f"speed difference (speed cap min gap {min_gap:.2f} m < 1.0 m)")
+    return {
+        "lane_change_trigger_distance": 0.0,
+        "lane_change_trigger_mode": "never",
+        "speed_cap_min_gap_m": min_gap,
+        "speed_cap_gain": NO_CUTIN_SPEED_CAP_GAIN,
+    }
+
+
 def _traffic_goal_s(p, start_s, speed):
     sim_travel = float(speed) * float(p["max_sim_time_s"])
     return max(
@@ -208,7 +240,7 @@ def _traffic_goal_s(p, start_s, speed):
     )
 
 
-def make_cutin_scenario(params=None, aggressive=False, ego_lead=False):
+def make_cutin_scenario(params=None, aggressive=False, ego_lead=False, no_cutin=False):
     p = _common_params(params)
     if aggressive:
         p.setdefault("lane_change_distance_same_lane", 1.0)
@@ -220,6 +252,9 @@ def make_cutin_scenario(params=None, aggressive=False, ego_lead=False):
         p.setdefault("lane_change_distance", 24.0)
         p.setdefault("outer_blocker_count", 3)
         p.setdefault("outer_blocker_spacing", 14.0)
+    lane_change_time_s = float(p.get("lane_change_time_s") or 0.0)
+    if lane_change_time_s > 0.0:
+        p["lane_change_distance"] = lane_change_time_s * float(p["target_speed"])
     p.setdefault("outer_blocker_speed_delta", -1.5)
     p.setdefault("target_left_offset", 3.5)
     p.setdefault("outer_blocker_left_offset", 7.0)
@@ -246,6 +281,14 @@ def make_cutin_scenario(params=None, aggressive=False, ego_lead=False):
         p.get("right_lane_target_left_offset", -3.5), p)
 
     _apply_lead_gap_trigger(p)
+    target_lead_speed = max(1.0, float(p["target_speed"]) + float(p["target_lead_speed_delta"]))
+    if no_cutin:
+        target_trigger = _no_cutin_speed_cap(p, target_lead_speed)
+    else:
+        target_trigger = {
+            "lane_change_trigger_distance": p["trigger_distance"],
+            "lane_change_trigger_mode": "lead_gap",
+        }
     vehicles = [
         _vehicle(
             "target_cutin",
@@ -255,14 +298,12 @@ def make_cutin_scenario(params=None, aggressive=False, ego_lead=False):
             p["route_goal_s"],
             p["target_speed"],
             "186, 0, 0",
-            lane_change_trigger_distance=p["trigger_distance"],
-            lane_change_trigger_mode="lead_gap",
             lane_change_distance_same_lane=p["lane_change_distance_same_lane"],
             lane_change_distance_other_lane=120.0,
             lane_change_distance=p["lane_change_distance"],
+            **target_trigger,
         )
     ]
-    target_lead_speed = max(1.0, float(p["target_speed"]) + float(p["target_lead_speed_delta"]))
     target_lead_start_s = p["target_start_gap"] + p["target_lead_gap"]
     vehicles.append(
         _vehicle(
@@ -412,6 +453,8 @@ def make_scenario(kind, params=None):
         return make_cutin_scenario(params, aggressive=True)
     if kind == "aggressive_cutin_with_ego_lead":
         return make_cutin_scenario(params, aggressive=True, ego_lead=True)
+    if kind == "no_cutin_decel":
+        return make_cutin_scenario(params, aggressive=False, no_cutin=True)
     if kind == "cutout_with_lead":
         return make_cutout_scenario(params, with_lead=True)
     if kind == "cutout_no_lead":

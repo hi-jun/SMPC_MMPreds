@@ -127,6 +127,10 @@ class VehicleParams:
     lane_change_distance_other_lane : float = 100.0
     lane_change_distance : float = 25.0
     cutout_direction : str = "left"
+    # Speed cap toward the same-lane lead (distance_triggered_lane_change);
+    # defaults mirror SPEED_CAP_MIN_LONGITUDINAL_GAP_M / SPEED_CAP_GAIN.
+    speed_cap_min_gap_m : float = 2.5
+    speed_cap_gain : float = 1.2
 
 @dataclass(frozen=True)
 class PredictionParams:
@@ -188,7 +192,9 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform):
                         trigger_mode=vehicle_params.lane_change_trigger_mode,
                         distance_same_lane=vehicle_params.lane_change_distance_same_lane,
                         distance_other_lane=vehicle_params.lane_change_distance_other_lane,
-                        distance_lane_change=vehicle_params.lane_change_distance)
+                        distance_lane_change=vehicle_params.lane_change_distance,
+                        speed_cap_min_gap_m=vehicle_params.speed_cap_min_gap_m,
+                        speed_cap_gain=vehicle_params.speed_cap_gain)
     elif vehicle_params.policy_type == "distance_triggered_cutout":
         return DistanceTriggeredCutOutAgent(vehicle_actor, goal_transform.location, \
                         N=vehicle_params.N,

@@ -16,7 +16,8 @@ SPEED_CAP_VEHICLE_LENGTH_M = 4.5
 # triggers (17 m normal, 13 m aggressive), so the cap no longer decelerates the
 # vehicle before it starts its lane change.  Keep this engagement gap below the
 # smallest trigger distance in use; a larger nominal-to-lead speed difference
-# raises it.
+# raises it.  Both values can be overridden per vehicle through the
+# constructor (the no-cut-in kind paces its lead with them).
 SPEED_CAP_MIN_LONGITUDINAL_GAP_M = 2.5
 SPEED_CAP_GAIN = 1.2
 SPEED_CAP_LATERAL_THRESHOLD_M = 2.5
@@ -38,7 +39,9 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
             distance_same_lane=5.0,
             distance_other_lane=100.0,
             distance_lane_change=25.0,
-            trigger_mode="ego_gap"):
+            trigger_mode="ego_gap",
+            speed_cap_min_gap_m=SPEED_CAP_MIN_LONGITUDINAL_GAP_M,
+            speed_cap_gain=SPEED_CAP_GAIN):
         super().__init__(
             vehicle,
             goal_location,
@@ -52,10 +55,13 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
         # trigger_distance_m behind.  "lead_gap": start when this vehicle is
         # within trigger_distance_m of the lead in its own lane -- the natural
         # cut-in motive, and independent of what the ego does, so every ego
-        # policy meets the same manoeuvre.
-        if trigger_mode not in ("ego_gap", "lead_gap"):
+        # policy meets the same manoeuvre.  "never": stay in lane and only
+        # pace the lead through the speed cap.
+        if trigger_mode not in ("ego_gap", "lead_gap", "never"):
             raise ValueError(f"unknown trigger_mode {trigger_mode!r}")
         self.trigger_mode = trigger_mode
+        self.speed_cap_min_gap_m = float(speed_cap_min_gap_m)
+        self.speed_cap_gain = float(speed_cap_gain)
         self.ego_gap_at_start = None
         self.distance_same_lane = distance_same_lane
         self.distance_other_lane = distance_other_lane
@@ -81,6 +87,8 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
         self._switch_to_current_lane_route()
 
     def run_step(self, pred_dict):
+        if self.trigger_mode == "never":
+            return super().run_step(pred_dict)
         # Refresh the lane assignment first so the guard below never turns
         # back a vehicle that already reached the ego lane.
         self._update_lane_change_completion()
@@ -128,6 +136,8 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
             "lane_change_direction": self.lane_change_direction,
             "ego_proximity_guard_m": self.ego_proximity_guard_m,
             "ego_proximity_guard_events": self.ego_proximity_guard_events,
+            "speed_cap_min_gap_m": self.speed_cap_min_gap_m,
+            "speed_cap_gain": self.speed_cap_gain,
         }
 
     def _get_reference_traj(self, x0, y0, psi0, v0):
@@ -137,8 +147,8 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
             return ref_dict
 
         _, actual_gap, lead_speed = lead
-        desired_gap = SPEED_CAP_VEHICLE_LENGTH_M + SPEED_CAP_MIN_LONGITUDINAL_GAP_M
-        v_cap = lead_speed + SPEED_CAP_GAIN * (actual_gap - desired_gap)
+        desired_gap = SPEED_CAP_VEHICLE_LENGTH_M + self.speed_cap_min_gap_m
+        v_cap = lead_speed + self.speed_cap_gain * (actual_gap - desired_gap)
         v_cap = min(self.nominal_speed, max(self.V_MIN, v_cap))
         v_ref = np.minimum(np.asarray(ref_dict["v_ref"], dtype=float), v_cap)
         if np.allclose(v_ref, ref_dict["v_ref"]):
