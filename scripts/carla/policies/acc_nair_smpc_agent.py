@@ -61,6 +61,14 @@ class ACCNairSMPCAgent(object):
     # Waiting for the lane assignment to flip is too late: the braking is over by
     # then. One second ahead lands the relaxation on the deceleration itself.
     GAP_RECOVERY_ONSET_TLC_S = 1.0
+    # Below this cut-in probability the confidence chance constraint is dropped
+    # outright.  Benciolini's ellipse collapses to a point as beta -> 0 and a
+    # point can be driven around; the 1-D counterpart still orders the ego
+    # behind the hypothetical cut-in even at zero standoff, so without a
+    # vanishing threshold the ego can never pass a neighbour whose cut-in
+    # probability has decayed.  Lane-keeping neighbours score <= 0.05 in the
+    # 2026-09-04 sweep; 0.1 keeps a margin above that.
+    CUTIN_CHANCE_VANISH_BELOW = 0.1
 
     def __init__(
             self,
@@ -87,6 +95,10 @@ class ACCNairSMPCAgent(object):
         if self.cutin_chance_ref > 0.0 and self.cutin_clearance_ramp_ref > 0.0:
             raise ValueError(
                 "cutin_ramp and cutin_chance both set the cut-in standoff scale; use one")
+        if self.cutin_chance_ref > 0.0 and self.cutin_probability_threshold <= 0.0:
+            # The chance constraint vanishes below this probability; an explicit
+            # ``cutin_gate<value>`` token overrides it.
+            self.cutin_probability_threshold = self.CUTIN_CHANCE_VANISH_BELOW
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -522,6 +534,8 @@ class ACCNairSMPCAgent(object):
             "controller": "acc_nair_smpc",
             "mode_names": ["lane_keeping", "cutin"],
             "mode_probabilities": list(self.mode_probabilities),
+            "cutin_chance_ref": float(self.cutin_chance_ref),
+            "cutin_probability_threshold": float(self.cutin_probability_threshold),
             "steps": self.policy_log,
         }
 
@@ -894,6 +908,9 @@ class ACCNairSMPCAgent(object):
                     "used_trajectory_aware_cutin_mapping", False)),
                 "cutin_chance_confidences": target.branch_info.get(
                     "cutin_chance_confidences", {}),
+                "cutin_probability_threshold": float(target.branch_info.get(
+                    "cutin_probability_threshold", 0.0)),
+                "gated_cutin_modes": list(target.branch_info.get("gated_cutin_modes", [])),
                 "ego_lane_occupancy_mask": [
                     bool(value) for value in np.asarray(occupancy, dtype=bool).reshape(-1)
                 ],
@@ -1217,7 +1234,9 @@ class ACCNairSMPCAgent(object):
 
         The value is the reference confidence ``beta_ref`` of the Benciolini
         confidence chance constraint on cut-in modes; the token also switches
-        the controller to ``confidence_chance`` safety constraints.  See
+        the controller to ``confidence_chance`` safety constraints and, unless
+        ``cutin_gate<value>`` is given, drops cut-in modes below
+        ``CUTIN_CHANCE_VANISH_BELOW`` (the vanishing constraint).  See
         ``chance_cutin_clearance``.
         """
         match = re.search(r"cutin_chance([0-9]*\.?[0-9]+)", str(smpc_config))
