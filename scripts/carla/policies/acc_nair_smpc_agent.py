@@ -52,6 +52,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
     REL_RIGHT_ADJACENT,
 )
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
+from predictor.lstm.acc_adapter import LSTMACCAdapter
 
 
 class ACCNairSMPCAgent(object):
@@ -153,8 +154,15 @@ class ACCNairSMPCAgent(object):
         self.stdan_history_secs = None
         self.stdan_history_closeness_eps = None
         self.agent_history = None
-        if self.predictor_type in ("stdan_3int", "stdan_vel"):
-            if self.predictor_type == "stdan_vel":
+        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm"):
+            if self.predictor_type == "lstm":
+                self.stdan_predictor = LSTMACCAdapter(
+                    ckpt_path=os.getenv("ACC_NAIR_LSTM_CKPT", "predictor/lstm/ckpt/best_model.pt"),
+                    history=3.0,
+                    future=5.0,
+                    dt=0.1,
+                )
+            elif self.predictor_type == "stdan_vel":
                 self.stdan_predictor = STDANVelACCAdapter(
                     ckpt_path="predictor/stdan_vel/checkpoints/0113_ratio211/best_model.pt",
                     history=3.0,
@@ -542,7 +550,7 @@ class ACCNairSMPCAgent(object):
     def _prediction_bundle(self, s_ego, speed):
         if self.predictor_type == "constant_velocity_lead":
             return self._constant_velocity_lead_prediction_bundle(s_ego, speed)
-        if self.predictor_type in ("stdan_3int", "stdan_vel"):
+        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm"):
             bundle = self._stdan_prediction_bundle(s_ego, speed)
             if bundle is not None:
                 return self._maybe_collapse_bundle_to_best_mode(bundle)
@@ -1124,6 +1132,8 @@ class ACCNairSMPCAgent(object):
         config = str(smpc_config)
         if "const_lead" in config or "constant_lead" in config:
             return "constant_velocity_lead"
+        if "lstm" in config:
+            return "lstm"
         if "stdan_vel" in config:
             return "stdan_vel"
         if "stdan_3int" in config:
@@ -1137,7 +1147,7 @@ class ACCNairSMPCAgent(object):
     @staticmethod
     def _parse_controller_num_modes(smpc_config, requested_num_modes):
         config = str(smpc_config)
-        if "best_mode" in config or "const_lead" in config or "constant_lead" in config:
+        if "best_mode" in config or "const_lead" in config or "constant_lead" in config or "lstm" in config:
             return 1
         match = re.search(r"(?:num_modes|modes|mode)[_-]?(\d+)", config)
         if match:
