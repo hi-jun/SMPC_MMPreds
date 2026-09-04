@@ -56,6 +56,13 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
 
         self.lane_change_started = False
         self.lane_change_completed = False
+        # No lane change while the ego is alongside: whenever the longitudinal
+        # bumper-to-bumper distance to the ego is within one vehicle width the
+        # change must not start, and one already under way turns back unless
+        # the vehicle has reached the ego lane.
+        self.ego_proximity_guard_m = None
+        self.ego_proximity_guard_events = []
+        self._guard_hold_logged = False
         self.lane_change_direction = None
         self.trigger_time_s = None
         self.trigger_distance_at_start = None
@@ -67,8 +74,12 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
         self._switch_to_current_lane_route()
 
     def run_step(self, pred_dict):
+        # Refresh the lane assignment first so the guard below never turns
+        # back a vehicle that already reached the ego lane.
+        self._update_lane_change_completion()
+        ego_actor = self._find_ego_actor()
+        ego_alongside, guard_detail = self._ego_within_guard(ego_actor)
         if not self.lane_change_started:
-            ego_actor = self._find_ego_actor()
             ego_gap = self._longitudinal_trigger_distance(self.vehicle, ego_actor)
             if self.trigger_mode == "lead_gap":
                 lead = self._find_same_lane_front_lead()
@@ -76,11 +87,21 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
             else:
                 trigger_distance = ego_gap
             if trigger_distance is not None and trigger_distance <= self.trigger_distance_m:
-                self.trigger_distance_at_start = trigger_distance
-                self.ego_gap_at_start = ego_gap
-                self.trigger_time_s = self._get_elapsed_seconds()
-                self._switch_to_lane_change_route(ego_actor)
-                self.lane_change_started = True
+                if ego_alongside:
+                    self._record_guard_event("hold", guard_detail)
+                else:
+                    self._guard_hold_logged = False
+                    self.trigger_distance_at_start = trigger_distance
+                    self.ego_gap_at_start = ego_gap
+                    self.trigger_time_s = self._get_elapsed_seconds()
+                    self._switch_to_lane_change_route(ego_actor)
+                    self.lane_change_started = True
+        elif not self.lane_change_completed and ego_alongside:
+            self._switch_to_current_lane_route()
+            self.lane_change_started = False
+            self.lane_change_direction = None
+            self._guard_hold_logged = False
+            self._record_guard_event("abort", guard_detail)
 
         result = super().run_step(pred_dict)
         self._update_lane_change_completion()
@@ -98,6 +119,8 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
             "lane_change_started": self.lane_change_started,
             "lane_change_completed": self.lane_change_completed,
             "lane_change_direction": self.lane_change_direction,
+            "ego_proximity_guard_m": self.ego_proximity_guard_m,
+            "ego_proximity_guard_events": self.ego_proximity_guard_events,
         }
 
     def _get_reference_traj(self, x0, y0, psi0, v0):
@@ -125,6 +148,43 @@ class DistanceTriggeredLaneChangeAgent(MPCAgent):
         ref_dict["psi_ref"] = fth.fix_angle(psi_ref - psi0) + psi0
         ref_dict["v_ref"] = v_ref
         return ref_dict
+
+    def _ego_within_guard(self, ego_actor):
+        """Is the ego longitudinally within one vehicle width, bumper to bumper?
+
+        The gap is centre-to-centre along the ego heading minus both half
+        lengths, taken as a magnitude so a just-passed ego still blocks; the
+        guard width is the wider of the two vehicles.
+        """
+        if ego_actor is None:
+            return False, None
+        ego_transform = ego_actor.get_transform()
+        ego_location = ego_transform.location
+        location = self.vehicle.get_location()
+        yaw = math.radians(ego_transform.rotation.yaw)
+        centre_gap = ((location.x - ego_location.x) * math.cos(yaw)
+                      + (location.y - ego_location.y) * math.sin(yaw))
+        half_lengths = float(self.vehicle.bounding_box.extent.x
+                             + ego_actor.bounding_box.extent.x)
+        guard = 2.0 * float(max(self.vehicle.bounding_box.extent.y,
+                                ego_actor.bounding_box.extent.y))
+        self.ego_proximity_guard_m = guard
+        bumper_gap = abs(centre_gap) - half_lengths
+        detail = {
+            "ego_centre_gap_m": float(centre_gap),
+            "ego_bumper_gap_m": float(bumper_gap),
+        }
+        return bumper_gap <= guard, detail
+
+    def _record_guard_event(self, kind, detail):
+        if kind == "hold":
+            if self._guard_hold_logged:
+                return
+            self._guard_hold_logged = True
+        event = {"event": kind, "time_s": self._get_elapsed_seconds()}
+        if detail:
+            event.update(detail)
+        self.ego_proximity_guard_events.append(event)
 
     @staticmethod
     def _longitudinal_trigger_distance(actor, reference_actor):
