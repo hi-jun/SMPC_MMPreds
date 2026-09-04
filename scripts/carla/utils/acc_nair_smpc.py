@@ -60,6 +60,8 @@ VARIANT_MULTIMODAL_OL = "multimodal_ol"
 SAFETY_NOMINAL_SAFE_DISTANCE = "nominal_safe_distance"
 SAFETY_SCALAR_CHANCE = "scalar_chance"
 SAFETY_BRAKE_DISTANCE = "brake_distance"
+SAFETY_CONFIDENCE_CHANCE = "confidence_chance"
+CHANCE_SAFETY_MODES = (SAFETY_SCALAR_CHANCE, SAFETY_CONFIDENCE_CHANCE)
 
 BRAKE_DISTANCE_BOUND_REACHABLE_INTERVAL = "reachable_interval"
 BRAKE_DISTANCE_BOUND_HARD_BAND = "hard_band"
@@ -144,6 +146,7 @@ class NairACCConfig:
             SAFETY_NOMINAL_SAFE_DISTANCE,
             SAFETY_SCALAR_CHANCE,
             SAFETY_BRAKE_DISTANCE,
+            SAFETY_CONFIDENCE_CHANCE,
         ):
             raise ValueError("invalid safety_constraint_mode")
         if self.brake_distance_bound_mode not in (
@@ -362,6 +365,9 @@ class MultimodalLeadPrediction:
     prediction_tree: Optional[PolicySharingTree] = None
     active_mask: Optional[np.ndarray] = None
     clearance_scale: Optional[np.ndarray] = None
+    # Benciolini confidence beta_j per (mode, step); NaN marks a deterministic
+    # cell (ego-lane lead) that gets no sigma-based tightening.
+    chance_confidence: Optional[np.ndarray] = None
     k_group_map: Optional[np.ndarray] = None
     k_group_names: Optional[List[str]] = None
 
@@ -427,6 +433,16 @@ class MultimodalLeadPrediction:
                 raise ValueError("clearance_scale must have shape %s" % (expected,))
             if np.any(self.clearance_scale < 0.0) or np.any(self.clearance_scale > 1.0):
                 raise ValueError("clearance_scale entries must lie in [0, 1]")
+        if self.chance_confidence is None:
+            self.chance_confidence = np.full((self.num_modes, horizon + 1), np.nan)
+        else:
+            self.chance_confidence = np.asarray(self.chance_confidence, dtype=float)
+            expected = (self.num_modes, horizon + 1)
+            if self.chance_confidence.shape != expected:
+                raise ValueError("chance_confidence must have shape %s" % (expected,))
+            finite = self.chance_confidence[np.isfinite(self.chance_confidence)]
+            if np.any(finite < 0.0) or np.any(finite > 1.0):
+                raise ValueError("finite chance_confidence entries must lie in [0, 1]")
         if self.k_group_map is not None:
             self.k_group_map = np.asarray(self.k_group_map, dtype=int)
             expected = (self.num_modes, horizon)
@@ -674,6 +690,14 @@ class OldACCReferenceAdapter:
                 # cost demand the full standoff while the constraint allows a
                 # scaled one, so the ego brakes harder than the risk warrants.
                 safe_gap *= float(lead_prediction.clearance_scale[mode, step])
+                # Same reasoning for the sigma term: the constraint below adds
+                # it, so the reference has to ask for it too.
+                if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+                    safe_gap += confidence_tightening(
+                        lead_prediction.covariances[mode, step],
+                        lead_prediction.chance_confidence[mode, step],
+                        self.config,
+                    )
                 target_s = lead_s - safe_gap
 
                 if target_s < s_ref[mode, step]:
@@ -956,6 +980,8 @@ class NairACCSMPC:
             mode_names=prediction.mode_names,
             policy_tree=policy_tree,
             active_mask=prediction.active_mask[:, :self.config.horizon + 1],
+            clearance_scale=prediction.clearance_scale[:, :self.config.horizon + 1],
+            chance_confidence=prediction.chance_confidence[:, :self.config.horizon + 1],
             k_group_map=k_group_map,
             k_group_names=prediction.k_group_names,
         )
@@ -980,6 +1006,8 @@ class NairACCSMPC:
                     solve_path = "cached_open_loop_safe_distance_qp"
                 elif self.config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
                     solve_path = "cached_open_loop_brake_distance_qp"
+                elif self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+                    solve_path = "cached_open_loop_confidence_chance_qp"
                 else:
                     solve_path = "cached_open_loop_fixed_qp"
                 policy, slack, cost, status, message, layout, optimized_eta_data = (
@@ -992,6 +1020,8 @@ class NairACCSMPC:
                     solve_path = "cached_feedback_safe_distance_qp"
                 elif self.config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
                     solve_path = "cached_feedback_brake_distance_qp"
+                elif self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+                    solve_path = "cached_feedback_confidence_chance_qp"
                 else:
                     solve_path = "cached_feedback_scalar_chance_qp"
                 policy, slack, cost, status, message, layout, optimized_eta_data = (
@@ -1065,14 +1095,10 @@ class NairACCSMPC:
                         tightening_values[mode, step] = (
                             eta_levels[mode] * safety_std(prediction.covariances[mode, step], self.config)
                         )
-                    elif self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
-                        tightening_values[mode, step] = chance_tightening(
-                            prediction.covariances[mode, step],
-                            risks[mode, step],
-                            self.config,
-                        )
                     else:
-                        tightening_values[mode, step] = 0.0
+                        tightening_values[mode, step] = self._cell_tightening(
+                            prediction, risks, mode, step
+                        )
                     chance_margin_values[mode, step] = (
                         safety_values[mode, step] - tightening_values[mode, step]
                     )
@@ -1085,7 +1111,7 @@ class NairACCSMPC:
         first_accel = reference.prev_u[0, 0] + policy.h[0, 0, 0]
         action = float(np.clip(first_accel, self.config.a_min, self.config.a_max))
 
-        if self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
+        if self.config.safety_constraint_mode in CHANCE_SAFETY_MODES:
             feasible = bool(np.all(
                 chance_margin_values[prediction.active_mask]
                 + slack[prediction.active_mask]
@@ -1176,7 +1202,8 @@ class NairACCSMPC:
         # included.  Benciolini et al. (T-IV 2023) Remark 5: leaving the footprint
         # outside the confidence scaling keeps a fixed exclusion zone alive even for
         # a disbelieved mode.  ``tightening`` stays outside because the risk
-        # allocation already carries the mode probability.
+        # allocation (or the cell's confidence) already carries the mode
+        # probability.
         return (
             lead_s
             - ego_s
@@ -1233,10 +1260,29 @@ class NairACCSMPC:
                 opti.subject_to(ego_v >= brake_v_min)
                 opti.subject_to(ego_v <= brake_v_max)
 
+    def _cell_tightening(self, prediction, risks, mode, step):
+        """Numeric safety-margin tightening for one (mode, step) cell.
+
+        ``scalar_chance`` draws it from the risk allocation, ``confidence_chance``
+        from the cell's Benciolini confidence, and the deterministic modes use
+        none.
+        """
+        if self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
+            return chance_tightening(
+                prediction.covariances[mode, step], risks[mode, step], self.config
+            )
+        if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+            return confidence_tightening(
+                prediction.covariances[mode, step],
+                prediction.chance_confidence[mode, step],
+                self.config,
+            )
+        return 0.0
+
     def _can_use_cached_open_loop_fixed_qp(self, open_loop, prediction):
         if not open_loop:
             return False
-        if self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
+        if self.config.safety_constraint_mode in CHANCE_SAFETY_MODES:
             return self.config.risk_allocation_mode == RISK_FIXED
         if self.config.safety_constraint_mode in (
                 SAFETY_NOMINAL_SAFE_DISTANCE,
@@ -1286,16 +1332,12 @@ class NairACCSMPC:
 
         phase_start = time.perf_counter()
         tightening = np.zeros((num_modes, horizon + 1))
-        if self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
+        if self.config.safety_constraint_mode in CHANCE_SAFETY_MODES:
             for mode in range(num_modes):
                 for step in range(horizon + 1):
                     if not prediction.active_mask[mode, step]:
                         continue
-                    tightening[mode, step] = chance_tightening(
-                        prediction.covariances[mode, step],
-                        risks[mode, step],
-                        self.config,
-                    )
+                    tightening[mode, step] = self._cell_tightening(prediction, risks, mode, step)
         tightening_build_s = time.perf_counter() - phase_start
 
         opti = problem.opti
@@ -1352,6 +1394,8 @@ class NairACCSMPC:
             cache_marker = "cached_open_loop_safe_distance_qp=1"
         elif self.config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
             cache_marker = "cached_open_loop_brake_distance_qp=1"
+        elif self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+            cache_marker = "cached_open_loop_confidence_chance_qp=1"
         else:
             cache_marker = "cached_open_loop_fixed_qp=1"
         if solver_time is None:
@@ -1510,6 +1554,8 @@ class NairACCSMPC:
     def _can_use_cached_feedback_scalar_chance_qp(self, open_loop, prediction):
         if open_loop:
             return False
+        if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+            return self.config.risk_allocation_mode == RISK_FIXED
         if self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
             return self.config.risk_allocation_mode in (RISK_FIXED, RISK_OPTIMIZED_ETA)
         if self.config.safety_constraint_mode in (
@@ -1558,17 +1604,13 @@ class NairACCSMPC:
         phase_start = time.perf_counter()
         tightening = np.zeros((num_modes, horizon + 1))
         safety_stds = np.zeros((num_modes, horizon + 1))
-        if self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
+        if self.config.safety_constraint_mode in CHANCE_SAFETY_MODES:
             for mode in range(num_modes):
                 for step in range(horizon + 1):
                     if not prediction.active_mask[mode, step]:
                         continue
                     safety_stds[mode, step] = safety_std(prediction.covariances[mode, step], self.config)
-                    tightening[mode, step] = chance_tightening(
-                        prediction.covariances[mode, step],
-                        risks[mode, step],
-                        self.config,
-                    )
+                    tightening[mode, step] = self._cell_tightening(prediction, risks, mode, step)
 
         std = np.sqrt(np.maximum(np.diagonal(prediction.covariances, axis1=2, axis2=3), 0.0))
         lead_dev_s = [
@@ -1709,6 +1751,8 @@ class NairACCSMPC:
             cache_marker = "cached_feedback_safe_distance_qp=1"
         elif self.config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
             cache_marker = "cached_feedback_brake_distance_qp=1"
+        elif self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+            cache_marker = "cached_feedback_confidence_chance_qp=1"
         else:
             cache_marker = "cached_feedback_scalar_chance_qp=1"
         if solver_time is None:
@@ -2048,7 +2092,7 @@ class NairACCSMPC:
             for mode in range(1, num_modes):
                 opti.subject_to(float(reference.prev_u[mode, 0]) + h_var[layout.group_map[mode, 0]] == first_input)
 
-        if self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE:
+        if self.config.safety_constraint_mode in CHANCE_SAFETY_MODES:
             process_zero = np.zeros((horizon, NX))
             for mode in range(num_modes):
                 states, _ = self._rollout_symbolic(
@@ -2074,9 +2118,7 @@ class NairACCSMPC:
                             * joint_eta_var[mode]
                         )
                     else:
-                        tightening = chance_tightening(
-                            prediction.covariances[mode, step], risks[mode, step], self.config
-                        )
+                        tightening = self._cell_tightening(prediction, risks, mode, step)
                     self._add_symbolic_safety_constraints(
                         opti,
                         float(lead[0]),
@@ -2634,6 +2676,31 @@ def safety_std(lead_covariance, config):
 def chance_tightening(lead_covariance, risk, config):
     risk = float(np.clip(risk, 1.0e-6, 0.49))
     return float(norm.ppf(1.0 - risk) * safety_std(lead_covariance, config))
+
+
+def confidence_quantile(beta):
+    """Half-width, in standard deviations, of the interval holding probability ``beta``.
+
+    The 1-D counterpart of the confidence ellipse of Benciolini et al. (T-IV
+    2023), eq. (17): a Gaussian puts probability ``beta`` inside
+    ``mu +/- q(beta) sigma`` with ``q(beta) = Phi^-1((1 + beta) / 2)``.  It vanishes
+    as ``beta -> 0`` and diverges as ``beta -> 1``, so the caller caps ``beta``
+    (their Remark 4).  The paper's ``sqrt(-2 ln(1 - beta))`` is the quantile of
+    its 2-D ellipse, not of a longitudinal-only interval.
+    """
+    beta = float(np.clip(beta, 0.0, 1.0 - 1.0e-9))
+    return float(norm.ppf(0.5 * (1.0 + beta)))
+
+
+def confidence_tightening(lead_covariance, beta, config):
+    """``q(beta) * safety_std``: the sigma term of the confidence chance constraint.
+
+    ``beta`` is the per-cell confidence in ``MultimodalLeadPrediction.chance_confidence``.
+    NaN marks a deterministic cell and contributes nothing.
+    """
+    if not np.isfinite(beta):
+        return 0.0
+    return float(confidence_quantile(beta) * safety_std(lead_covariance, config))
 
 
 def cdf_lower_bound_lines(config):

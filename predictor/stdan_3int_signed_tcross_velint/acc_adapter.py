@@ -419,6 +419,7 @@ class STDAN3IntACCAdapter:
         model_yaw: Optional[float] = None,
         cutin_probability_threshold: float = 0.0,
         cutin_clearance_ramp_ref: float = 0.0,
+        cutin_chance_ref: float = 0.0,
         cutin_clearance_tlc_ref: float = 0.0,
         gap_recovery_elapsed: Optional[Dict[int, float]] = None,
         gap_recovery_s: float = 0.0,
@@ -483,6 +484,7 @@ class STDAN3IntACCAdapter:
                     lane_membership_source=lane_membership_source,
                     cutin_probability_threshold=cutin_probability_threshold,
                     cutin_clearance_ramp_ref=cutin_clearance_ramp_ref,
+                    cutin_chance_ref=cutin_chance_ref,
                     cutin_clearance_tlc_ref=cutin_clearance_tlc_ref,
                     gap_recovery_elapsed_s=(
                         None if gap_recovery_elapsed is None

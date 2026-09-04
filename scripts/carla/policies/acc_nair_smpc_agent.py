@@ -26,6 +26,7 @@ from utils.acc_nair_smpc import (
     RISK_OPTIMIZED_ETA,
     RISK_PROBABILITY_WEIGHTED,
     SAFETY_BRAKE_DISTANCE,
+    SAFETY_CONFIDENCE_CHANCE,
     SAFETY_NOMINAL_SAFE_DISTANCE,
     SAFETY_SCALAR_CHANCE,
     VARIANT_FIXED_RISK,
@@ -82,6 +83,10 @@ class ACCNairSMPCAgent(object):
         self.best_mode_only = self._parse_best_mode_only(smpc_config)
         self.cutin_probability_threshold = self._parse_cutin_probability_threshold(smpc_config)
         self.cutin_clearance_ramp_ref = self._parse_cutin_clearance_ramp_ref(smpc_config)
+        self.cutin_chance_ref = self._parse_cutin_chance_ref(smpc_config)
+        if self.cutin_chance_ref > 0.0 and self.cutin_clearance_ramp_ref > 0.0:
+            raise ValueError(
+                "cutin_ramp and cutin_chance both set the cut-in standoff scale; use one")
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -472,6 +477,7 @@ class ACCNairSMPCAgent(object):
                     else int(solution.first_policy_split_step)
                 ),
                 "chance_margin_min": float(solution.chance_margin_min),
+                "tightening_max": float(solution.tightening_max),
                 "clearance_scale_now": self._clearance_scale_now(prediction_bundle["prediction"]),
                 "predictor_time": prediction_bundle.get("debug", {}).get("predictor_time"),
                 "predictor_type": self.predictor_type,
@@ -698,6 +704,7 @@ class ACCNairSMPCAgent(object):
                 model_yaw=self._stdan_model_yaw,
                 cutin_probability_threshold=self.cutin_probability_threshold,
                 cutin_clearance_ramp_ref=self.cutin_clearance_ramp_ref,
+                cutin_chance_ref=self.cutin_chance_ref,
                 cutin_clearance_tlc_ref=self.cutin_clearance_tlc_ref,
                 gap_recovery_elapsed=gap_recovery_elapsed,
                 gap_recovery_s=self.gap_recovery_s,
@@ -885,6 +892,8 @@ class ACCNairSMPCAgent(object):
                     "trajectory_suggested_cutin_raw_idx"),
                 "used_trajectory_aware_cutin_mapping": bool(target.branch_info.get(
                     "used_trajectory_aware_cutin_mapping", False)),
+                "cutin_chance_confidences": target.branch_info.get(
+                    "cutin_chance_confidences", {}),
                 "ego_lane_occupancy_mask": [
                     bool(value) for value in np.asarray(occupancy, dtype=bool).reshape(-1)
                 ],
@@ -1130,6 +1139,8 @@ class ACCNairSMPCAgent(object):
     @staticmethod
     def _parse_safety_constraint_mode(smpc_config):
         config = str(smpc_config).lower()
+        if re.search(r"cutin_chance[0-9]", config):
+            return SAFETY_CONFIDENCE_CHANCE
         if (
                 "brake_distance" in config
                 or "braking_distance" in config
@@ -1198,6 +1209,18 @@ class ACCNairSMPCAgent(object):
         ``cutin_clearance_scale``.
         """
         match = re.search(r"cutin_ramp([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_cutin_chance_ref(smpc_config):
+        """Read ``cutin_chance<value>`` from the config string (default: disabled).
+
+        The value is the reference confidence ``beta_ref`` of the Benciolini
+        confidence chance constraint on cut-in modes; the token also switches
+        the controller to ``confidence_chance`` safety constraints.  See
+        ``chance_cutin_clearance``.
+        """
+        match = re.search(r"cutin_chance([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else 0.0
 
     @staticmethod

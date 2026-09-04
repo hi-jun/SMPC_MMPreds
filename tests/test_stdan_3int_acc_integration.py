@@ -11,8 +11,10 @@ sys.path.insert(0, os.path.join(ROOT, "scripts", "carla"))
 
 from predictor.stdan_3int_signed_tcross_velint.acc_adapter import STDAN3IntACCAdapter  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
+    ACCModePrediction,
     REL_EGO_LANE,
     REL_RIGHT_ADJACENT as _REL_RIGHT_ADJACENT,
+    chance_cutin_clearance,
     chance_tolerance,
     cutin_clearance_scale,
     REL_LEFT_ADJACENT,
@@ -29,6 +31,7 @@ from utils.acc_nair_smpc import (  # noqa: E402
     NairACCConfig,
     NairACCSMPC,
     OldACCReferenceAdapter,
+    confidence_quantile,
     required_standoff,
     safety_function,
 )
@@ -621,6 +624,114 @@ class TestCutInClearanceRamp(unittest.TestCase):
                 places=9,
                 msg=f"scale={scale}",
             )
+
+
+class TestCutInChanceConstraint(unittest.TestCase):
+    """Cut-in modes become Benciolini confidence chance constraints.
+
+    Benciolini et al. (T-IV 2023) eq. (19a): the forbidden region is
+    (sigma + l_o) * q(beta_j) with beta_j = mu_j.  In 1-D the quantile is
+    Phi^-1((1 + beta) / 2), the tuned standoff plays l_o, and the controller
+    adds the sigma term from the same beta (see acc_nair_smpc.confidence_tightening).
+    """
+
+    REF = 0.95
+    HORIZON = 3
+
+    @staticmethod
+    def _fake_mode(name, probability):
+        return ACCModePrediction(
+            vehicle_id=7,
+            mode_name=name,
+            probability=probability,
+            frenet=np.zeros((4, 3)),
+            active_mask=np.ones(4, dtype=bool),
+            raw_mode_indices=[1],
+            ego_lane_membership_split_step=0,
+        )
+
+    def test_confidence_quantile_matches_closed_form(self):
+        self.assertAlmostEqual(confidence_quantile(0.95), 1.95996, places=4)
+        self.assertAlmostEqual(confidence_quantile(0.50), 0.67449, places=4)
+        self.assertAlmostEqual(confidence_quantile(0.0), 0.0, places=9)
+        values = [confidence_quantile(b) for b in (0.02, 0.1, 0.3, 0.5, 0.8, 0.95)]
+        self.assertTrue(all(a < b for a, b in zip(values, values[1:])), values)
+
+    def test_confidence_is_capped_and_scale_vanishes(self):
+        modes = [self._fake_mode("cutin", p) for p in (0.99, 0.50, 0.02)]
+        chance_cutin_clearance(modes, self.REF)
+        self.assertEqual([m.chance_confidence for m in modes], [0.95, 0.50, 0.02])
+        scales = [m.clearance_scale for m in modes]
+        self.assertAlmostEqual(scales[0], 1.0, places=9)
+        self.assertAlmostEqual(scales[1], 0.3441, places=3)
+        self.assertAlmostEqual(scales[2], 0.0128, places=3)
+        self.assertTrue(all(a > b for a, b in zip(scales, scales[1:])), scales)
+
+    def test_reference_zero_is_a_no_op(self):
+        mode = self._fake_mode("cutin", 0.3)
+        self.assertEqual(chance_cutin_clearance([mode], 0.0), {})
+        self.assertTrue(np.isnan(mode.chance_confidence))
+        self.assertEqual(mode.clearance_scale, 1.0)
+
+    def test_chance_only_touches_cutin_modes(self):
+        gate = TestCutInProbabilityGate()
+        processed = gate._process(
+            gate._raw([0.60, 0.30, 0.10], [3.5, 0.0, 0.0]),
+            cutin_chance_ref=self.REF,
+        )
+        by_name = {m.mode_name: m for m in processed.mode_predictions}
+        self.assertTrue(np.isnan(by_name["lk"].chance_confidence))
+        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
+        cutin = by_name["cutin"]
+        self.assertAlmostEqual(cutin.chance_confidence, min(cutin.probability, self.REF), places=9)
+        self.assertAlmostEqual(
+            cutin.clearance_scale,
+            confidence_quantile(cutin.chance_confidence) / confidence_quantile(self.REF),
+            places=9,
+        )
+        self.assertLess(cutin.clearance_scale, 1.0)
+        self.assertIn("cutin", processed.branch_info["cutin_chance_confidences"])
+
+    def test_ego_lane_lead_is_never_a_chance_cell(self):
+        s = np.array([20.0, 22.0, 24.0])
+        ahead = np.column_stack((s, np.zeros_like(s)))
+        raw = {
+            "vehicle_id": 11,
+            "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
+            "pred_traj_frenet": np.stack((ahead, ahead, ahead)),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+        processed = TestCutInProbabilityGate()._process(
+            raw, current_d=0.0, relation=REL_EGO_LANE, cutin_chance_ref=self.REF
+        )
+        for mode in processed.mode_predictions:
+            self.assertTrue(np.isnan(mode.chance_confidence), mode.mode_name)
+            self.assertEqual(mode.clearance_scale, 1.0, mode.mode_name)
+
+    def test_chance_reaches_the_controller_prediction(self):
+        gate = TestCutInProbabilityGate()
+        processed = gate._process(
+            gate._raw([0.90, 0.05, 0.05], [3.5, 0.0, 0.0]),
+            cutin_chance_ref=self.REF,
+        )
+        beta = gate._mode(processed, "cutin").chance_confidence
+        prediction, _ = build_multitarget_lead_prediction(
+            [processed],
+            ego_state=np.array([0.0, 10.0]),
+            horizon=self.HORIZON,
+            desired_speed=15.0,
+            num_modes=2,
+        )
+        active = prediction.active_mask
+        self.assertTrue(active.any())
+        np.testing.assert_allclose(prediction.chance_confidence[active], beta)
+        self.assertTrue(np.all(np.isnan(prediction.chance_confidence[~active])))
+        np.testing.assert_allclose(
+            prediction.clearance_scale[active],
+            confidence_quantile(beta) / confidence_quantile(self.REF),
+        )
 
 
 class TestLaneSideConvention(unittest.TestCase):

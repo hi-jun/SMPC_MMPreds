@@ -18,17 +18,21 @@ from utils.acc_nair_smpc import (  # noqa: E402
     NairACCSolution,
     NairACCSMPC,
     MultimodalLeadPrediction,
+    OldACCReferenceAdapter,
     PolicySharingTree,
     RISK_FIXED,
     RISK_OPTIMIZED_ETA,
     RISK_PROBABILITY_WEIGHTED,
     SAFETY_BRAKE_DISTANCE,
+    SAFETY_CONFIDENCE_CHANCE,
     SAFETY_NOMINAL_SAFE_DISTANCE,
     SAFETY_SCALAR_CHANCE,
     VARIANT_MULTIMODAL_OL,
     allocate_risk,
     cdf_lower_bound_lines,
     chance_tightening,
+    confidence_quantile,
+    confidence_tightening,
     exact_brake_distance,
     optimized_eta_target_probability,
     safety_function,
@@ -663,6 +667,115 @@ class TestACCNairSMPCPort(unittest.TestCase):
         high_action = NairACCSMPC(config).solve(np.array([0.0, 12.0]), high.prediction).action
 
         self.assertLessEqual(high_action, low_action + 1.0e-6)
+
+
+class TestConfidenceChanceConstraint(unittest.TestCase):
+    """``confidence_chance`` safety mode: tightening = q(beta) * safety_std per cell.
+
+    Mode 0 below is an ego-lane lead (NaN confidence, deterministic gap); mode 1
+    is a cut-in hypothesis carrying the Benciolini confidence ``beta``.
+    """
+
+    @staticmethod
+    def _config(**overrides):
+        kwargs = dict(
+            horizon=3,
+            dt=0.2,
+            desired_speed=14.0,
+            num_modes=2,
+            safety_constraint_mode=SAFETY_CONFIDENCE_CHANCE,
+            risk_allocation_mode=RISK_FIXED,
+            max_slsqp_iter=35,
+            optimizer_ftol=1.0e-3,
+        )
+        kwargs.update(overrides)
+        return NairACCConfig(**kwargs)
+
+    @staticmethod
+    def _prediction(horizon=3, confidence=0.5, lead_s0=60.0):
+        means = np.zeros((2, horizon + 1, 2))
+        means[:, :, 0] = lead_s0 + 10.0 * 0.2 * np.arange(horizon + 1)
+        means[:, :, 1] = 10.0
+        covariances = np.zeros((2, horizon + 1, 2, 2))
+        covariances[:, :, 0, 0] = 4.0
+        covariances[:, :, 1, 1] = 0.09
+        chance_confidence = np.full((2, horizon + 1), np.nan)
+        chance_confidence[1, :] = confidence
+        return MultimodalLeadPrediction(
+            means=means,
+            probabilities=np.array([0.6, 0.4]),
+            covariances=covariances,
+            chance_confidence=chance_confidence,
+        )
+
+    def test_confidence_tightening_scales_safety_std(self):
+        config = self._config()
+        covariance = np.diag([4.0, 0.09])
+        self.assertAlmostEqual(
+            confidence_tightening(covariance, 0.95, config),
+            1.959964 * safety_std(covariance, config),
+            places=5,
+        )
+        self.assertEqual(confidence_tightening(covariance, float("nan"), config), 0.0)
+        self.assertAlmostEqual(confidence_tightening(covariance, 0.0, config), 0.0, places=9)
+        self.assertAlmostEqual(confidence_quantile(0.5), 0.67449, places=4)
+
+    def test_rejects_optimized_eta(self):
+        with self.assertRaises(ValueError):
+            self._config(risk_allocation_mode=RISK_OPTIMIZED_ETA)
+
+    def test_prediction_validates_confidence(self):
+        with self.assertRaises(ValueError):
+            self._prediction(confidence=1.5)
+        default = MultimodalLeadPrediction(
+            means=np.zeros((2, 4, 2)), probabilities=np.array([0.5, 0.5])
+        )
+        self.assertTrue(np.all(np.isnan(default.chance_confidence)))
+
+    def test_controller_uses_cached_qp_and_tightens_only_confidence_cells(self):
+        config = self._config()
+        solution = NairACCSMPC(config).solve(np.array([0.0, 12.0]), self._prediction(confidence=0.5))
+
+        self.assertTrue(np.isfinite(solution.action))
+        self.assertEqual(solution.solve_path, "cached_feedback_confidence_chance_qp")
+        self.assertIn("cached_feedback_confidence_chance_qp", solution.solver_message)
+        expected = confidence_quantile(0.5) * safety_std(np.diag([4.0, 0.09]), config)
+        self.assertAlmostEqual(solution.tightening_max, expected, places=6)
+        self.assertAlmostEqual(solution.tightening_min, 0.0)
+        self.assertTrue(solution.feasible)
+        self.assertGreaterEqual(solution.chance_margin_min, -1.0e-6)
+
+    def test_open_loop_variant_uses_cached_qp(self):
+        config = self._config(controller_variant=VARIANT_MULTIMODAL_OL)
+        solution = NairACCSMPC(config).solve(np.array([0.0, 12.0]), self._prediction(confidence=0.5))
+        self.assertTrue(np.isfinite(solution.action))
+        self.assertEqual(solution.solve_path, "cached_open_loop_confidence_chance_qp")
+        self.assertGreater(solution.tightening_max, 0.0)
+
+    def test_trim_keeps_confidence_and_clearance(self):
+        prediction = self._prediction(horizon=5, confidence=0.5)
+        prediction.clearance_scale[1, :] = 0.4
+        trimmed = NairACCSMPC(self._config())._trim_prediction(prediction)
+        self.assertEqual(trimmed.horizon, 3)
+        np.testing.assert_allclose(trimmed.clearance_scale[1], 0.4)
+        np.testing.assert_allclose(trimmed.chance_confidence[1], 0.5)
+        self.assertTrue(np.all(np.isnan(trimmed.chance_confidence[0])))
+
+    def test_reference_asks_for_the_sigma_term(self):
+        config = self._config()
+        ego = np.array([0.0, 10.0])
+        # A lead 20 m ahead binds the reference (standoff is 4.5 + 3 + 1.3 * 10 = 20.5 m).
+        with_sigma = OldACCReferenceAdapter(config).generate(
+            ego, self._prediction(confidence=0.5, lead_s0=20.0))
+        without = OldACCReferenceAdapter(config).generate(
+            ego, self._prediction(confidence=float("nan"), lead_s0=20.0))
+        sigma_term = confidence_quantile(0.5) * safety_std(np.diag([4.0, 0.09]), config)
+        # Mode 1 carries the confidence: its reference sits sigma_term further back.
+        np.testing.assert_allclose(
+            without.s_ref[1, 1:] - with_sigma.s_ref[1, 1:], sigma_term, rtol=1.0e-9
+        )
+        # Mode 0 is deterministic either way.
+        np.testing.assert_allclose(with_sigma.s_ref[0], without.s_ref[0])
 
 
 if __name__ == "__main__":

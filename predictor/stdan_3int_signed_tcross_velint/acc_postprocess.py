@@ -7,9 +7,11 @@ from typing import Dict, Iterable, List, Optional, Sequence
 import numpy as np
 
 try:
-    from utils.acc_nair_smpc import MultimodalLeadPrediction, PolicySharingTree
+    from utils.acc_nair_smpc import (
+        MultimodalLeadPrediction, PolicySharingTree, confidence_quantile)
 except ImportError:  # pragma: no cover - used when imported from repository root
-    from scripts.carla.utils.acc_nair_smpc import MultimodalLeadPrediction, PolicySharingTree
+    from scripts.carla.utils.acc_nair_smpc import (
+        MultimodalLeadPrediction, PolicySharingTree, confidence_quantile)
 
 
 INTENTION_NAMES = ("LK", "LLC", "RLC")
@@ -30,6 +32,7 @@ class ACCModePrediction:
     ego_lane_membership_split_step: int
     lead_covariance: Optional[np.ndarray] = None
     clearance_scale: float | np.ndarray = 1.0  # per-step array once gap recovery applies
+    chance_confidence: float = float("nan")  # Benciolini beta_j; NaN = deterministic mode
 
     @property
     def branch_step(self) -> int:
@@ -317,6 +320,46 @@ def ramp_cutin_clearance(
     return scales
 
 
+def chance_cutin_clearance(
+    mode_predictions: Sequence[ACCModePrediction],
+    reference_beta: float,
+) -> Dict[str, Dict[str, float]]:
+    """Turn each cut-in mode into a Benciolini confidence chance constraint.
+
+    Benciolini et al. (T-IV 2023) eq. (19a) size the forbidden region as
+    ``(sigma + l_o) * q(beta_j)`` with ``beta_j = g(mu_j)`` and ``g(p) = p``: the
+    confidence demanded of a candidate trajectory is the probability assigned to
+    it.  The 1-D counterpart used here is
+
+        gap = q(beta_j) * sigma_s  +  [q(beta_j) / q(beta_ref)] * standoff,
+
+    so the tuned standoff plays the role of ``l_o`` (it is what a mode at
+    ``beta_ref`` keeps) and both terms vanish together as ``beta_j -> 0``
+    (Remark 5: the footprint sits inside the scaling).  ``beta_j`` is capped at
+    ``beta_ref`` (Remark 4: the quantile diverges as ``beta -> 1``), which keeps
+    the standoff factor at most 1.  This function records ``beta_j`` on the mode
+    and applies the standoff factor; the controller adds the ``sigma`` term from
+    the same ``beta_j`` in ``confidence_chance`` mode.  Unlike
+    ``ramp_cutin_clearance`` the quantile is the 1-D ``Phi^-1((1 + beta) / 2)``,
+    not the paper's 2-D ``sqrt(-2 ln(1 - beta))``.
+
+    Scoped to ``cutin`` modes for the reason ``ramp_cutin_clearance`` gives.
+    """
+    reference_beta = float(reference_beta)
+    if reference_beta <= 0.0:
+        return {}
+    reference_quantile = confidence_quantile(reference_beta)
+    result = {}
+    for mode in mode_predictions:
+        if mode.mode_name != "cutin":
+            continue
+        beta = min(float(mode.probability), reference_beta)
+        mode.chance_confidence = beta
+        mode.clearance_scale = confidence_quantile(beta) / reference_quantile
+        result[mode.mode_name] = {"confidence": beta, "scale": mode.clearance_scale}
+    return result
+
+
 def tlc_cutin_clearance(
     mode_predictions: Sequence[ACCModePrediction],
     reference_tlc_s: float,
@@ -444,6 +487,7 @@ def process_vehicle_prediction(
     lane_membership_source: str = "frenet_d_threshold",
     cutin_probability_threshold: float = 0.0,
     cutin_clearance_ramp_ref: float = 0.0,
+    cutin_chance_ref: float = 0.0,
     cutin_clearance_tlc_ref: float = 0.0,
     gap_recovery_elapsed_s: Optional[float] = None,
     gap_recovery_s: float = 0.0,
@@ -543,6 +587,9 @@ def process_vehicle_prediction(
     cutin_clearance_scales = ramp_cutin_clearance(
         mode_predictions, cutin_clearance_ramp_ref
     )
+    cutin_chance_confidences = chance_cutin_clearance(
+        mode_predictions, cutin_chance_ref
+    )
     tlc_clearance_scales = tlc_cutin_clearance(
         mode_predictions, cutin_clearance_tlc_ref, dt
     )
@@ -572,6 +619,8 @@ def process_vehicle_prediction(
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),
             "cutin_clearance_scales": cutin_clearance_scales,
+            "cutin_chance_ref": float(cutin_chance_ref),
+            "cutin_chance_confidences": cutin_chance_confidences,
             "cutin_clearance_tlc_ref": float(cutin_clearance_tlc_ref),
             "tlc_clearance_scales": tlc_clearance_scales,
             "gap_recovery_s": float(gap_recovery_s),
@@ -609,6 +658,7 @@ def build_multitarget_lead_prediction(
             mode_names=["default"],
             active_mask=active_mask,
             clearance_scale=np.ones((1, horizon + 1)),
+            chance_confidence=np.full((1, horizon + 1), np.nan),
         )
         return prediction, []
 
@@ -624,6 +674,7 @@ def build_multitarget_lead_prediction(
     covariances = np.zeros((len(scenarios), horizon + 1, 2, 2), dtype=float)
     active_mask = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     clearance_scale = np.ones((len(scenarios), horizon + 1), dtype=float)
+    chance_confidence = np.full((len(scenarios), horizon + 1), np.nan)
     mode_names = []
     probabilities = []
     metadata = []
@@ -662,6 +713,7 @@ def build_multitarget_lead_prediction(
             active_mask[scenario_out_idx, step] = True
             scale = np.asarray(selected.clearance_scale, dtype=float)
             clearance_scale[scenario_out_idx, step] = float(scale[step] if scale.ndim else scale)
+            chance_confidence[scenario_out_idx, step] = float(selected.chance_confidence)
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
             effective_lead_keys.append((int(selected.vehicle_id), str(selected.mode_name)))
@@ -700,6 +752,7 @@ def build_multitarget_lead_prediction(
         policy_tree=policy_tree,
         active_mask=active_mask,
         clearance_scale=clearance_scale,
+        chance_confidence=chance_confidence,
         k_group_map=k_group_map,
         k_group_names=k_group_names,
     )
