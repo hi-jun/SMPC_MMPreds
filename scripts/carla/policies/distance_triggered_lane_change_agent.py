@@ -10,8 +10,15 @@ from utils import frenet_trajectory_handler as fth
 MIN_CURRENT_LANE_ROUTE_DISTANCE = 500.0
 MIN_POST_LANE_CHANGE_ROUTE_DISTANCE = 500.0
 SPEED_CAP_VEHICLE_LENGTH_M = 4.5
-SPEED_CAP_MIN_LONGITUDINAL_GAP_M = 5.0
-SPEED_CAP_GAIN = 0.5
+# The cap starts biting at the centre-to-centre gap where v_cap reaches the
+# nominal speed:  4.5 + MIN_GAP + (nominal - lead_speed) / GAIN.  For the cut-in
+# scenarios (15 m/s over a 9 m/s lead) that is 12.0 m, below both lead-gap
+# triggers (17 m normal, 13 m aggressive), so the cap no longer decelerates the
+# vehicle before it starts its lane change.  Keep this engagement gap below the
+# smallest trigger distance in use; a larger nominal-to-lead speed difference
+# raises it.
+SPEED_CAP_MIN_LONGITUDINAL_GAP_M = 2.5
+SPEED_CAP_GAIN = 1.2
 SPEED_CAP_LATERAL_THRESHOLD_M = 2.5
 SPEED_CAP_YAW_THRESHOLD_DEG = 45.0
 

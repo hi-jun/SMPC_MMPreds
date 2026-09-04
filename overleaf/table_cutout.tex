@@ -1,0 +1,50 @@
+\documentclass[letterpaper, 10 pt, journal]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{float}
+
+\begin{document}
+
+\begin{table*}[t]
+\centering
+\caption{Performance Comparison in Cut-out Scenarios}
+\label{tab:cutout_performance_final}
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Scenario}} 
+& \multirow{2}{*}{\textbf{Controller}} 
+& \multicolumn{3}{c}{\textbf{Ride Comfort}} 
+& \multicolumn{2}{c}{\textbf{Cut-out Response}} \\ 
+\cmidrule(lr){3-5} \cmidrule(lr){6-7}
+ &  
+ & $a_{\text{avg}}$ (m/s$^2$) 
+ & $j_{\text{avg}}$ (m/s$^3$) 
+ & $j_{\text{max}}$ (m/s$^3$) 
+ & $\Delta t_{\text{ant}}$ (s) 
+ & $v_{\text{avg}}$ (m/s) \\ 
+\midrule
+
+\multirow{3}{*}{\shortstack[l]{Cut-out \\ w/o Second-LV}} 
+ & SCC                & 1.18 & 0.78 & 3.00 & 0.00 & 12.95 \\
+ & SCC + LSTM           & 1.28 & 0.73 & 2.49 & 1.10 & 13.92 \\
+ & \textbf{Proposed}  & \textbf{1.33} & \textbf{0.71} & \textbf{2.39} & \textbf{1.30} & \textbf{14.05} \\ 
+\midrule
+
+\multirow{3}{*}{\shortstack[l]{Cut-out \\ with Second-LV}} 
+ & SCC                & 0.91 & 0.70 & 4.23 & 0.00 & 14.86 \\
+ & SCC + LSTM           & 0.91 & 0.54 & 3.06 & 1.10 & 14.21 \\
+ & \textbf{Proposed}  & \textbf{0.61} & \textbf{0.52} & \textbf{2.05} & \textbf{2.80} & \textbf{13.80} \\ 
+\bottomrule
+
+\end{tabular}
+\end{table*}
+
+\end{document}
