@@ -502,6 +502,8 @@ class STDAN3IntACCAdapter:
             horizon=horizon,
             desired_speed=desired_speed,
             num_modes=num_modes,
+            reference_beta=cutin_chance_ref,
+            vanish_threshold=cutin_probability_threshold,
         )
         return {
             "prediction": prediction,

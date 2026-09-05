@@ -343,7 +343,8 @@ def chance_cutin_clearance(
     ``ramp_cutin_clearance`` the quantile is the 1-D ``Phi^-1((1 + beta) / 2)``,
     not the paper's 2-D ``sqrt(-2 ln(1 - beta))``.
 
-    Scoped to ``cutin`` modes for the reason ``ramp_cutin_clearance`` gives.
+    Scoped to ``cutin`` modes, so adjacent-lane vehicles only; the ego-lane
+    counterpart is ``chance_cutout_clearance``.
     """
     reference_beta = float(reference_beta)
     if reference_beta <= 0.0:
@@ -356,6 +357,46 @@ def chance_cutin_clearance(
         beta = min(float(mode.probability), reference_beta)
         mode.chance_confidence = beta
         mode.clearance_scale = confidence_quantile(beta) / reference_quantile
+        result[mode.mode_name] = {"confidence": beta, "scale": mode.clearance_scale}
+    return result
+
+
+def chance_cutout_clearance(
+    mode_predictions: Sequence[ACCModePrediction],
+    relation_to_ego_lane: str,
+    reference_beta: float,
+    vanish_threshold: float,
+) -> Dict[str, Dict[str, float]]:
+    """Turn an ego-lane vehicle's lane-keeping mode into a confidence chance constraint.
+
+    The cut-out counterpart of ``chance_cutin_clearance``.  In 1-D a
+    lane-keeping hypothesis that keeps a vacating lead in place blocks the ego
+    from ever accelerating, however unlikely it has become, because the ``lk``
+    mode is a full lead at every step.  Scaling its standoff by its probability
+    -- the same ``beta_j = min(p, beta_ref)`` factor a cut-in mode gets, without
+    the sigma term -- lets the ego lean into the cut-out, and below
+    ``vanish_threshold`` the hypothesis vanishes like an unlikely cut-in does.
+    The ``cutout`` mode stays deterministic and unscaled: it keeps the full
+    standoff for as long as the vehicle is still predicted in the lane, so the
+    ego may only start accelerating into the hypothesis that the vehicle stays,
+    never into the vehicle itself.  Adjacent-lane vehicles are untouched.
+    """
+    reference_beta = float(reference_beta)
+    if reference_beta <= 0.0 or relation_to_ego_lane != REL_EGO_LANE:
+        return {}
+    reference_quantile = confidence_quantile(reference_beta)
+    result = {}
+    for mode in mode_predictions:
+        if mode.mode_name != "lk":
+            continue
+        beta = min(float(mode.probability), reference_beta)
+        # Standoff factor only: the sigma term would also tighten ordinary
+        # following (p_lk >= beta_ref) against tonight's calibrated behaviour,
+        # and an in-lane lead is already covered deterministically by the
+        # cutout mode for the steps it is still predicted present.
+        mode.clearance_scale = confidence_quantile(beta) / reference_quantile
+        if mode.probability < float(vanish_threshold):
+            mode.active_mask[:] = False
         result[mode.mode_name] = {"confidence": beta, "scale": mode.clearance_scale}
     return result
 
@@ -459,9 +500,11 @@ def gate_unlikely_cutin_modes(
     mode/step whose mask is unset.
 
     Only ``cutin`` modes are gated.  They exist solely for adjacent-lane targets,
-    so an ego-lane lead vehicle can never be relaxed away.  A target already
-    occupying the ego lane also keeps its step-0 constraint, because that step is
-    taken from the measured position and is therefore shared by the ``lk`` mode.
+    so this gate never relaxes an ego-lane lead vehicle away; when the confidence
+    chance constraint is on, ``chance_cutout_clearance`` vanishes the ``lk``
+    hypothesis of an ego-lane vehicle the same way.  A target already occupying
+    the ego lane also keeps its step-0 constraint, because that step is taken
+    from the measured position and is therefore shared by the ``lk`` mode.
     """
     threshold = float(threshold)
     if threshold <= 0.0:
@@ -590,6 +633,9 @@ def process_vehicle_prediction(
     cutin_chance_confidences = chance_cutin_clearance(
         mode_predictions, cutin_chance_ref
     )
+    cutin_chance_confidences.update(chance_cutout_clearance(
+        mode_predictions, relation_to_ego_lane, cutin_chance_ref, cutin_probability_threshold
+    ))
     tlc_clearance_scales = tlc_cutin_clearance(
         mode_predictions, cutin_clearance_tlc_ref, dt
     )
@@ -632,6 +678,45 @@ def process_vehicle_prediction(
     )
 
 
+def _vacating_modes(selected, step, combo, targets, ego_s):
+    """Ego-lane vehicles the selected lead is seen past at ``step``.
+
+    Their mode in this scenario is inactive at ``step`` -- they have left the
+    lane -- while they currently sit between the ego and the selected lead.
+    """
+    vacating = []
+    for other, target in zip(combo, targets):
+        if other is selected or target.relation_to_ego_lane != REL_EGO_LANE:
+            continue
+        if step < other.frenet.shape[0] and other.active_mask[step]:
+            continue
+        if ego_s <= float(other.frenet[0, 0]) < float(selected.frenet[step, 0]):
+            vacating.append(other)
+    return vacating
+
+
+def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshold):
+    """Condition a lead cell on the vacating vehicles it looks past.
+
+    The cell exists only if each of them really leaves, so it inherits their
+    mode probability -- the second lead only matters if the first one goes:
+    the standoff factor of ``min(p, beta_ref)``, and nothing at all below
+    ``vanish_threshold``.  ``cell`` is the selected
+    lead's own ``(confidence, scale)``; returns ``None`` for a vanished cell.
+    """
+    confidence, scale = cell
+    for mode in vacating:
+        if mode.probability < vanish_threshold:
+            return None
+        beta = min(float(mode.probability), reference_beta)
+        # Standoff factor only; a deterministic (NaN) lead stays without a
+        # sigma term, as in ``chance_cutout_clearance``.
+        if not np.isnan(confidence):
+            confidence = min(confidence, beta)
+        scale = min(scale, confidence_quantile(beta) / confidence_quantile(reference_beta))
+    return confidence, scale
+
+
 def build_multitarget_lead_prediction(
     processed_predictions: Iterable[ACCProcessedPrediction],
     ego_state: Sequence[float],
@@ -640,10 +725,20 @@ def build_multitarget_lead_prediction(
     num_modes: int,
     covariance: Optional[np.ndarray] = None,
     nonblocking_speed: Optional[float] = None,
+    reference_beta: float = 0.0,
+    vanish_threshold: float = 0.0,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
+    """Joint scenarios over targets, each step's nearest active mode as the lead.
+
+    With ``reference_beta`` > 0 (the confidence chance constraint) a cell whose
+    lead is seen past a vacating ego-lane vehicle inherits that vehicle's
+    cut-out probability, see ``_inherit_vacating_confidence``.
+    """
     targets = [pred for pred in processed_predictions if pred.mode_predictions]
     horizon = int(horizon)
     num_modes = int(num_modes)
+    reference_beta = float(reference_beta)
+    vanish_threshold = float(vanish_threshold)
     ego_s = float(np.asarray(ego_state, dtype=float)[0])
     default_speed = float(desired_speed if nonblocking_speed is None else nonblocking_speed)
     if not targets:
@@ -689,6 +784,7 @@ def build_multitarget_lead_prediction(
         selected_ids = []
         selected_modes = []
         effective_lead_keys = []
+        vacated_lane_steps = []
         for step in range(horizon + 1):
             candidates = []
             for mode in combo:
@@ -698,12 +794,22 @@ def build_multitarget_lead_prediction(
                 if s_val < ego_s:
                     continue
                 candidates.append((s_val, mode))
-            if not candidates:
+            cell = None
+            if candidates:
+                _, selected = min(candidates, key=lambda item: item[0])
+                scale = np.asarray(selected.clearance_scale, dtype=float)
+                cell = (float(selected.chance_confidence), float(scale[step] if scale.ndim else scale))
+                if reference_beta > 0.0:
+                    vacating = _vacating_modes(selected, step, combo, targets, ego_s)
+                    if vacating:
+                        vacated_lane_steps.append(step)
+                    cell = _inherit_vacating_confidence(
+                        cell, vacating, reference_beta, vanish_threshold)
+            if cell is None:
                 selected_ids.append(None)
                 selected_modes.append(None)
                 effective_lead_keys.append(("inactive",))
                 continue
-            _, selected = min(candidates, key=lambda item: item[0])
             means[scenario_out_idx, step, 0] = selected.frenet[step, 0]
             means[scenario_out_idx, step, 1] = selected.frenet[step, 2]
             if selected.lead_covariance is not None and step < selected.lead_covariance.shape[0]:
@@ -711,9 +817,7 @@ def build_multitarget_lead_prediction(
             else:
                 covariances[scenario_out_idx, step] = base_cov
             active_mask[scenario_out_idx, step] = True
-            scale = np.asarray(selected.clearance_scale, dtype=float)
-            clearance_scale[scenario_out_idx, step] = float(scale[step] if scale.ndim else scale)
-            chance_confidence[scenario_out_idx, step] = float(selected.chance_confidence)
+            chance_confidence[scenario_out_idx, step], clearance_scale[scenario_out_idx, step] = cell
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
             effective_lead_keys.append((int(selected.vehicle_id), str(selected.mode_name)))
@@ -726,6 +830,7 @@ def build_multitarget_lead_prediction(
                 "selected_vehicle_ids": selected_ids,
                 "selected_mode_names": selected_modes,
                 "effective_lead_keys": effective_lead_keys,
+                "vacated_lane_steps": vacated_lane_steps,
             }
         )
 

@@ -692,7 +692,11 @@ class TestCutInChanceConstraint(unittest.TestCase):
         self.assertLess(cutin.clearance_scale, 1.0)
         self.assertIn("cutin", processed.branch_info["cutin_chance_confidences"])
 
-    def test_ego_lane_lead_is_never_a_chance_cell(self):
+    def test_ego_lane_cutout_mode_is_never_a_chance_cell(self):
+        """Only the lane-keeping hypothesis of an ego-lane vehicle is relaxed.
+
+        See ``chance_cutout_clearance`` and tests/test_chance_cutout_extension.py.
+        """
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
         raw = {
@@ -706,9 +710,16 @@ class TestCutInChanceConstraint(unittest.TestCase):
         processed = TestCutInProbabilityGate()._process(
             raw, current_d=0.0, relation=REL_EGO_LANE, cutin_chance_ref=self.REF
         )
-        for mode in processed.mode_predictions:
-            self.assertTrue(np.isnan(mode.chance_confidence), mode.mode_name)
-            self.assertEqual(mode.clearance_scale, 1.0, mode.mode_name)
+        by_name = {m.mode_name: m for m in processed.mode_predictions}
+        self.assertTrue(np.isnan(by_name["cutout"].chance_confidence))
+        self.assertEqual(by_name["cutout"].clearance_scale, 1.0)
+        self.assertTrue(np.isnan(by_name["lk"].chance_confidence), "standoff factor only")
+        self.assertAlmostEqual(
+            by_name["lk"].clearance_scale,
+            confidence_quantile(0.02) / confidence_quantile(self.REF),
+            places=9,
+        )
+        self.assertTrue(by_name["lk"].active_mask.all(), "no vanish threshold given")
 
     def test_chance_reaches_the_controller_prediction(self):
         gate = TestCutInProbabilityGate()
