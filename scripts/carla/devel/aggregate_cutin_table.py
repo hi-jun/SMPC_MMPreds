@@ -112,6 +112,75 @@ cut-in 응답
   cut-in 차량이 옛 차선 앞차를 횡방향 여유 ~0 m 로 스치고 지나가서, cm 단위 차이로
   CARLA 가 접촉을 잡느냐 마느냐가 갈린다(SCC cutin_0012/0015: t_cross 0.25 s 뒤
   접촉, ego 가 TV 에 닿기 전). 셀별 개수를 요약에 같이 낸다.
+
+[cut-out 정의]
+그룹 이름에 `cutout` 이 들어간 셀에만 적용된다(표: overleaf/table_cutout.tex,
+열 순서 a_avg, j_avg, j_max, Δt_ant, v_avg). 창/t0/승차감/안전거리(delta)/유효성
+정의는 cut-in 과 **완전히 같다** — 아래는 달라지는 것만 적는다.
+
+역할
+  LV    = `target_cutout_*`           : ego 차선 앞을 달리다 옆 차선으로 빠지는 차.
+  subLV = `target_lead_after_cutout_*`: LV 뒤에 가려져 있던 느린 앞차(ego 차선).
+  kind `cutout_no_sublv` = subLV 없음(시간 트리거), `cutout_sublv` = subLV 있음
+  (lead-gap 트리거). 어느 쪽인지는 **그룹/런 디렉터리 이름**으로 정한다
+  ("no_sublv" 가 들어가면 subLV 없음). 실제 액터 유무는 has_sublv_actor 로 남긴다.
+
+cut-out 시각
+  t_trigger = LV policy_log.trigger_time_s (t0 기준 상대). trigger_mode /
+    trigger_distance_at_start / cutout_started / cutout_completed 도 같이 옮긴다.
+  t_out = t_trigger 이후 LV 의 lane_id 가 ego 의 lane_id 와 **2스텝(0.1 s) 연속**
+    다른 첫 시각 = LV 중심이 ego 차선을 벗어난 순간. 2스텝 hold 는 도로 경계에서
+    lane_id 가 한 샘플 튀는 것을 막는 장치다(실측: 같은 차선·종방향 이격 20~80 m
+    46k 샘플에서 lane_id 불일치 0건, 이격 0~20 m 에서만 0.7~0.8 % — cut-out LV 는
+    20~35 m 앞이라 안전한 범위다). t_trigger 가 없으면(트리거 미발동) t_out=None.
+  t_out_minus_trigger = t_out - t_trigger (LV 가 차선을 비우는 데 걸린 시간).
+
+트리거 직전 정상상태 (진단값, 무효 사유 아님)
+  settled_before_trigger = [t_trigger-3 s, t_trigger] 안에 |accel_cmd| < 0.15 m/s^2
+    가 1.0 s 이상 연속인 구간이 하나라도 있으면 1 (ACC 가 LV 뒤에서 안정 추종 중).
+    셀 집계값은 그 조건을 만족한 런의 비율이다.
+    ※ 이 조건은 "정속 순항 중"과 "LV 뒤 정상 추종 중"을 구분하지 못한다. LV 를 아예
+    안 보고 자유주행하던 런도 1 이 되니 gap_at_trigger 와 같이 읽어야 한다.
+  lv_inlane_at_trigger = t_trigger 시각에 LV 의 lane_id 가 ego 와 같은가.
+    **False 면 그 런은 cut-out 이 아니다** — 트리거가 걸릴 때 LV 가 이미 ego 차선
+    밖이라 t_out 이 t_trigger 와 같아지고(t_out_minus_trigger=0, Δt_ant=0.00)
+    지표가 나오긴 하는데 잰 대상이 없다. METRICS.md 5.3 에 따로 나열한다.
+  gap_at_trigger = t_trigger 시각의 ego-LV 범퍼 간격(중심거리 - 4.5 m),
+  v_ego_at_trigger / v_lv_at_trigger = 같은 시각 두 차의 속도.
+
+Δt_ant (제어기 반응 선제성; cut-in 과 같은 뜻이되 기준점이 t_out 이다)
+  t_settle_end = **t_out 전에 시작한** 마지막 "정상상태 구간"(|accel_cmd| < 0.15 가
+    1.0 s 이상 연속)의 끝 시각. 그런 구간이 없으면 창 시작.
+    ※ "t_out 전에 **끝나는**" 이 아니라 "t_out 전에 **시작한**" 이다. 반응이 아예
+    없는 제어기(SCC 등)는 정상상태 구간이 t_out 을 걸쳐 이어지는데, 끝나는 시각으로
+    걸러버리면 그 구간이 통째로 빠지고 훨씬 이른(트리거 전 과도) 구간이 기준이 돼
+    Δt_ant 가 크게 나오는 가짜 선제성이 생긴다. 시작 시각으로 고르면 그 런은
+    t_settle_end > t_out → t_onset > t_out → Δt_ant = 0.00 (선제성 없음) 이 된다.
+    t_settle_end > t_out 인 런은 "t_out 까지 제어기가 아무 반응을 안 했다"는 뜻이다.
+  t_onset = t_settle_end 이후 처음으로 2스텝 연속
+    accel_cmd >= +0.3 m/s^2 (kind cutout_no_sublv: 비워진 차선으로 가속) 또는
+    accel_cmd <= -0.3 m/s^2 (kind cutout_sublv: subLV 때문에 감속) 인 시각.
+    쓴 부호는 onset_sign 열에 남긴다.
+  Δt_ant = t_out - t_onset (t_onset < t_out 일 때). t_onset 이 t_out 이후면 **0.00**
+    = 선제성 없음(table_cutout.tex 의 SCC 행 0.00 과 같은 뜻). 창 안에 onset 자체가
+    없을 때만 None → 표에 '-'.
+  ※ 정상상태를 기준점으로 잡는 이유: cut-out 은 트리거 전이 정속 추종 구간이라
+    창 시작 직후의 스폰 과도를 onset 으로 잘못 집기 쉽다.
+
+속도
+  v_avg = **[t_trigger, 창끝] 의 ego 속도 평균** — table_cutout.tex 의 v_avg 열.
+    (cut-in 쪽 v_avg 는 창 전체 평균이다. 같은 이름이지만 구간이 다르다.)
+  v_avg_window = 창 전체 평균, v_avg_post = [t_out, 창끝] 평균.
+
+subLV (kind cutout_sublv 만)
+  min_bumper_gap_sublv = subLV 가 ego 차선에 있고 앞설 때의 최소 범퍼 간격.
+  delta_max / delta_avg 는 cut-in 과 같은 "차선 내 최근접 선행차" 로직을 그대로
+    쓴다 — LV 가 빠지면 자동으로 subLV 가 잡힌다(sublv_inlane_steps 로 확인).
+  lv_sublv_contact = [t_trigger-0.5 s, t_out+2 s] 안의 target_cutout ↔
+    target_lead_after_cutout 충돌(시나리오 건전성, 제외 사유 아님). 요약 CSV 는
+    cut-in 의 TV-앞차 접촉과 같은 열(tv_lead_contact_runs)에 이 개수를 낸다
+    (런 단위 CSV 에서는 lv_sublv_contact 열로 따로 남는다).
+  ego_collision / collisions_in_window 는 cut-in 과 동일.
 """
 import argparse
 import collections
@@ -137,6 +206,14 @@ S_MAP_LAG_S = 3.0
 S_MAP_TOL = 1.0
 # 충돌 직후의 1~2 fallback 스텝(500 스텝 중)은 허용; v_max 교착은 0.17 이상.
 FALLBACK_TOL = 0.02
+# cut-out
+CUTOUT_ONSET_ACCEL = 0.3      # 부호는 kind 에 따라 (+: 가속 개시, -: 감속 개시)
+CUTOUT_OUT_HOLD_STEPS = 2     # lane_id 한 샘플 튐 방지 (0.1 s)
+SETTLE_ACCEL = 0.15
+SETTLE_MIN_S = 1.0
+SETTLE_LOOKBACK_S = 3.0
+CUTOUT_CONTACT_PRE_S = 0.5
+CUTOUT_CONTACT_POST_S = 2.0
 
 SWEEP_PARAMS = ("ego_speed", "target_speed", "lane_change_distance",
                 "lane_change_time_s", "target_lead_gap", "trigger_distance",
@@ -144,15 +221,29 @@ SWEEP_PARAMS = ("ego_speed", "target_speed", "lane_change_distance",
 TEX_METRICS = ("a_avg", "j_avg_filt", "j_max_filt", "delta_max", "delta_avg",
                "dt_ant", "T_rec")
 TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
+TEX_METRICS_CUTOUT = ("a_avg", "j_avg_filt", "j_max_filt", "dt_ant", "v_avg")
 RAW_OF_FILT = {"j_avg_filt": "j_avg", "j_max_filt": "j_max"}
 AGG_METRICS = ("a_avg", "a_min", "a_min_filt", "j_avg", "j_avg_filt", "j_max",
                "j_max_filt", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
                "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "T_rec",
                "v_avg", "v_min", "passed", "t_pass")
+AGG_METRICS_CUTOUT = AGG_METRICS + (
+    "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
+    "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
+    "settled_before_trigger")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
                   "04_no_cutin_decel_onset": "No Cut-in \\\\ (decel onset 22/28/34)"}
+
+
+def is_cutout_group(group):
+    return "cutout" in group
+
+
+def cutout_label(group):
+    return ("Cut-out \\\\ w/o Second-LV" if "no_sublv" in group
+            else "Cut-out \\\\ with Second-LV")
 
 
 def policy_label(policy):
@@ -213,6 +304,138 @@ def _first_run_start(mask, hold):
     return None
 
 
+def _mask_runs(mask, hold):
+    """mask 가 hold 스텝 이상 연속 True 인 극대 구간 (시작, 끝) 인덱스 목록."""
+    out = []
+    start = None
+    for i, ok in enumerate(mask):
+        if ok and start is None:
+            start = i
+        elif not ok and start is not None:
+            if i - start >= hold:
+                out.append((start, i - 1))
+            start = None
+    if start is not None and len(mask) - start >= hold:
+        out.append((start, len(mask) - 1))
+    return out
+
+
+def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
+                    cmd, ego_s, ego_x, ego_v, ego_lane_id):
+    """cut-out 그룹 전용 지표. cut-in 블록이 None 으로 남긴 열을 덮어쓴다."""
+    name = "%s/%s" % (group, run_name)
+    row["cutout_kind"] = re.sub(r"_[0-9]+$", "", run_name)
+    sublv_expected = "no_sublv" not in name
+    # cut-out 전용 스윕 축 (target_lead_gap/trigger_distance 는 SWEEP_PARAMS 에 이미 있다)
+    row["cutout_direction"] = sweep.get("cutout_direction")
+    row["target_lead_speed_delta"] = sweep.get("target_lead_speed_delta")
+    row["cfg_trigger_time_s"] = sweep.get("trigger_time_s")
+    lv_key = next((k for k in data if k.startswith("target_cutout")), None)
+    sublv_key = next((k for k in data if k.startswith("target_lead_after_cutout")), None)
+    row["has_sublv_actor"] = sublv_key is not None
+    row["v_avg_window"] = row["v_avg"]  # cut-in 과 같은 창 전체 평균
+    row["v_avg"] = None                 # cut-out 의 v_avg 는 [t_trigger, 창끝]
+    row["v_avg_post"] = None
+    for key in ("t_out", "t_out_minus_trigger", "t_settle_end", "gap_at_trigger",
+                "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
+                "trigger_distance_at_start", "cutout_started", "cutout_completed",
+                "lv_inlane_at_trigger"):
+        row[key] = None
+    row["sublv_inlane_steps"] = 0
+    row["lv_sublv_contact"] = False
+    row["onset_sign"] = "-" if sublv_expected else "+"
+
+    trig_abs = None
+    if lv_key is not None:
+        lv_log = data[lv_key].get("policy_log", {})
+        trig = lv_log.get("trigger_time_s")
+        trig_abs = None if trig is None else float(trig)
+        row["t_trigger"] = None if trig_abs is None else round(trig_abs - t0, 3)
+        row["trigger_mode"] = lv_log.get("trigger_mode")
+        row["trigger_distance_at_start"] = lv_log.get("trigger_distance_at_start")
+        row["cutout_started"] = lv_log.get("cutout_started")
+        row["cutout_completed"] = lv_log.get("cutout_completed")
+
+    # --- t_out: LV 중심이 ego 차선을 벗어난 순간 ---
+    out_abs = None
+    if lv_key in tracks:
+        s_lv, _x_lv, lane_lv = tracks[lv_key]
+        if trig_abs is not None:
+            after = np.nonzero(t >= trig_abs - 1e-9)[0]
+            if after.size:
+                i0 = int(after[0])
+                i_out = _first_run_start(lane_lv[i0:] != ego_lane_id[i0:],
+                                         CUTOUT_OUT_HOLD_STEPS)
+                if i_out is not None:
+                    out_abs = float(t[i0 + i_out])
+            if t[0] - 1e-9 <= trig_abs <= t[-1] + 1e-9:
+                i_tr = int(_nearest(t, np.array([trig_abs]))[0])
+                row["lv_inlane_at_trigger"] = bool(lane_lv[i_tr] == ego_lane_id[i_tr])
+                row["gap_at_trigger"] = float(s_lv[i_tr] - ego_s[i_tr] - VEH_LEN)
+                row["v_ego_at_trigger"] = float(ego_v[i_tr])
+                lv_st = np.asarray(data[lv_key]["state_trajectory"], dtype=float)
+                row["v_lv_at_trigger"] = float(
+                    np.interp(trig_abs, lv_st[:, 0], lv_st[:, 4]))
+    row["t_out"] = None if out_abs is None else round(out_abs - t0, 3)
+    if out_abs is not None and row["t_trigger"] is not None:
+        row["t_out_minus_trigger"] = round(row["t_out"] - row["t_trigger"], 3)
+
+    # --- 트리거 직전 정상상태 / Δt_ant ---
+    hold_settle = max(1, int(round(SETTLE_MIN_S / dt)))
+    calm = np.abs(cmd) < SETTLE_ACCEL
+    row["settled_before_trigger"] = None
+    if trig_abs is not None:
+        look = (t >= trig_abs - SETTLE_LOOKBACK_S) & (t <= trig_abs + 1e-9)
+        row["settled_before_trigger"] = float(
+            look.any() and _first_run_start(calm[look], hold_settle) is not None)
+    settle_end = None
+    if out_abs is not None:
+        for i0, i1 in _mask_runs(calm, hold_settle):
+            if t[i0] < out_abs:  # t_out 을 걸쳐 이어지는 구간도 그 구간의 끝을 쓴다
+                settle_end = float(t[i1])
+    row["t_settle_end"] = None if settle_end is None else round(settle_end - t0, 3)
+    onset = (cmd <= -CUTOUT_ONSET_ACCEL) if sublv_expected else (cmd >= CUTOUT_ONSET_ACCEL)
+    i_from = 0 if settle_end is None else int(np.searchsorted(t, settle_end))
+    i_on = _first_run_start(onset[i_from:], ONSET_HOLD_STEPS)
+    t_onset = None if i_on is None else float(t[i_from + i_on])
+    row["t_onset"] = None if t_onset is None else round(t_onset - t0, 3)
+    row["dt_ant"] = None
+    if t_onset is not None and out_abs is not None:
+        row["dt_ant"] = round(out_abs - t_onset, 3) if t_onset < out_abs else 0.0
+
+    # --- 속도 ---
+    if trig_abs is not None:
+        sel = t >= trig_abs - 1e-9
+        row["v_avg"] = float(np.mean(ego_v[sel])) if sel.any() else None
+    if out_abs is not None:
+        sel = t >= out_abs - 1e-9
+        row["v_avg_post"] = float(np.mean(ego_v[sel])) if sel.any() else None
+
+    # --- subLV ---
+    if sublv_key in tracks:
+        s_sub, x_sub, lane_sub = tracks[sublv_key]
+        inlane = ((lane_sub == ego_lane_id) & (np.abs(x_sub - ego_x) <= LANE_HALF_WIDTH)
+                  & (s_sub > ego_s))
+        row["sublv_inlane_steps"] = int(inlane.sum())
+        if inlane.any():
+            row["min_bumper_gap_sublv"] = float(
+                np.min(s_sub[inlane] - ego_s[inlane]) - VEH_LEN)
+    if trig_abs is not None:
+        hi = (out_abs + CUTOUT_CONTACT_POST_S if out_abs is not None
+              else trig_abs + 3.0)
+        for e in data.get("_collision_log", []):
+            if not trig_abs - CUTOUT_CONTACT_PRE_S <= float(e.get("time_s", 0.0)) <= hi:
+                continue
+            roles = "%s|%s" % (e.get("actor_role"), e.get("other_actor_role"))
+            if "target_cutout" in roles and "target_lead_after_cutout" in roles:
+                row["lv_sublv_contact"] = True
+                break
+    for key in ("gap_at_trigger", "v_ego_at_trigger", "v_lv_at_trigger",
+                "v_avg", "v_avg_window", "v_avg_post", "min_bumper_gap_sublv"):
+        if row.get(key) is not None:
+            row[key] = round(row[key], 4)
+
+
 def collect_run(policy, group, run_dir):
     row = collections.OrderedDict()
     row["policy"] = policy
@@ -236,7 +459,7 @@ def collect_run(policy, group, run_dir):
         row[key] = sweep.get(key)
     if row["lane_change_distance"] is None:  # 소요시간으로 스윕하면 파생값만 남는다
         for params in cfg.get("scenario", {}).get("vehicle_params", []):
-            if params.get("role") == "target_cutin":
+            if params.get("role") in ("target_cutin", "target_cutout"):
                 row["lane_change_distance"] = params.get("lane_change_distance")
                 break
     row["ran_successfully"] = bool(met.get("ran_successfully"))
@@ -411,6 +634,9 @@ def collect_run(policy, group, run_dir):
 
     row["v_avg"] = float(np.mean(ego_v))
     row["v_min"] = float(np.min(ego_v))
+    if is_cutout_group(group):
+        cutout_response(row, data, group, run_dir.name, sweep, tracks, t, t0, dt,
+                        cmd, ego_s, ego_x, ego_v, ego_lane_id)
     for key in ("a_avg", "a_min", "a_min_filt", "j_avg", "j_avg_filt", "j_max",
                 "j_max_filt", "j_p99", "delta_max", "delta_avg",
                 "delta_avg_window", "min_bumper_gap", "v_avg", "v_min"):
@@ -430,7 +656,7 @@ def aggregate(rows):
     for key in sorted(cells):
         sel = cells[key]
         stats = collections.OrderedDict()
-        for metric in AGG_METRICS:
+        for metric in (AGG_METRICS_CUTOUT if is_cutout_group(key[0]) else AGG_METRICS):
             vals = _finite([r.get(metric) for r in sel])
             if vals:
                 stats[metric] = (float(np.mean(vals)),
@@ -441,7 +667,9 @@ def aggregate(rows):
         stats["_n_runs"] = len(sel)
         stats["_collisions"] = sum(1 for r in sel if r.get("collisions_in_window"))
         stats["_ego_collisions"] = sum(1 for r in sel if r.get("ego_collision"))
-        stats["_tv_lead_contacts"] = sum(1 for r in sel if r.get("tv_lead_contact"))
+        # cut-out 셀에서는 같은 열이 LV↔subLV 접촉 수를 뜻한다
+        stats["_tv_lead_contacts"] = sum(
+            1 for r in sel if r.get("tv_lead_contact") or r.get("lv_sublv_contact"))
         stats["_label"] = sel[0]["policy_label"]
         out[key] = stats
     return out
@@ -471,7 +699,7 @@ def write_summary_csv(path, agg):
                          "n", "mean", "std", "n_runs", "ego_collision_runs",
                          "tv_lead_contact_runs"])
         for (group, policy), stats in agg.items():
-            for metric in AGG_METRICS:
+            for metric in [m for m in stats if not m.startswith("_")]:
                 mean, std, n = stats[metric]
                 writer.writerow([group, policy, stats["_label"], metric, n,
                                  "" if mean is None else "%.4f" % mean,
@@ -485,7 +713,8 @@ def write_tex(path, agg):
              "% a_avg, j_avg, j_max, delta_max, delta_avg, dt_ant, T_rec (셀 평균)",
              "% j_avg/j_max 는 제어주기(0.2 s) 대역으로 다시 잰 j_avg_filt/j_max_filt 다 —",
              "% 원시 actual_jerk 는 1틱 액추에이터 채터(|j| 40~300)가 지배한다."]
-    groups = [g for g in sorted({k[0] for k in agg}) if "no_cutin_decel" not in g]
+    groups = [g for g in sorted({k[0] for k in agg})
+              if "no_cutin_decel" not in g and not is_cutout_group(g)]
     for gi, group in enumerate(groups):
         cells = [k for k in agg if k[0] == group]
         label = SCENARIO_LABEL.get(group, group.replace("_", "\\_"))
@@ -509,11 +738,61 @@ def write_tex(path, agg):
     open(str(path), "w").write("\n".join(lines) + "\n")
 
 
+def write_cutout_tex(path, agg):
+    lines = ["% aggregate_cutin_table.py 자동 생성 — table_cutout.tex 열 순서 그대로",
+             "% a_avg, j_avg, j_max, dt_ant, v_avg (셀 평균)",
+             "% j_avg/j_max 는 제어주기(0.2 s) 대역으로 다시 잰 j_avg_filt/j_max_filt,",
+             "% dt_ant = t_out - t_onset (선제성 없으면 0.00), v_avg 는 [t_trigger, 창끝] 평균."]
+    groups = sorted({k[0] for k in agg if is_cutout_group(k[0])})
+    for gi, group in enumerate(groups):
+        cells = [k for k in agg if k[0] == group]
+        lines.append("")
+        lines.append("\\multirow{%d}{*}{\\shortstack[l]{%s}} %% %s"
+                     % (len(cells), cutout_label(group), group))
+        for key in cells:
+            stats = agg[key]
+            vals = [fmt(stats[m][0]) for m in TEX_METRICS_CUTOUT]
+            lines.append(" & %s & %s \\\\ %% n=%d"
+                         % (stats["_label"], " & ".join(vals), stats["_n_runs"]))
+        lines.append("\\midrule" if gi < len(groups) - 1 else "\\bottomrule")
+    open(str(path), "w").write("\n".join(lines) + "\n")
+
+
+def markdown_table_cutout(agg):
+    head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 필터(원시) | j_max 필터(원시) "
+            "| Δt_ant | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
+            "| subLV 최소간격 | ego충돌 | LV-subLV접촉 |")
+    lines = [head, "|" + "---|" * 15]
+    for (group, _policy), stats in agg.items():
+        if not is_cutout_group(group):
+            continue
+        cells = []
+        for metric in TEX_METRICS_CUTOUT:
+            mean, std, n = stats[metric]
+            cell = ("-" if mean is None
+                    else "%.2f ± %.2f%s" % (mean, std, "" if n == stats["_n_runs"]
+                                            else " (n=%d)" % n))
+            raw = RAW_OF_FILT.get(metric)
+            if raw is not None and stats[raw][0] is not None:
+                cell += " (%.2f)" % stats[raw][0]
+            cells.append(cell)
+        for metric in ("t_out_minus_trigger", "gap_at_trigger",
+                       "settled_before_trigger", "delta_max", "min_bumper_gap_sublv"):
+            mean = stats[metric][0]
+            cells.append("-" if mean is None else "%.2f" % mean)
+        lines.append("| %s | %s | %d | %s | %d | %d |"
+                     % (group, stats["_label"], stats["_n_runs"], " | ".join(cells),
+                        stats["_ego_collisions"], stats["_tv_lead_contacts"]))
+    return "\n".join(lines)
+
+
 def markdown_table(agg):
     head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 필터(원시) | j_max 필터(원시) "
             "| δ_max | δ_avg | Δt_ant | T_rec | ego충돌 | TV-앞차접촉 |")
     lines = [head, "|" + "---|" * 12]
     for (group, _policy), stats in agg.items():
+        if is_cutout_group(group):
+            continue
         cells = []
         for metric in TEX_METRICS:
             mean, std, n = stats[metric]
@@ -531,7 +810,8 @@ def markdown_table(agg):
 
 
 def write_metrics_md(path, agg, rows, argv_note):
-    doc = __doc__.split("[정의]", 1)[1].strip()
+    doc, _, doc_cutout = __doc__.split("[정의]", 1)[1].partition("[cut-out 정의]")
+    doc = doc.strip()
     bad = [r for r in rows if not r["valid"]]
     parts = ["# cut-in 표 지표 정의와 집계 (aggregate_cutin_table.py)", "",
              "생성 명령: `%s`" % argv_note, "",
@@ -584,6 +864,49 @@ def write_metrics_md(path, agg, rows, argv_note):
                             r.get("ego_speed"), r.get("target_speed")))
     else:
         parts.append("없음.")
+    if any(is_cutout_group(k[0]) for k in agg):
+        cutout_rows = [r for r in rows if is_cutout_group(r["group"])]
+        parts += ["", "## 5. cut-out", "",
+                  "표 열 순서는 overleaf/table_cutout.tex 그대로 "
+                  "(a_avg, j_avg, j_max, Δt_ant, v_avg) 이고 tex 블록은 "
+                  "table_cutout_rows.tex 에 따로 쓴다. 런 단위 열은 "
+                  "table_cutin_runs.csv 에 같이 들어간다.", "",
+                  "### 5.1 정의", "", "```", doc_cutout.strip(), "```", "",
+                  "### 5.2 집계 (유효 런만, mean ± std)", "",
+                  markdown_table_cutout(agg), "",
+                  "gap@trig / subLV 최소간격은 범퍼 간격 [m], 정상상태는 "
+                  "settled_before_trigger 를 만족한 런의 비율이다.", ""]
+        no_trig = [r for r in cutout_rows if r["valid"] and r.get("t_trigger") is None]
+        no_out = [r for r in cutout_rows
+                  if r["valid"] and r.get("t_trigger") is not None
+                  and r.get("t_out") is None]
+        not_inlane = [r for r in cutout_rows
+                      if r["valid"] and r.get("lv_inlane_at_trigger") is False]
+        parts += ["### 5.3 cut-out 이 성립하지 않은 유효 런", "",
+                  "여기 걸린 런은 지표가 나오더라도 cut-out 을 잰 게 아니다. "
+                  "lv_inlane_at_trigger=False 는 트리거 시점에 LV 가 이미 ego 차선 밖이라 "
+                  "t_out 이 t_trigger 와 같아지고(Δt_ant 0.00) 시나리오 자체가 틀린 것이다.", ""]
+        if no_trig or no_out or not_inlane:
+            for r in no_trig:
+                parts.append("- 트리거 없음: %s/%s/%s" % (r["policy"], r["group"], r["run"]))
+            for r in no_out:
+                parts.append("- 트리거는 걸렸지만 창 안에서 차선을 안 벗어남: %s/%s/%s"
+                             % (r["policy"], r["group"], r["run"]))
+            for r in not_inlane:
+                parts.append("- 트리거 시점에 LV 가 ego 차선에 없음(lv_inlane_at_trigger=False): "
+                             "%s/%s/%s (t_out-t_trigger=%s)"
+                             % (r["policy"], r["group"], r["run"],
+                                r.get("t_out_minus_trigger")))
+        else:
+            parts.append("없음.")
+        contact = [r for r in cutout_rows if r.get("lv_sublv_contact")]
+        parts += ["", "### 5.4 LV–subLV 접촉 (lv_sublv_contact, %d런; 제외하지 않음)"
+                  % len(contact), ""]
+        if contact:
+            for r in contact:
+                parts.append("- %s/%s/%s" % (r["policy_label"], r["group"], r["run"]))
+        else:
+            parts.append("없음.")
     open(str(path), "w").write("\n".join(parts) + "\n")
 
 
@@ -613,17 +936,24 @@ def main():
         return 1
 
     agg = aggregate(rows)
+    has_cutout = any(is_cutout_group(k[0]) for k in agg)
     write_runs_csv(root / "table_cutin_runs.csv", rows)
     write_summary_csv(root / "table_cutin_summary.csv", agg)
     write_tex(root / "table_cutin_rows.tex", agg)
+    if has_cutout:
+        write_cutout_tex(root / "table_cutout_rows.tex", agg)
     note = "aggregate_cutin_table.py %s%s%s" % (
         root, " --ego-speeds " + args.ego_speeds if speeds else "",
         " --groups " + args.groups if groups else "")
     write_metrics_md(root / "METRICS.md", agg, rows, note)
     print("%d runs (%d valid) -> table_cutin_runs.csv, table_cutin_summary.csv, "
-          "table_cutin_rows.tex, METRICS.md in %s\n"
-          % (len(rows), sum(1 for r in rows if r["valid"]), root))
+          "table_cutin_rows.tex, %sMETRICS.md in %s\n"
+          % (len(rows), sum(1 for r in rows if r["valid"]),
+             "table_cutout_rows.tex, " if has_cutout else "", root))
     print(markdown_table(agg))
+    if has_cutout:
+        print("\ncut-out:")
+        print(markdown_table_cutout(agg))
     bad = [r for r in rows if not r["valid"]]
     if bad:
         print("\n제외 %d런:" % len(bad))
