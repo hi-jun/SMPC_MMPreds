@@ -46,15 +46,24 @@ def _default_output_root():
 
 def _param_grid(args):
     aggressive = args.kind in ("aggressive_cutin", "aggressive_cutin_with_ego_lead")
-    same_lane_distances = args.same_lane_distances or ("0,2,4" if aggressive else "5")
+    # The paper cut-out kinds default to the factory's values: ego 30 m behind
+    # the LV, no same-lane run-up, subLV 65 m ahead of the LV and 6 m/s slower.
+    paper_cutout = args.kind in ("cutout_no_sublv", "cutout_sublv")
+    target_start_gaps = args.target_start_gaps or ("30" if paper_cutout else "35,40")
+    if args.same_lane_distances:
+        same_lane_distances = args.same_lane_distances
+    else:
+        same_lane_distances = "0,2,4" if aggressive else ("0" if paper_cutout else "5")
     lane_change_distances = args.lane_change_distances or ("8,12,16" if aggressive else "18")
+    target_lead_gaps = args.target_lead_gaps or ("65" if paper_cutout else "24")
+    target_lead_speed_deltas = args.target_lead_speed_deltas or ("-6" if paper_cutout else "-2")
     outer_blocker_counts = args.outer_blocker_counts or ("3,4" if aggressive else "3")
     outer_blocker_spacings = args.outer_blocker_spacings or ("8,10,12" if aggressive else "12")
     outer_blocker_speed_deltas = args.outer_blocker_speed_deltas or "-1.5"
     common = {
         "ego_speed": _parse_csv(args.ego_speeds),
         "target_speed": _parse_csv(args.target_speeds),
-        "target_start_gap": _parse_csv(args.target_start_gaps),
+        "target_start_gap": _parse_csv(target_start_gaps),
         "trigger_distance": _parse_csv(args.trigger_distances),
         "lane_change_distance_same_lane": _parse_csv(same_lane_distances),
         "lane_change_distance": _parse_csv(lane_change_distances),
@@ -80,8 +89,8 @@ def _param_grid(args):
             "aggressive_cutin_with_ego_lead",
             "no_cutin_decel"):
         common.update({
-            "target_lead_gap": _parse_csv(args.target_lead_gaps),
-            "target_lead_speed_delta": _parse_csv(args.target_lead_speed_deltas),
+            "target_lead_gap": _parse_csv(target_lead_gaps),
+            "target_lead_speed_delta": _parse_csv(target_lead_speed_deltas),
             "outer_blocker_count": _parse_csv(outer_blocker_counts, int),
             "outer_blocker_spacing": _parse_csv(outer_blocker_spacings),
             "outer_blocker_speed_delta": _parse_csv(outer_blocker_speed_deltas),
@@ -91,7 +100,7 @@ def _param_grid(args):
                 "ego_lead_gap": _parse_csv(args.ego_lead_gaps),
                 "ego_lead_speed_delta": _parse_csv(args.ego_lead_speed_deltas),
             })
-    if args.kind in ("cutout_with_lead", "cutout_no_lead"):
+    if args.kind in ("cutout_with_lead", "cutout_no_lead", "cutout_no_sublv", "cutout_sublv"):
         common.update({
             "cutout_direction": _parse_csv(args.cutout_directions, str),
         })
@@ -99,6 +108,16 @@ def _param_grid(args):
             common.update({
                 "lead_gap": _parse_csv(args.lead_gaps),
                 "lead_speed": _parse_csv(args.lead_speeds),
+            })
+        if args.kind == "cutout_no_sublv":
+            # Nothing ahead of the cut-out vehicle: it leaves on a timer, so a
+            # trigger distance list would only multiply the grid.
+            del common["trigger_distance"]
+            common["trigger_time_s"] = _parse_csv(args.trigger_times)
+        if args.kind == "cutout_sublv":
+            common.update({
+                "target_lead_gap": _parse_csv(target_lead_gaps),
+                "target_lead_speed_delta": _parse_csv(target_lead_speed_deltas),
             })
     keys = list(common.keys())
     for values in itertools.product(*(common[key] for key in keys)):
@@ -341,6 +360,8 @@ def main():
                             "no_cutin_decel",
                             "cutout_with_lead",
                             "cutout_no_lead",
+                            "cutout_no_sublv",
+                            "cutout_sublv",
                         ],
                         default="cutin")
     parser.add_argument("--ego-policy", default="acc_nair_smpc_stdan_3int")
@@ -372,19 +393,23 @@ def main():
 
     parser.add_argument("--ego-speeds", default="12")
     parser.add_argument("--target-speeds", default="10")
-    parser.add_argument("--target-start-gaps", default="35,40")
+    parser.add_argument("--target-start-gaps", default=None)
     parser.add_argument("--trigger-distances", default="17",
                         help="Cut-in kinds: gap [m] from the cut-in vehicle to the lead in its own "
                              "lane at which it starts the lane change (NGSIM: 12.7/17.0/23.8/34.2); "
                              "no_cutin_decel: gap at which it starts decelerating instead. "
-                             "Cut-out kinds: ego-to-vehicle gap.")
+                             "cutout_sublv: gap to the lead ahead of the cut-out vehicle; "
+                             "other cut-out kinds: ego-to-vehicle gap.")
+    parser.add_argument("--trigger-times", default="8.0",
+                        help="cutout_no_sublv: seconds after control start at which the "
+                             "cut-out vehicle leaves the lane (CSV).")
     parser.add_argument("--same-lane-distances", default=None)
     parser.add_argument("--lane-change-distances", default=None)
     parser.add_argument("--lane-change-times", default=None,
-                        help="Cut-in kinds: lane change duration [s] (CSV). Overrides "
-                             "--lane-change-distances with duration x TV speed.")
-    parser.add_argument("--target-lead-gaps", default="24")
-    parser.add_argument("--target-lead-speed-deltas", default="-2")
+                        help="Cut-in and cutout_*sublv kinds: lane change duration [s] (CSV). "
+                             "Overrides --lane-change-distances with duration x TV speed.")
+    parser.add_argument("--target-lead-gaps", default=None)
+    parser.add_argument("--target-lead-speed-deltas", default=None)
     parser.add_argument("--ego-lead-gaps", default="65")
     parser.add_argument("--ego-lead-speed-deltas", default="-1")
     parser.add_argument("--outer-blocker-counts", default=None)

@@ -177,15 +177,10 @@ def _common_params(params):
     return merged
 
 
-def _apply_lead_gap_trigger(p):
-    """Cut-in kinds: the cut-in vehicle starts its lane change when it is
-    ``trigger_distance`` behind the lead in its own lane (NGSIM's
-    lead-gap-at-manoeuvre-start), not when the ego gets close.  Tying the
-    trigger to the ego made a cautious ego delay the manoeuvre until the cut-in
-    vehicle ran into its own lead.  The moment of the manoeuvre then follows
-    from the lead geometry alone, and ``ego_gap_at_trigger`` places the ego so
-    that its gap to the cut-in vehicle at that moment is the calibrated value.
-    """
+def _lead_gap_trigger_time(p):
+    """Seconds until the vehicle at ``target_speed`` closes on the lead in its
+    own lane (``target_lead_gap`` ahead, ``target_lead_speed_delta`` slower)
+    to ``trigger_distance``; raises if it never gets there."""
     target_speed = float(p["target_speed"])
     lead_speed = max(1.0, target_speed + float(p["target_lead_speed_delta"]))
     closing_on_lead = target_speed - lead_speed
@@ -198,11 +193,24 @@ def _apply_lead_gap_trigger(p):
         raise ValueError(
             "target_lead_gap must exceed trigger_distance for the cut-in vehicle to "
             f"reach the trigger (got {p['target_lead_gap']} vs {p['trigger_distance']})")
+    return t_star
+
+
+def _apply_lead_gap_trigger(p):
+    """Cut-in kinds: the cut-in vehicle starts its lane change when it is
+    ``trigger_distance`` behind the lead in its own lane (NGSIM's
+    lead-gap-at-manoeuvre-start), not when the ego gets close.  Tying the
+    trigger to the ego made a cautious ego delay the manoeuvre until the cut-in
+    vehicle ran into its own lead.  The moment of the manoeuvre then follows
+    from the lead geometry alone, and ``ego_gap_at_trigger`` places the ego so
+    that its gap to the cut-in vehicle at that moment is the calibrated value.
+    """
+    t_star = _lead_gap_trigger_time(p)
     p["lane_change_trigger_mode"] = "lead_gap"
     p["approach_time_s"] = t_star
     ego_gap = float(p.get("ego_gap_at_trigger") or 0.0)
     if ego_gap > 0.0:
-        p["target_start_gap"] = ego_gap + t_star * (float(p["ego_speed"]) - target_speed)
+        p["target_start_gap"] = ego_gap + t_star * (float(p["ego_speed"]) - float(p["target_speed"]))
     return p
 
 
@@ -381,13 +389,44 @@ def make_cutin_scenario(params=None, aggressive=False, ego_lead=False, no_cutin=
     }
 
 
-def make_cutout_scenario(params=None, with_lead=False):
+def make_cutout_scenario(params=None, with_lead=False, trigger_mode="ego_gap"):
+    # "ego_gap" (cutout_with_lead / cutout_no_lead): the vehicle ahead leaves
+    # the ego lane once the ego is within trigger_distance.  The paper kinds
+    # start the ego target_start_gap behind a slower lead vehicle (LV) that it
+    # settles behind in ACC, and the LV leaves on its own: "time"
+    # (cutout_no_sublv) trigger_time_s after control starts, or "lead_gap"
+    # (cutout_sublv) when its gap to a slow lead ahead of it (subLV, placed
+    # like the cut-in kinds' lead) closes to trigger_distance -- the ego then
+    # has to slow down for the subLV.
+    params = dict(params or {})
+    if trigger_mode != "ego_gap":
+        params.setdefault("target_start_gap", 30.0)
     p = _common_params(params)
-    p.setdefault("lane_change_distance_same_lane", 5.0)
+    p.setdefault("lane_change_distance_same_lane", 5.0 if trigger_mode == "ego_gap" else 0.0)
     p.setdefault("lane_change_distance", 18.0)
+    lane_change_time_s = float(p.get("lane_change_time_s") or 0.0)
+    if trigger_mode != "ego_gap" and lane_change_time_s > 0.0:
+        p["lane_change_distance"] = lane_change_time_s * float(p["target_speed"])
     p.setdefault("cutout_direction", "left")
-    p.setdefault("lead_gap", 32.0)
-    p.setdefault("lead_speed", max(1.0, p["target_speed"] - 1.0))
+    target_trigger = {"lane_change_trigger_distance": p["trigger_distance"]}
+    if trigger_mode == "time":
+        # 8 s / 65 m (an 8 s approach): the ego ACC undershoots to ~11 m/s
+        # while closing 17 -> 13 m/s and is still recovering at 5-6 s.
+        p.setdefault("trigger_time_s", 8.0)
+        target_trigger.update({
+            "lane_change_trigger_mode": "time",
+            "lane_change_trigger_time_s": p["trigger_time_s"],
+        })
+    elif trigger_mode == "lead_gap":
+        p.setdefault("target_lead_gap", 65.0)
+        p.setdefault("target_lead_speed_delta", -6.0)
+        _lead_gap_trigger_time(p)
+        p["lead_gap"] = float(p["target_lead_gap"])
+        p["lead_speed"] = max(1.0, float(p["target_speed"]) + float(p["target_lead_speed_delta"]))
+        target_trigger["lane_change_trigger_mode"] = "lead_gap"
+    else:
+        p.setdefault("lead_gap", 32.0)
+        p.setdefault("lead_speed", max(1.0, p["target_speed"] - 1.0))
     ego_lane_left_offset = _right_shifted_left_offset(0.0, p)
 
     vehicles = [
@@ -399,11 +438,11 @@ def make_cutout_scenario(params=None, with_lead=False):
             p["route_goal_s"],
             p["target_speed"],
             "186, 0, 0",
-            lane_change_trigger_distance=p["trigger_distance"],
             lane_change_distance_same_lane=p["lane_change_distance_same_lane"],
             lane_change_distance_other_lane=120.0,
             lane_change_distance=p["lane_change_distance"],
             cutout_direction=p["cutout_direction"],
+            **target_trigger,
         )
     ]
     if with_lead:
@@ -459,6 +498,10 @@ def make_scenario(kind, params=None):
         return make_cutout_scenario(params, with_lead=True)
     if kind == "cutout_no_lead":
         return make_cutout_scenario(params, with_lead=False)
+    if kind == "cutout_no_sublv":
+        return make_cutout_scenario(params, with_lead=False, trigger_mode="time")
+    if kind == "cutout_sublv":
+        return make_cutout_scenario(params, with_lead=True, trigger_mode="lead_gap")
     raise ValueError(f"Unsupported scenario kind: {kind}")
 
 
