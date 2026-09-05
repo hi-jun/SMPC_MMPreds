@@ -198,6 +198,14 @@ def original_nair_acc_config(
     reason, while every ego-14 run was collision free.
     A_DOT_MIN=-1.5, A_DOT_MAX=1.5, TIGHTENING=1.64,
     NOISE_STD=[0.1, .1, .01, .1, .01], Q=[5, 2.5, 10, 1], R=[10, 1000].
+
+    ``jerk_limit`` deviates from that source's 1.5 and is raised to 10.  At 1.5
+    the command needs 2 s to reach ``a_min``, which is longer than the 1.0-1.3 s
+    time-to-collision a +6 m/s cut-in leaves: every policy collided in those
+    cells for a reason that has nothing to do with how well it predicts.  The
+    comfort metrics are reported on the commanded jerk, which the same limit
+    bounds, so the looser limit widens the range the controllers can differ in
+    rather than hiding the difference.
     """
     tightening = 1.64
     return NairACCConfig(
@@ -208,7 +216,7 @@ def original_nair_acc_config(
         v_max=20.0,
         a_min=-3.0,
         a_max=2.0,
-        jerk_limit=1.5,
+        jerk_limit=10.0,
         epsilon=1.0 - norm.cdf(tightening),
         fixed_risk_level=1.0 - norm.cdf(tightening),
         eta_max=0.49,

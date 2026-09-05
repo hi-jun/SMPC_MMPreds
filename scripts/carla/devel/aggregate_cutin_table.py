@@ -19,24 +19,24 @@ resolved_config.json, metrics.json, summary.json}
   (회복 구간)가 잘리고 창 내용이 런마다 달라진다. 옛 aggregate_confchance.py 와
   RESULT.md 의 상대시각이 이 방식이라 이 스크립트 값과 4.4~5.3 s 어긋난다.
 
-승차감 (측정값 actual_accel/actual_jerk, 창의 첫 샘플 1개 버림 — 첫 차분이
-스폰 과도를 포함한다: analyze_acc_scenario_result.py 와 동일)
-  a_avg = mean|actual_accel| [m/s^2],  j_avg = mean|actual_jerk|,
-  j_max = max|actual_jerk| [m/s^3],  j_p99 = |jerk| 99퍼센타일, a_min = min accel.
-  ※ **원시 j_avg/j_max 는 액추에이터 잡음이 지배한다.** 이상적 액추에이터의 1틱
-  deadbeat 보정 때문에 측정 가속도가 명령 주위에서 틱마다 진동한다 — 세게 밟는
-  구간(02_cutin_aggressive/aggressive_cutin_0017, chance0.6, ego 17)에서 명령이
-  -2.19 → -1.21 로 매끈한데 측정값은 -3.98, -0.31, -3.89, +0.44, -2.20, +0.25,
-  -12.76, +2.52 로 튄다(|actual_accel-accel_cmd| > 1.0 인 스텝이 그 런의 17%).
-  명령 저크는 jerk_limit 1.5 m/s^3 에 묶여 있으니 저 값들은 제어기가 낸 게 아니다.
-  그대로 쓰면 j_max 가 40~300 m/s^3, a_min 이 -12.8 m/s^2 (a_min 한계 -3.0) 로
-  나와 승차감 비교가 불가능하다. 그래서 **제어 주기(0.2 s) 대역**으로 다시 계산한
+승차감 (창의 첫 샘플 1개 버림 — 첫 차분이 스폰 과도를 포함한다)
+  **표에 쓰는 저크는 명령 저크**: j_avg_cmd = mean|command_jerk|,
+  j_max_cmd = max|command_jerk|, command_jerk = Δaccel_cmd/Δt (로그값).
+  제어기가 실제로 낸 양이고 ``jerk_limit`` 이 직접 묶는 값이라 정책 간 비교가
+  된다. a_avg 는 측정 가속도의 절대값 평균(mean|actual_accel|) — 절대값 평균이라
+  잡음에 둔감하다(한 런에서 0.975 vs 명령 0.824). a_avg_cmd / a_min_cmd 도 함께 낸다.
+  ※ **원시 측정 저크(j_avg/j_max)는 액추에이터 잡음이 지배해 표에 쓸 수 없다.**
+  이상적 액추에이터의 1틱 deadbeat 보정 때문에 측정 가속도가 명령 주위에서 틱마다
+  진동한다 — 세게 밟는 구간(02_cutin_aggressive/aggressive_cutin_0017, chance0.6,
+  ego 17)에서 명령이 -2.19 → -1.21 로 매끈한데 측정값은 -3.98, -0.31, -3.89, +0.44,
+  -2.20, +0.25, -12.76, +2.52 로 튄다(|actual_accel-accel_cmd| > 1.0 인 스텝이 그 런의
+  17%). 그대로 쓰면 j_max 가 40~300 m/s^3, a_min 이 -12.8 m/s^2 (한계 -3.0) 로 나온다.
+  참고용으로 **제어 주기(0.2 s) 대역** 값도 계산한다:
     a_filt[k] = 4틱(0.2 s) 이동평균 = Δv/0.2s,  j_filt[k] = (a_filt[k+4]-a_filt[k])/0.2
-  를 a_min_filt / j_avg_filt / j_max_filt 로 함께 내고 **LaTeX 표에는 filt 값을 쓴다**
-  (0.05 s 틱 채터는 승객이 저크로 느끼지 않는다; 제어기는 0.2 s 마다만 갱신한다).
-  위 런 기준 a_min -12.76→-3.57(명령 -2.79), j_avg 15.5→1.00(명령 0.81), j_max 306→20.8.
-  a_avg 는 절대값 평균이라 잡음에 둔감해서(0.975 vs 명령 0.824) 원시값 그대로 쓴다.
-  원시 j_avg / j_max / j_p99 / a_min 도 CSV·요약에 그대로 남는다.
+  → a_min_filt / j_avg_filt / j_max_filt (마크다운 표의 괄호 값). 원시 j_avg / j_max /
+  j_p99 / a_min 도 CSV·요약에 남는다.
+  ※ jerk_limit 은 2026-09-05 부터 10 m/s^3 (그 전 스윕은 1.5 라 j_max_cmd 가 전 정책
+  1.50 으로 포화해 변별력이 없다).
 
 안전 (모든 제어기에 대해 완화 없는 공칭 안전거리)
   d_safe(t) = d0 + tau*v_ego(t) = 3.0 + 1.3*v  (범퍼-투-범퍼)
@@ -218,13 +218,15 @@ CUTOUT_CONTACT_POST_S = 2.0
 SWEEP_PARAMS = ("ego_speed", "target_speed", "lane_change_distance",
                 "lane_change_time_s", "target_lead_gap", "trigger_distance",
                 "ego_gap_at_trigger")
-TEX_METRICS = ("a_avg", "j_avg_filt", "j_max_filt", "delta_max", "delta_avg",
+TEX_METRICS = ("a_avg", "j_avg_cmd", "j_max_cmd", "delta_max", "delta_avg",
                "dt_ant", "T_rec")
 TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
-TEX_METRICS_CUTOUT = ("a_avg", "j_avg_filt", "j_max_filt", "dt_ant", "v_avg")
-RAW_OF_FILT = {"j_avg_filt": "j_avg", "j_max_filt": "j_max"}
-AGG_METRICS = ("a_avg", "a_min", "a_min_filt", "j_avg", "j_avg_filt", "j_max",
-               "j_max_filt", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
+TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd", "j_max_cmd", "dt_ant", "v_avg")
+# 표 값(명령 저크) 옆 괄호에 함께 보일 실측(0.2 s 대역) 값
+RAW_OF_FILT = {"j_avg_cmd": "j_avg_filt", "j_max_cmd": "j_max_filt"}
+AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
+               "j_avg", "j_avg_filt", "j_avg_cmd", "j_max",
+               "j_max_filt", "j_max_cmd", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
                "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "T_rec",
                "v_avg", "v_min", "passed", "t_pass")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
@@ -539,6 +541,14 @@ def collect_run(policy, group, run_dir):
     row["a_min_filt"] = float(np.min(accel_f)) if accel_f.size else None
     row["j_avg_filt"] = float(np.mean(jerk_f)) if jerk_f.size else None
     row["j_max_filt"] = float(np.max(jerk_f)) if jerk_f.size else None
+    # 명령 저크: 제어기가 실제로 낸 값(로그 command_jerk = Δaccel_cmd/Δt).
+    # 표는 이 값을 쓴다 — 액추에이터 채터가 섞이지 않고 jerk_limit 이 직접 묶는 양이다.
+    cmd_jerk = np.abs(np.array(_finite([s.get("command_jerk") for s in steps])[1:]))
+    row["j_avg_cmd"] = float(np.mean(cmd_jerk)) if cmd_jerk.size else None
+    row["j_max_cmd"] = float(np.max(cmd_jerk)) if cmd_jerk.size else None
+    cmd_accel = np.array(_finite([s.get("accel_cmd") for s in steps])[1:])
+    row["a_avg_cmd"] = float(np.mean(np.abs(cmd_accel))) if cmd_accel.size else None
+    row["a_min_cmd"] = float(np.min(cmd_accel)) if cmd_accel.size else None
 
     # --- 차선 내 선행차 / 안전거리 위반 ---
     ego_lane = ego["lane_trajectory"]
@@ -650,21 +660,34 @@ def collect_run(policy, group, run_dir):
     if is_cutout_group(group):
         cutout_response(row, data, group, run_dir.name, sweep, tracks, t, t0, dt,
                         cmd, ego_s, ego_x, ego_v, ego_lane_id)
-    for key in ("a_avg", "a_min", "a_min_filt", "j_avg", "j_avg_filt", "j_max",
-                "j_max_filt", "j_p99", "delta_max", "delta_avg",
+    for key in ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
+                "j_avg", "j_avg_filt", "j_avg_cmd", "j_max",
+                "j_max_filt", "j_max_cmd", "j_p99", "delta_max", "delta_avg",
                 "delta_avg_window", "min_bumper_gap", "v_avg", "v_min"):
         if row.get(key) is not None:
             row[key] = round(row[key], 4)
     return row
 
 
-def aggregate(rows):
-    """(group, policy) 셀별 metric -> (mean, std, n)."""
+def pooled_cutout_group(group):
+    """논문 cut-out 표의 두 행: subLV 유무만 구분하고 트리거 변형은 합친다."""
+    if not is_cutout_group(group):
+        return group
+    return "cutout_no_sublv" if "no_sublv" in group else "cutout_sublv"
+
+
+def aggregate(rows, group_key=None):
+    """(group, policy) 셀별 metric -> (mean, std, n).
+
+    ``group_key`` 로 그룹을 합칠 수 있다(cut-out 표의 subLV 행은 17 m/13 m 트리거를
+    한 행으로 합산한다).
+    """
     cells = collections.OrderedDict()
     for row in rows:
         if not row["valid"]:
             continue
-        cells.setdefault((row["group"], row["policy"]), []).append(row)
+        group = row["group"] if group_key is None else group_key(row["group"])
+        cells.setdefault((group, row["policy"]), []).append(row)
     out = collections.OrderedDict()
     for key in sorted(cells):
         sel = cells[key]
@@ -724,8 +747,8 @@ def write_summary_csv(path, agg):
 def write_tex(path, agg):
     lines = ["% aggregate_cutin_table.py 자동 생성 — table_cutin.tex 열 순서 그대로",
              "% a_avg, j_avg, j_max, delta_max, delta_avg, dt_ant, T_rec (셀 평균)",
-             "% j_avg/j_max 는 제어주기(0.2 s) 대역으로 다시 잰 j_avg_filt/j_max_filt 다 —",
-             "% 원시 actual_jerk 는 1틱 액추에이터 채터(|j| 40~300)가 지배한다."]
+             "% j_avg/j_max 는 **명령 저크**(Δaccel_cmd/Δt) 다 — 제어기가 낸 값이고",
+             "% jerk_limit 이 직접 묶는다. 실측 저크는 액추에이터 채터가 지배한다."]
     groups = [g for g in sorted({k[0] for k in agg})
               if "no_cutin_decel" not in g and not is_cutout_group(g)]
     for gi, group in enumerate(groups):
@@ -753,8 +776,8 @@ def write_tex(path, agg):
 
 def write_cutout_tex(path, agg):
     lines = ["% aggregate_cutin_table.py 자동 생성 — table_cutout.tex 열 순서 그대로",
-             "% a_avg, j_avg, j_max, dt_ant, v_avg (셀 평균)",
-             "% j_avg/j_max 는 제어주기(0.2 s) 대역으로 다시 잰 j_avg_filt/j_max_filt,",
+             "% a_avg, j_avg, j_max, dt_ant, v_avg (셀 평균; subLV 행은 트리거 17 m + 13 m 합산)",
+             "% j_avg/j_max 는 **명령 저크**(Δaccel_cmd/Δt),",
              "% dt_ant = t_out - t_onset (선제성 없으면 0.00), v_avg 는 [t_trigger, 창끝] 평균."]
     groups = sorted({k[0] for k in agg if is_cutout_group(k[0])})
     for gi, group in enumerate(groups):
@@ -954,7 +977,8 @@ def main():
     write_summary_csv(root / "table_cutin_summary.csv", agg)
     write_tex(root / "table_cutin_rows.tex", agg)
     if has_cutout:
-        write_cutout_tex(root / "table_cutout_rows.tex", agg)
+        write_cutout_tex(root / "table_cutout_rows.tex",
+                         aggregate(rows, group_key=pooled_cutout_group))
     note = "aggregate_cutin_table.py %s%s%s" % (
         root, " --ego-speeds " + args.ego_speeds if speeds else "",
         " --groups " + args.groups if groups else "")
