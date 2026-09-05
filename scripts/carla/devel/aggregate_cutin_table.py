@@ -149,21 +149,18 @@ cut-out 시각
   v_ego_at_trigger / v_lv_at_trigger = 같은 시각 두 차의 속도.
 
 Δt_ant (제어기 반응 선제성; cut-in 과 같은 뜻이되 기준점이 t_out 이다)
-  t_settle_end = **t_out 전에 시작한** 마지막 "정상상태 구간"(|accel_cmd| < 0.15 가
-    1.0 s 이상 연속)의 끝 시각. 그런 구간이 없으면 창 시작.
-    ※ "t_out 전에 **끝나는**" 이 아니라 "t_out 전에 **시작한**" 이다. 반응이 아예
-    없는 제어기(SCC 등)는 정상상태 구간이 t_out 을 걸쳐 이어지는데, 끝나는 시각으로
-    걸러버리면 그 구간이 통째로 빠지고 훨씬 이른(트리거 전 과도) 구간이 기준이 돼
-    Δt_ant 가 크게 나오는 가짜 선제성이 생긴다. 시작 시각으로 고르면 그 런은
-    t_settle_end > t_out → t_onset > t_out → Δt_ant = 0.00 (선제성 없음) 이 된다.
-    t_settle_end > t_out 인 런은 "t_out 까지 제어기가 아무 반응을 안 했다"는 뜻이다.
-  t_onset = t_settle_end 이후 처음으로 2스텝 연속
+  t_onset = [t_trigger − 3 s, t_out + 5 s] 창 안에서, 부호 맞는 가속이 **1.0 s 이상
+    연속으로** 임계를 넘는 첫 구간의 시작:
     accel_cmd >= +0.3 m/s^2 (kind cutout_no_sublv: 비워진 차선으로 가속) 또는
-    accel_cmd <= -0.3 m/s^2 (kind cutout_sublv: subLV 때문에 감속) 인 시각.
-    쓴 부호는 onset_sign 열에 남긴다.
-  Δt_ant = t_out - t_onset (t_onset < t_out 일 때). t_onset 이 t_out 이후면 **0.00**
-    = 선제성 없음(table_cutout.tex 의 SCC 행 0.00 과 같은 뜻). 창 안에 onset 자체가
-    없을 때만 None → 표에 '-'.
+    accel_cmd <= -0.3 m/s^2 (kind cutout_sublv: subLV 때문에 감속).
+    ※ 정착-구간 기준(옛 정의)은 STDAN 계열의 잔류 진동(정착 후에도 ±0.3~0.6 m/s^2,
+    ego 17/LV 11 은 12 s 에도 ±1) 을 개시로 오인해 Δt_ant 가 6~8 s 로 부풀었다.
+    1.0 s hold 는 진동(0.2 s 안팎)과 트리거 전의 약한 예비 제동(-0.25)을 걸러내고
+    본격 반응 램프만 잡는다. 쓴 부호는 onset_sign 열에 남긴다. t_settle_end /
+    settled_before_trigger 는 진단용으로만 남긴다.
+  Δt_ant = max(0, t_out − t_onset) (표); 부호 있는 값은 dt_ant_signed 열(음수 =
+    t_out 이후에야 반응; no-chance STDAN 은 A 에서 +0.7~1.0 s 늦다). 창 안에 onset 이
+    없으면 None → 표에 '-'.
   ※ 정상상태를 기준점으로 잡는 이유: cut-out 은 트리거 전이 정속 추종 구간이라
     창 시작 직후의 스폰 과도를 onset 으로 잘못 집기 쉽다.
 
@@ -208,6 +205,9 @@ S_MAP_TOL = 1.0
 FALLBACK_TOL = 0.02
 # cut-out
 CUTOUT_ONSET_ACCEL = 0.3      # 부호는 kind 에 따라 (+: 가속 개시, -: 감속 개시)
+CUTOUT_ONSET_HOLD_S = 1.0     # 임계를 이만큼 연속으로 넘어야 반응 개시 (정착 진동 배제)
+CUTOUT_ONSET_PRE_S = 3.0      # 개시 탐색 창: 트리거 이전
+CUTOUT_ONSET_POST_S = 5.0     # 개시 탐색 창: t_out 이후
 CUTOUT_OUT_HOLD_STEPS = 2     # lane_id 한 샘플 튐 방지 (0.1 s)
 SETTLE_ACCEL = 0.15
 SETTLE_MIN_S = 1.0
@@ -394,14 +394,27 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
             if t[i0] < out_abs:  # t_out 을 걸쳐 이어지는 구간도 그 구간의 끝을 쓴다
                 settle_end = float(t[i1])
     row["t_settle_end"] = None if settle_end is None else round(settle_end - t0, 3)
+    # 반응 개시 = 트리거 3 s 전부터 t_out 5 s 후 사이에서, 부호 맞는 가속이 1.0 s
+    # 이상 끊기지 않고 임계를 넘는 첫 구간의 시작. STDAN 계열은 정착 후에도
+    # ±0.3~0.6 m/s^2 진동이 남아 짧은 hold 로는 진동을 개시로 오인한다.
     onset = (cmd <= -CUTOUT_ONSET_ACCEL) if sublv_expected else (cmd >= CUTOUT_ONSET_ACCEL)
-    i_from = 0 if settle_end is None else int(np.searchsorted(t, settle_end))
-    i_on = _first_run_start(onset[i_from:], ONSET_HOLD_STEPS)
-    t_onset = None if i_on is None else float(t[i_from + i_on])
+    t_onset = None
+    if trig_abs is not None:
+        hi = (out_abs + CUTOUT_ONSET_POST_S if out_abs is not None
+              else trig_abs + CUTOUT_ONSET_POST_S + 3.0)
+        win = (t >= trig_abs - CUTOUT_ONSET_PRE_S) & (t <= hi)
+        idx = np.nonzero(win)[0]
+        if idx.size:
+            hold = max(1, int(round(CUTOUT_ONSET_HOLD_S / dt)))
+            i_on = _first_run_start(onset[idx[0]:idx[-1] + 1], hold)
+            if i_on is not None:
+                t_onset = float(t[idx[0] + i_on])
     row["t_onset"] = None if t_onset is None else round(t_onset - t0, 3)
     row["dt_ant"] = None
+    row["dt_ant_signed"] = None
     if t_onset is not None and out_abs is not None:
-        row["dt_ant"] = round(out_abs - t_onset, 3) if t_onset < out_abs else 0.0
+        row["dt_ant_signed"] = round(out_abs - t_onset, 3)
+        row["dt_ant"] = max(0.0, row["dt_ant_signed"])
 
     # --- 속도 ---
     if trig_abs is not None:
