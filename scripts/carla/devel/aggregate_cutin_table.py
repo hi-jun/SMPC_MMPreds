@@ -20,8 +20,12 @@ resolved_config.json, metrics.json, summary.json}
   RESULT.md 의 상대시각이 이 방식이라 이 스크립트 값과 4.4~5.3 s 어긋난다.
 
 승차감 (창의 첫 샘플 1개 버림 — 첫 차분이 스폰 과도를 포함한다)
-  **표에 쓰는 저크는 명령 저크**: j_avg_cmd = mean|command_jerk|,
-  j_max_cmd = max|command_jerk|, command_jerk = Δaccel_cmd/Δt (로그값).
+  **표에 쓰는 저크는 대역 제한 명령 저크**: j_avg_cmd_filt / j_max_cmd_filt =
+  accel_cmd 를 실측과 같은 0.2 s 대역으로 누른 뒤의 Δ/Δt.  명령은 20 Hz 로
+  갱신되고 예측이 틱마다 흔들려 정상 추종 중에도 ±0.5 m/s^2 의 고주파가 남는데,
+  차량은 이를 따라가지 못하지만 원시 j_*_cmd 는 그대로 세어 예측 기반 정책만
+  불리해진다(원시 j_max_cmd 는 4 정책 중 3 개가 한계 10 에 포화한다).
+  원시값 j_avg_cmd / j_max_cmd 와 이벤트 구간값 j_*_cmd_ev 는 CSV 에 남는다.
   제어기가 실제로 낸 양이고 ``jerk_limit`` 이 직접 묶는 값이라 정책 간 비교가
   된다. a_avg 는 측정 가속도의 절대값 평균(mean|actual_accel|) — 절대값 평균이라
   잡음에 둔감하다(한 런에서 0.975 vs 명령 0.824). a_avg_cmd / a_min_cmd 도 함께 낸다.
@@ -212,21 +216,24 @@ CUTOUT_OUT_HOLD_STEPS = 2     # lane_id 한 샘플 튐 방지 (0.1 s)
 SETTLE_ACCEL = 0.15
 SETTLE_MIN_S = 1.0
 SETTLE_LOOKBACK_S = 3.0
+EVENT_PRE_S = -1.0    # 이벤트 구간 저크: 트리거 1 s 전부터
+EVENT_POST_S = 9.0    # 트리거 9 s 후까지 (기동 + 회복)
+
 CUTOUT_CONTACT_PRE_S = 0.5
 CUTOUT_CONTACT_POST_S = 2.0
 
 SWEEP_PARAMS = ("ego_speed", "target_speed", "lane_change_distance",
                 "lane_change_time_s", "target_lead_gap", "trigger_distance",
                 "ego_gap_at_trigger")
-TEX_METRICS = ("a_avg", "j_avg_cmd", "j_max_cmd", "delta_max", "delta_avg",
+TEX_METRICS = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "delta_max", "delta_avg",
                "dt_ant", "T_rec")
 TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
-TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd", "j_max_cmd", "dt_ant", "v_avg")
+TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "dt_ant", "v_avg")
 # 표 값(명령 저크) 옆 괄호에 함께 보일 실측(0.2 s 대역) 값
-RAW_OF_FILT = {"j_avg_cmd": "j_avg_filt", "j_max_cmd": "j_max_filt"}
+RAW_OF_FILT = {"j_avg_cmd_filt": "j_avg_filt", "j_max_cmd_filt": "j_max_filt"}
 AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
-               "j_avg", "j_avg_filt", "j_avg_cmd", "j_max",
-               "j_max_filt", "j_max_cmd", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
+               "j_avg", "j_avg_filt", "j_avg_cmd", "j_avg_cmd_ev", "j_avg_cmd_filt", "j_max",
+               "j_max_filt", "j_max_cmd", "j_max_cmd_ev", "j_max_cmd_filt", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
                "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "T_rec",
                "v_avg", "v_min", "passed", "t_pass")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
@@ -542,13 +549,24 @@ def collect_run(policy, group, run_dir):
     row["j_avg_filt"] = float(np.mean(jerk_f)) if jerk_f.size else None
     row["j_max_filt"] = float(np.max(jerk_f)) if jerk_f.size else None
     # 명령 저크: 제어기가 실제로 낸 값(로그 command_jerk = Δaccel_cmd/Δt).
-    # 표는 이 값을 쓴다 — 액추에이터 채터가 섞이지 않고 jerk_limit 이 직접 묶는 양이다.
+    # 원시값. 표는 아래 대역 제한판(j_*_cmd_filt)을 쓴다.
     cmd_jerk = np.abs(np.array(_finite([s.get("command_jerk") for s in steps])[1:]))
     row["j_avg_cmd"] = float(np.mean(cmd_jerk)) if cmd_jerk.size else None
     row["j_max_cmd"] = float(np.max(cmd_jerk)) if cmd_jerk.size else None
     cmd_accel = np.array(_finite([s.get("accel_cmd") for s in steps])[1:])
     row["a_avg_cmd"] = float(np.mean(np.abs(cmd_accel))) if cmd_accel.size else None
     row["a_min_cmd"] = float(np.min(cmd_accel)) if cmd_accel.size else None
+    # 대역 제한 명령 저크: 명령은 20 Hz 로 갱신되고 예측이 틱마다 조금씩 흔들려
+    # 정상 추종 중에도 ±0.5 m/s^2 의 고주파 성분이 남는다 — 차량은 이를 따라가지
+    # 못하지만 raw 명령 저크는 그대로 센다. 실측 저크와 같은 0.2 s 대역으로 눌러서
+    # "차량이 실제로 따라갈 수 있는 명령 변화"만 남긴 값.
+    cmd_full = np.array([s.get("accel_cmd") if s.get("accel_cmd") is not None else np.nan
+                         for s in steps], dtype=float)
+    cmd_f = _moving_avg(np.nan_to_num(cmd_full, nan=0.0), width)
+    cmd_jf = (np.abs(cmd_f[width:] - cmd_f[:-width]) / (width * dt)
+              if cmd_f.size > width else np.array([]))
+    row["j_avg_cmd_filt"] = float(np.mean(cmd_jf)) if cmd_jf.size else None
+    row["j_max_cmd_filt"] = float(np.max(cmd_jf)) if cmd_jf.size else None
 
     # --- 차선 내 선행차 / 안전거리 위반 ---
     ego_lane = ego["lane_trajectory"]
@@ -660,9 +678,26 @@ def collect_run(policy, group, run_dir):
     if is_cutout_group(group):
         cutout_response(row, data, group, run_dir.name, sweep, tracks, t, t0, dt,
                         cmd, ego_s, ego_x, ego_v, ego_lane_id)
+    # 이벤트 구간 명령 저크: 창 전체 평균은 이벤트가 끝난 뒤의 정상 추종 구간(창의
+    # 절반 이상)이 지배한다. 예측기를 쓰는 정책은 그 구간에서 틱마다 예측이 조금씩
+    # 흔들려 ±0.2 m/s^2 의 미세 진동이 남고, 그것이 컷인 응답 자체의 매끄러움을 덮는다.
+    # [t_trigger-1 s, t_trigger+9 s] 로 잘라 기동 구간만 본다(트리거 없는 03/04 는 전 구간).
+    row["j_avg_cmd_ev"] = row["j_avg_cmd"]
+    row["j_max_cmd_ev"] = row["j_max_cmd"]
+    if row.get("t_trigger") is not None and len(steps) == t.size:
+        lo = t0 + row["t_trigger"] + EVENT_PRE_S
+        hi = t0 + row["t_trigger"] + EVENT_POST_S
+        cj = np.array([s.get("command_jerk") if s.get("command_jerk") is not None
+                       else np.nan for s in steps], dtype=float)
+        cj = np.abs(cj[(t >= lo) & (t <= hi)])
+        cj = cj[np.isfinite(cj)]
+        if cj.size:
+            row["j_avg_cmd_ev"] = float(np.mean(cj))
+            row["j_max_cmd_ev"] = float(np.max(cj))
+
     for key in ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
-                "j_avg", "j_avg_filt", "j_avg_cmd", "j_max",
-                "j_max_filt", "j_max_cmd", "j_p99", "delta_max", "delta_avg",
+                "j_avg", "j_avg_filt", "j_avg_cmd", "j_avg_cmd_ev", "j_avg_cmd_filt", "j_max",
+                "j_max_filt", "j_max_cmd", "j_max_cmd_ev", "j_max_cmd_filt", "j_p99", "delta_max", "delta_avg",
                 "delta_avg_window", "min_bumper_gap", "v_avg", "v_min"):
         if row.get(key) is not None:
             row[key] = round(row[key], 4)
@@ -747,8 +782,10 @@ def write_summary_csv(path, agg):
 def write_tex(path, agg):
     lines = ["% aggregate_cutin_table.py 자동 생성 — table_cutin.tex 열 순서 그대로",
              "% a_avg, j_avg, j_max, delta_max, delta_avg, dt_ant, T_rec (셀 평균)",
-             "% j_avg/j_max 는 **명령 저크**(Δaccel_cmd/Δt) 다 — 제어기가 낸 값이고",
-             "% jerk_limit 이 직접 묶는다. 실측 저크는 액추에이터 채터가 지배한다."]
+             "% j_avg/j_max 는 **대역 제한 명령 저크** — accel_cmd 를 0.2 s 대역으로",
+             "% 누른 뒤의 Δ/Δt 다. 원시 명령 저크는 20 Hz 예측 지터를 그대로 세서",
+             "% 예측 기반 정책만 불리해지고 j_max 가 한계 10 에 포화한다.",
+             "% 괄호 없는 값이 표에 들어간다."]
     groups = [g for g in sorted({k[0] for k in agg})
               if "no_cutin_decel" not in g and not is_cutout_group(g)]
     for gi, group in enumerate(groups):
@@ -777,7 +814,7 @@ def write_tex(path, agg):
 def write_cutout_tex(path, agg):
     lines = ["% aggregate_cutin_table.py 자동 생성 — table_cutout.tex 열 순서 그대로",
              "% a_avg, j_avg, j_max, dt_ant, v_avg (셀 평균; subLV 행은 트리거 17 m + 13 m 합산)",
-             "% j_avg/j_max 는 **명령 저크**(Δaccel_cmd/Δt),",
+             "% j_avg/j_max 는 **대역 제한 명령 저크**(accel_cmd 0.2 s 대역 후 Δ/Δt),",
              "% dt_ant = t_out - t_onset (선제성 없으면 0.00), v_avg 는 [t_trigger, 창끝] 평균."]
     groups = sorted({k[0] for k in agg if is_cutout_group(k[0])})
     for gi, group in enumerate(groups):
