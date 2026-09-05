@@ -62,12 +62,14 @@ class ACCNairSMPCAgent(object):
     # Waiting for the lane assignment to flip is too late: the braking is over by
     # then. One second ahead lands the relaxation on the deceleration itself.
     GAP_RECOVERY_ONSET_TLC_S = 1.0
-    # Below this cut-in probability the confidence chance constraint is dropped
-    # outright.  Benciolini's ellipse collapses to a point as beta -> 0 and a
-    # point can be driven around; the 1-D counterpart still orders the ego
-    # behind the hypothetical cut-in even at zero standoff, so without a
-    # vanishing threshold the ego can never pass a neighbour whose cut-in
-    # probability has decayed.  Lane-keeping neighbours score <= 0.05 in the
+    # Below this probability a predicted mode is dropped outright, for every
+    # STDAN policy (an explicit ``cutin_gate<value>`` overrides it).  For the
+    # chance constraint it is Benciolini's vanishing: the ellipse collapses to
+    # a point as beta -> 0 and a point can be driven around, whereas the 1-D
+    # counterpart still orders the ego behind the hypothetical cut-in even at
+    # zero standoff.  For the plain multimodal policy a 1-2 % hypothesis held
+    # at full standoff kept the ego behind a lead that had already left the
+    # lane (cut-out, 2026-09-05).  Lane-keeping neighbours score <= 0.05 in the
     # 2026-09-04 sweep; 0.1 keeps a margin above that.
     CUTIN_CHANCE_VANISH_BELOW = 0.1
 
@@ -90,16 +92,16 @@ class ACCNairSMPCAgent(object):
         self.mode_probabilities = self._parse_mode_probabilities(smpc_config)
         self.predictor_type = self._parse_predictor_type(smpc_config)
         self.best_mode_only = self._parse_best_mode_only(smpc_config)
-        self.cutin_probability_threshold = self._parse_cutin_probability_threshold(smpc_config)
+        threshold = self._parse_cutin_probability_threshold(smpc_config)
+        if threshold is None:
+            threshold = (self.CUTIN_CHANCE_VANISH_BELOW
+                         if self.predictor_type in ("stdan_3int", "stdan_vel") else 0.0)
+        self.cutin_probability_threshold = threshold
         self.cutin_clearance_ramp_ref = self._parse_cutin_clearance_ramp_ref(smpc_config)
         self.cutin_chance_ref = self._parse_cutin_chance_ref(smpc_config)
         if self.cutin_chance_ref > 0.0 and self.cutin_clearance_ramp_ref > 0.0:
             raise ValueError(
                 "cutin_ramp and cutin_chance both set the cut-in standoff scale; use one")
-        if self.cutin_chance_ref > 0.0 and self.cutin_probability_threshold <= 0.0:
-            # The chance constraint vanishes below this probability; an explicit
-            # ``cutin_gate<value>`` token overrides it.
-            self.cutin_probability_threshold = self.CUTIN_CHANCE_VANISH_BELOW
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -1218,14 +1220,15 @@ class ACCNairSMPCAgent(object):
 
     @staticmethod
     def _parse_cutin_probability_threshold(smpc_config):
-        """Read ``cutin_gate<value>`` from the config string (default: disabled).
+        """Read ``cutin_gate<value>`` from the config string (None when absent).
 
-        Cut-in modes below this probability generate no collision-avoidance
+        Modes below this probability generate no collision-avoidance
         constraint, so the ego keeps speed instead of yielding to an unlikely
-        merge.  See ``gate_unlikely_cutin_modes``.
+        merge.  Absent, STDAN policies use ``CUTIN_CHANCE_VANISH_BELOW``.  See
+        ``gate_unlikely_cutin_modes`` and ``chance_cutout_clearance``.
         """
         match = re.search(r"cutin_gate([0-9]*\.?[0-9]+)", str(smpc_config))
-        return float(match.group(1)) if match else 0.0
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_cutin_clearance_ramp_ref(smpc_config):
@@ -1244,9 +1247,8 @@ class ACCNairSMPCAgent(object):
 
         The value is the reference confidence ``beta_ref`` of the Benciolini
         confidence chance constraint on cut-in modes; the token also switches
-        the controller to ``confidence_chance`` safety constraints and, unless
-        ``cutin_gate<value>`` is given, drops cut-in modes below
-        ``CUTIN_CHANCE_VANISH_BELOW`` (the vanishing constraint).  See
+        the controller to ``confidence_chance`` safety constraints.  Modes below
+        ``CUTIN_CHANCE_VANISH_BELOW`` vanish as for every STDAN policy.  See
         ``chance_cutin_clearance``.
         """
         match = re.search(r"cutin_chance([0-9]*\.?[0-9]+)", str(smpc_config))

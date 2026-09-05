@@ -382,22 +382,28 @@ def chance_cutout_clearance(
     never into the vehicle itself.  Adjacent-lane vehicles are untouched.
     """
     reference_beta = float(reference_beta)
-    if reference_beta <= 0.0 or relation_to_ego_lane != REL_EGO_LANE:
+    vanish_threshold = float(vanish_threshold)
+    if relation_to_ego_lane != REL_EGO_LANE or (reference_beta <= 0.0 and vanish_threshold <= 0.0):
         return {}
-    reference_quantile = confidence_quantile(reference_beta)
+    # The vanishing part applies to every multimodal policy (a negligible
+    # lane-keeping hypothesis must not hold full standoff); the standoff factor
+    # only with the chance constraint.
+    reference_quantile = confidence_quantile(reference_beta) if reference_beta > 0.0 else None
     result = {}
     for mode in mode_predictions:
         if mode.mode_name != "lk":
             continue
-        beta = min(float(mode.probability), reference_beta)
-        # Standoff factor only: the sigma term would also tighten ordinary
-        # following (p_lk >= beta_ref) against tonight's calibrated behaviour,
-        # and an in-lane lead is already covered deterministically by the
-        # cutout mode for the steps it is still predicted present.
-        mode.clearance_scale = confidence_quantile(beta) / reference_quantile
-        if mode.probability < float(vanish_threshold):
+        beta = float("nan")
+        if reference_quantile is not None:
+            beta = min(float(mode.probability), reference_beta)
+            # Standoff factor only: the sigma term would also tighten ordinary
+            # following (p_lk >= beta_ref) against tonight's calibrated behaviour,
+            # and an in-lane lead is already covered deterministically by the
+            # cutout mode for the steps it is still predicted present.
+            mode.clearance_scale = confidence_quantile(beta) / reference_quantile
+        if mode.probability < vanish_threshold:
             mode.active_mask[:] = False
-        result[mode.mode_name] = {"confidence": beta, "scale": mode.clearance_scale}
+        result[mode.mode_name] = {"confidence": beta, "scale": float(np.asarray(mode.clearance_scale).ravel()[0])}
     return result
 
 
@@ -708,6 +714,8 @@ def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshol
     for mode in vacating:
         if mode.probability < vanish_threshold:
             return None
+        if reference_beta <= 0.0:
+            continue
         beta = min(float(mode.probability), reference_beta)
         # Standoff factor only; a deterministic (NaN) lead stays without a
         # sigma term, as in ``chance_cutout_clearance``.
@@ -799,7 +807,7 @@ def build_multitarget_lead_prediction(
                 _, selected = min(candidates, key=lambda item: item[0])
                 scale = np.asarray(selected.clearance_scale, dtype=float)
                 cell = (float(selected.chance_confidence), float(scale[step] if scale.ndim else scale))
-                if reference_beta > 0.0:
+                if reference_beta > 0.0 or vanish_threshold > 0.0:
                     vacating = _vacating_modes(selected, step, combo, targets, ego_s)
                     if vacating:
                         vacated_lane_steps.append(step)

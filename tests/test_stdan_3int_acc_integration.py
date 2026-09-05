@@ -484,7 +484,7 @@ class TestCutInProbabilityGate(unittest.TestCase):
         self.assertAlmostEqual(cutin.probability, 0.60, places=6)
         self.assertTrue(cutin.active_mask.any(), "likely cut-in must still constrain")
 
-    def test_gate_never_disables_ego_lane_lead(self):
+    def test_gate_drops_a_negligible_lane_keeping_hypothesis_but_keeps_the_cutout_mode(self):
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
         raw = {
@@ -503,7 +503,13 @@ class TestCutInProbabilityGate(unittest.TestCase):
         lead = self._mode(processed, "lk")
         self.assertIsNotNone(lead)
         self.assertAlmostEqual(lead.probability, 0.02, places=6)
-        self.assertTrue(lead.active_mask.all(), "ego-lane lead must never be gated")
+        # A 2 % "stays in lane" hypothesis no longer holds full standoff for the
+        # whole horizon; the vehicle itself is still constrained through the
+        # cutout mode for every step it is predicted present.
+        self.assertFalse(lead.active_mask.any(), "negligible lk hypothesis vanishes")
+        cutout = self._mode(processed, "cutout")
+        self.assertIsNotNone(cutout)
+        self.assertTrue(cutout.active_mask.all(), "cutout mode is never gated")
 
     def test_gate_preserves_current_ego_lane_occupancy(self):
         """A target already straddling the ego lane stays constrained at step 0."""

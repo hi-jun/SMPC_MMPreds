@@ -110,13 +110,24 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         self.assertTrue(cutout.active_mask[:4].all(), "the vehicle itself keeps its standoff")
 
     def test_chance_off_leaves_ego_lane_modes_alone(self):
-        for kwargs in ({}, {"cutin_probability_threshold": VANISH}):
-            by_name = modes_by_name(self._lead(0.05, 0.95, **kwargs))
-            for name in ("lk", "cutout"):
-                self.assertTrue(np.isnan(by_name[name].chance_confidence), name)
-                self.assertEqual(by_name[name].clearance_scale, 1.0, name)
-            self.assertTrue(by_name["lk"].active_mask.all())
-            self.assertTrue(by_name["cutout"].active_mask[:4].all())
+        by_name = modes_by_name(self._lead(0.05, 0.95))
+        for name in ("lk", "cutout"):
+            self.assertTrue(np.isnan(by_name[name].chance_confidence), name)
+            self.assertEqual(by_name[name].clearance_scale, 1.0, name)
+        self.assertTrue(by_name["lk"].active_mask.all())
+        self.assertTrue(by_name["cutout"].active_mask[:4].all())
+
+    def test_vanishing_alone_drops_a_negligible_lk_mode_without_scaling(self):
+        # The plain multimodal policy prunes below the threshold but never scales.
+        by_name = modes_by_name(self._lead(0.05, 0.95, cutin_probability_threshold=VANISH))
+        for name in ("lk", "cutout"):
+            self.assertTrue(np.isnan(by_name[name].chance_confidence), name)
+            self.assertEqual(by_name[name].clearance_scale, 1.0, name)
+        self.assertFalse(by_name["lk"].active_mask.any())
+        self.assertTrue(by_name["cutout"].active_mask[:4].all())
+        by_name = modes_by_name(self._lead(0.4, 0.6, cutin_probability_threshold=VANISH))
+        self.assertTrue(by_name["lk"].active_mask.all())
+        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
 
 
 class TestVacatedLaneCells(unittest.TestCase):
