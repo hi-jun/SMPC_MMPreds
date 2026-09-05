@@ -151,7 +151,8 @@ AGG_METRICS = ("a_avg", "a_min", "a_min_filt", "j_avg", "j_avg_filt", "j_max",
                "v_avg", "v_min", "passed", "t_pass")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
-                  "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)"}
+                  "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
+                  "04_no_cutin_decel_onset": "No Cut-in \\\\ (decel onset 22/28/34)"}
 
 
 def policy_label(policy):
@@ -484,7 +485,7 @@ def write_tex(path, agg):
              "% a_avg, j_avg, j_max, delta_max, delta_avg, dt_ant, T_rec (셀 평균)",
              "% j_avg/j_max 는 제어주기(0.2 s) 대역으로 다시 잰 j_avg_filt/j_max_filt 다 —",
              "% 원시 actual_jerk 는 1틱 액추에이터 채터(|j| 40~300)가 지배한다."]
-    groups = [g for g in sorted({k[0] for k in agg}) if not g.startswith("03")]
+    groups = [g for g in sorted({k[0] for k in agg}) if "no_cutin_decel" not in g]
     for gi, group in enumerate(groups):
         cells = [k for k in agg if k[0] == group]
         label = SCENARIO_LABEL.get(group, group.replace("_", "\\_"))
@@ -496,7 +497,7 @@ def write_tex(path, agg):
             lines.append(" & %s & %s \\\\ %% n=%d"
                          % (stats["_label"], " & ".join(vals), stats["_n_runs"]))
         lines.append("\\midrule" if gi < len(groups) - 1 else "\\bottomrule")
-    for group in sorted({k[0] for k in agg if k[0].startswith("03")}):
+    for group in sorted({k[0] for k in agg if "no_cutin_decel" in k[0]}):
         lines.append("")
         lines.append("%% --- %s: v_avg (m/s), a_min (m/s^2), passed (fraction), "
                      "t_pass (s rel. t0) ---" % group)
