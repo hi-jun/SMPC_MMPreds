@@ -1099,7 +1099,7 @@ class ACCNairSMPCAgent(object):
                 lane_type=carla.LaneType.Driving,
             )
             relation = relation_from_waypoints(ego_wp, target_wp)
-            if relation != REL_EGO_LANE:
+            if relation != REL_EGO_LANE and abs(d_tv) > self.EGO_LANE_HALF_WIDTH_M:
                 continue
             role = actor.attributes.get("role_name", "")
             candidates.append((s_tv - s_ego, actor.id, role, s_tv, d_tv, actor_speed))
@@ -1279,11 +1279,17 @@ class ACCNairSMPCAgent(object):
             return [0.3, 0.7]
         return [0.6, 0.4]
 
-    @staticmethod
-    def _relation_from_frenet_offset(d_tv):
-        if d_tv > 0.3:
+    # Half a lane: a vehicle whose centre is within it is in the ego lane even
+    # when the waypoint test fails because the two vehicles sit on different
+    # road segments (Town04 road 47 -> 1073), which otherwise drops an in-lane
+    # lead for a second or two.
+    EGO_LANE_HALF_WIDTH_M = 1.75
+
+    @classmethod
+    def _relation_from_frenet_offset(cls, d_tv):
+        if d_tv > cls.EGO_LANE_HALF_WIDTH_M:
             return REL_LEFT_ADJACENT
-        if d_tv < -0.3:
+        if d_tv < -cls.EGO_LANE_HALF_WIDTH_M:
             return REL_RIGHT_ADJACENT
         return REL_EGO_LANE
 
