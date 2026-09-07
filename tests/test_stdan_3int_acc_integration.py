@@ -485,12 +485,15 @@ class TestCutInProbabilityGate(unittest.TestCase):
         self.assertTrue(cutin.active_mask.any(), "likely cut-in must still constrain")
 
     def test_gate_drops_a_negligible_lane_keeping_hypothesis_but_keeps_the_cutout_mode(self):
+        # Ego-lane modes are split by trajectory, so the cut-out hypotheses
+        # (raw modes 1 and 2) have to leave the lane inside the horizon.
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
+        leaving = np.column_stack((s, [0.0, 0.0, 3.5]))
         raw = {
             "vehicle_id": 11,
             "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
-            "pred_traj_frenet": np.stack((ahead, ahead, ahead)),
+            "pred_traj_frenet": np.stack((ahead, leaving, leaving)),
             "raw_pred_vel": np.ones((3, 3, 2)),
             "signed_t_cross": 1.0,
             "valid_mask": np.ones((3, 3), dtype=bool),
@@ -509,7 +512,8 @@ class TestCutInProbabilityGate(unittest.TestCase):
         self.assertFalse(lead.active_mask.any(), "negligible lk hypothesis vanishes")
         cutout = self._mode(processed, "cutout")
         self.assertIsNotNone(cutout)
-        self.assertTrue(cutout.active_mask.all(), "cutout mode is never gated")
+        np.testing.assert_array_equal(
+            cutout.active_mask, [True, True, True, False], "cutout mode is never gated")
 
     def test_gate_preserves_current_ego_lane_occupancy(self):
         """A target already straddling the ego lane stays constrained at step 0."""
@@ -705,10 +709,11 @@ class TestCutInChanceConstraint(unittest.TestCase):
         """
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
+        leaving = np.column_stack((s, [0.0, 0.0, 3.5]))   # the cut-out has to leave the lane
         raw = {
             "vehicle_id": 11,
             "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
-            "pred_traj_frenet": np.stack((ahead, ahead, ahead)),
+            "pred_traj_frenet": np.stack((ahead, leaving, leaving)),
             "raw_pred_vel": np.ones((3, 3, 2)),
             "signed_t_cross": 1.0,
             "valid_mask": np.ones((3, 3), dtype=bool),
@@ -717,8 +722,11 @@ class TestCutInChanceConstraint(unittest.TestCase):
             raw, current_d=0.0, relation=REL_EGO_LANE, cutin_chance_ref=self.REF
         )
         by_name = {m.mode_name: m for m in processed.mode_predictions}
-        self.assertTrue(np.isnan(by_name["cutout"].chance_confidence))
-        self.assertEqual(by_name["cutout"].clearance_scale, 1.0)
+        cutout = by_name["cutout"]
+        self.assertTrue(np.isnan(cutout.chance_confidence))
+        # Full standoff on every in-lane step; the overlap taper only acts on
+        # the (inactive) steps outside the lane.
+        np.testing.assert_array_equal(np.asarray(cutout.clearance_scale)[cutout.active_mask], 1.0)
         self.assertTrue(np.isnan(by_name["lk"].chance_confidence), "standoff factor only")
         self.assertAlmostEqual(
             by_name["lk"].clearance_scale,

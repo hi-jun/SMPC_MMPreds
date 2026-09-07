@@ -67,6 +67,16 @@ def modes_by_name(processed):
     return {mode.mode_name: mode for mode in processed.mode_predictions}
 
 
+def assert_cutout_unscaled_in_lane(cutout):
+    """The cut-out mode gets no probability factor: full standoff at every in-lane step.
+
+    Its per-step scale follows the lateral overlap
+    (``lateral_overlap_clearance``), which is 1.0 at the lane centre and zero
+    once the trajectory is outside -- on steps that are inactive anyway.
+    """
+    np.testing.assert_array_equal(np.asarray(cutout.clearance_scale)[cutout.active_mask], 1.0)
+
+
 def scenario_index(prediction, name):
     return prediction.mode_names.index(name)
 
@@ -77,7 +87,8 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
     In 1-D the lane-keeping hypothesis of a vacating lead is a full lead at
     every step, so it would block the ego from ever accelerating into the
     cut-out; ``chance_cutout_clearance`` scales it by its probability and
-    vanishes it below the threshold.  The ``cutout`` mode stays deterministic.
+    vanishes it below the threshold.  The ``cutout`` mode stays deterministic:
+    no probability factor, only the geometric overlap taper on its own steps.
     """
 
     HORIZON = 6
@@ -96,7 +107,7 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
             lk.clearance_scale, confidence_quantile(0.4) / confidence_quantile(REF), places=9)
         self.assertTrue(lk.active_mask.all())
         self.assertTrue(np.isnan(cutout.chance_confidence))
-        self.assertEqual(cutout.clearance_scale, 1.0)
+        assert_cutout_unscaled_in_lane(cutout)
         np.testing.assert_array_equal(cutout.active_mask, [True, True, True, True, False, False, False])
 
     def test_unlikely_lk_mode_vanishes(self):
@@ -106,14 +117,15 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         self.assertTrue(np.isnan(by_name["lk"].chance_confidence))
         cutout = by_name["cutout"]
         self.assertTrue(np.isnan(cutout.chance_confidence))
-        self.assertEqual(cutout.clearance_scale, 1.0)
+        assert_cutout_unscaled_in_lane(cutout)
         self.assertTrue(cutout.active_mask[:4].all(), "the vehicle itself keeps its standoff")
 
     def test_chance_off_leaves_ego_lane_modes_alone(self):
         by_name = modes_by_name(self._lead(0.05, 0.95))
         for name in ("lk", "cutout"):
             self.assertTrue(np.isnan(by_name[name].chance_confidence), name)
-            self.assertEqual(by_name[name].clearance_scale, 1.0, name)
+        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
+        assert_cutout_unscaled_in_lane(by_name["cutout"])
         self.assertTrue(by_name["lk"].active_mask.all())
         self.assertTrue(by_name["cutout"].active_mask[:4].all())
 
@@ -122,7 +134,8 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         by_name = modes_by_name(self._lead(0.05, 0.95, cutin_probability_threshold=VANISH))
         for name in ("lk", "cutout"):
             self.assertTrue(np.isnan(by_name[name].chance_confidence), name)
-            self.assertEqual(by_name[name].clearance_scale, 1.0, name)
+        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
+        assert_cutout_unscaled_in_lane(by_name["cutout"])
         self.assertFalse(by_name["lk"].active_mask.any())
         self.assertTrue(by_name["cutout"].active_mask[:4].all())
         by_name = modes_by_name(self._lead(0.4, 0.6, cutin_probability_threshold=VANISH))
