@@ -10,7 +10,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "carla"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from predictor.lstm.acc_adapter import LSTMACCAdapter  # noqa: E402
+from predictor.lstm.acc_adapter import LSTMACCAdapter, smooth_constant_acceleration  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
     REL_EGO_LANE,
     REL_LEFT_ADJACENT,
@@ -81,6 +81,28 @@ class TestLSTMACCAdapter(unittest.TestCase):
             cutin_probability_threshold=0.1,
             gap_recovery_s=3.0,
         )
+
+    def test_output_is_smoothed_to_a_constant_acceleration_motion(self):
+        """The raw decoder output steps forward by 0.2-0.5 m more or less from one
+        0.1 s sample to the next and wanders sideways; the adapter hands out the
+        constant-acceleration fit of it, so the finite-difference speed is
+        smooth and the lateral offset does not zigzag."""
+        history = straight_history(self.adapter, 0.0)
+        tensors = self.adapter.make_tensor(7, history[-1], {7: history}, model_yaw=ROAD_YAW)
+        raw_ft = self.adapter._run_model(tensors)
+        raw_step = np.diff(np.vstack((np.zeros((1, 2)), raw_ft)), axis=0)[:, 1]
+        self.assertGreater(float(np.std(raw_step)), 0.3, "ft per step: the raw output is noisy")
+
+        raw = self.adapter.predict_raw([7], {7: history}, model_yaw=ROAD_YAW)[7]
+        speed = np.linalg.norm(raw["raw_pred_vel"][0], axis=1)
+        self.assertLess(float(np.std(np.diff(speed))), 0.05, "m/s per step: smooth speed")
+        lateral = raw["raw_traj_xy"][0, :, 0]
+        self.assertLessEqual(int(np.sum(np.diff(np.sign(np.diff(lateral))) != 0)), 1, "no zigzag")
+
+        disp = np.array([[0.0, 1.0], [0.0, 2.0], [0.0, 3.0], [0.0, 4.0]])
+        np.testing.assert_allclose(smooth_constant_acceleration(disp, 0.1), disp, atol=1e-9)
+        noisy = disp + np.array([[0.0, 0.3], [0.0, -0.3], [0.0, 0.3], [0.0, -0.3]])
+        np.testing.assert_allclose(smooth_constant_acceleration(noisy, 0.1), disp, atol=0.3)
 
     def test_adjacent_lane_target_never_constrains(self):
         result = self._predict_acc(LANE_WIDTH, REL_LEFT_ADJACENT)

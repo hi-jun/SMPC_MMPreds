@@ -34,6 +34,28 @@ MODEL_ARGS = {
 }
 
 
+def smooth_constant_acceleration(disp: np.ndarray, dt: float) -> np.ndarray:
+    """Least-squares constant-acceleration fit through the origin, per axis.
+
+    The vanilla LSTM decoder emits its 50 positions from one repeated hidden
+    state, and the per-step displacements come out noisy even on a clean
+    constant-speed history: std 0.27 m per 0.1 s step at 13 m/s (+/-2.7 m/s
+    in the finite-difference speed), plus a lateral wander of +/-0.2-0.5 m for
+    a vehicle driving straight.  The fit keeps the model's mean motion -- its
+    speed bias included (it predicts ~90 % of the true speed) -- and removes
+    the step noise; on logged cut-out predictions the residual std is 0.1 m
+    lateral, 0.3 m longitudinal, and the lane-change lateral end offset stays
+    within 0.15 m of the raw output.  A quadratic rather than a cubic: a
+    braking lead that the model brings to a stop is then held or backed up,
+    never carried forward past the stop.
+    """
+    disp = np.asarray(disp, dtype=np.float64)
+    t = np.arange(1, disp.shape[0] + 1, dtype=np.float64) * float(dt)
+    basis = np.column_stack((t, t * t))
+    coef = np.linalg.lstsq(basis, disp, rcond=None)[0]
+    return basis @ coef
+
+
 class LSTMACCAdapter:
     """
     CARLA-facing adapter from the vanilla LSTM baseline to 1D ACC.
@@ -126,7 +148,8 @@ class LSTMACCAdapter:
         disp_ngsim_ft: np.ndarray,
         model_yaw: Optional[float] = None,
     ):
-        disp_ngsim = np.asarray(disp_ngsim_ft, dtype=np.float64) * FT2M
+        disp_ngsim = smooth_constant_acceleration(
+            np.asarray(disp_ngsim_ft, dtype=np.float64) * FT2M, self.dt)
         disp_rhs = np.column_stack((disp_ngsim[:, 1], -disp_ngsim[:, 0]))
         frame_state = STDAN3IntACCAdapter._target_frame_state(target_state, model_yaw)
         raw_traj_xy = transform_points(

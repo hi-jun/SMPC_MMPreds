@@ -50,3 +50,64 @@ class LowLevelControl:
         self.control_prev = control
 
         return control
+
+
+class IdealLongitudinalActuator:
+    """Pins the speed along the heading to the integrated acceleration command.
+
+    The same actuator the ACC ego drives with
+    (``ACCNairSMPCAgent._apply_ideal_longitudinal``), for the target vehicles:
+    through the throttle/brake maps above a vehicle never holds its planned
+    speed exactly (the maps realise about 1.5x the commanded acceleration plus
+    0.9 m/s^2 at zero command, and the 7 m/s FixedLaneSpeedAgent hunted by
+    +/-0.15 m/s), and a predictor reads every such ripple as acceleration.
+
+    ``set_target_velocity`` is applied before the physics step, which then
+    moves the speed by whatever the tyres and drag do within the tick.  The
+    difference between the speed set last tick and the speed measured now is
+    that per-tick effect; the mean of its last two values is added back in
+    advance so the measured speed follows ``v += a*dt`` (a two-tick mean
+    because the effect alternates with the speed once excited, and feeding
+    one tick's loss straight back sustains that alternation).  Only the
+    component along the heading is pinned: the lateral velocity is left as
+    the tyres made it, so steering turns the vehicle as before.  The callers
+    apply no throttle: with the engine driving the wheels a pinned vehicle
+    keeps a two-tick speed cycle for good once it is excited (+/-0.06 m/s at
+    7 m/s, +/-0.01 at 13, P-term or feed-forward alike), with the engine idle
+    the pin converges to the exact speed within 2 s (pin experiment,
+    2026-09-07).
+    """
+
+    def __init__(self, vehicle):
+        self.vehicle = vehicle
+        self._v_set_prev = None
+        self._eaten_prev = 0.0
+        self._dt = None
+
+    def _longitudinal_state(self):
+        if self._dt is None:
+            self._dt = self.vehicle.get_world().get_settings().fixed_delta_seconds or 0.05
+        dt = self._dt
+        yaw = np.radians(self.vehicle.get_transform().rotation.yaw)
+        heading = np.array([np.cos(yaw), np.sin(yaw)])
+        velocity = self.vehicle.get_velocity()
+        v_xy = np.array([velocity.x, velocity.y])
+        v_lon = float(np.dot(v_xy, heading))
+        return float(dt), heading, v_lon, v_xy - v_lon * heading
+
+    def update(self, a_des):
+        dt, heading, v_lon, v_lat = self._longitudinal_state()
+        eaten = 0.0 if self._v_set_prev is None else self._v_set_prev - v_lon
+        compensation = 0.5 * (eaten + self._eaten_prev)
+        self._eaten_prev = eaten
+        v_next = max(0.0, v_lon + float(a_des) * dt + compensation)
+        target = v_next * heading + v_lat
+        self.vehicle.set_target_velocity(carla.Vector3D(x=float(target[0]), y=float(target[1]), z=0.0))
+        self._v_set_prev = v_next
+        return v_next
+
+    def track_speed(self, v_target, a_max=2.0):
+        """Approach ``v_target`` at up to ``a_max``, then hold it exactly."""
+        dt, _, v_lon, _ = self._longitudinal_state()
+        a_des = np.clip((float(v_target) - v_lon) / dt, -float(a_max), float(a_max))
+        return self.update(a_des)

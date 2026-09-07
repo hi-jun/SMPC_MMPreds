@@ -13,7 +13,7 @@ scriptdir = os.path.abspath(__file__).split('carla')[0] + 'carla/'
 sys.path.append(scriptdir)
 from utils.carla_compat import make_global_route_planner
 from utils import frenet_trajectory_handler as fth
-from utils.low_level_control import LowLevelControl
+from utils.low_level_control import IdealLongitudinalActuator, LowLevelControl
 from utils.vehicle_geometry_utils import vehicle_name_to_lf_lr
 import matplotlib.pyplot as plt
 
@@ -52,6 +52,7 @@ class MPCAgent(object):
         self._fit_velocity_profile()
 
         self._low_level_control = LowLevelControl(vehicle)
+        self._ideal_actuator = IdealLongitudinalActuator(vehicle)
         self.goal_reached = False # flags when the end of the path is reached and agent should stop
         self.counter = 0
         # plt.subplot(411)
@@ -145,6 +146,14 @@ class MPCAgent(object):
                                                   u0[0], # a_des
                                                   v_des, # v_des
                                                   u0[1]) # df_des
+        # Steering only: the ideal actuator pins the speed, and any throttle
+        # on a pinned vehicle sustains a two-tick speed cycle once excited
+        # (+/-0.06 m/s at 7 m/s, +/-0.01 at 13, whether the throttle is the
+        # P-term or its feed-forward; pin experiment 2026-09-07), while with
+        # the engine idle the pin converges to the exact speed within 2 s.
+        control.throttle = 0.0
+        control.brake = 0.0
+        self._ideal_actuator.update(u0[0])
 
         # if self.counter % 10 == 0:
         #     plt.subplot(311)
@@ -200,13 +209,21 @@ class MPCAgent(object):
         v_disc    = np.insert(v_disc, -1, v_disc[-1]) # repeat the last speed
 
         self.reference = np.column_stack((t_disc, x_disc, y_disc, yaw_disc, v_disc))
+        self.reference_s = s_disc
 
     def _get_reference_traj(self, x0, y0, psi0, v0):
         ref_dict = {}
 
-        closest_idx = np.argmin( np.linalg.norm(self.reference[:, 1:3] - np.array([x0, y0]), axis=-1) )
+        # Reference time from the arc length rather than the nearest reference
+        # point: the points are DT apart (2.6 m at 13 m/s), and snapping to the
+        # nearest one moved the horizon forward in 0.2 s jumps every fourth
+        # 20 Hz tick, which the MPC answered with a -0.9/+0.9/+0.3/-0.3 m/s^2
+        # limit cycle (a 0.2 s speed ripple of +/-0.01 m/s through the throttle
+        # lag, +/-0.03 m/s on the ideal actuator).
+        s0, _, _ = self._frenet_traj.convert_global_to_frenet_frame(x0, y0, psi0)
+        t0 = np.interp(s0, self.reference_s, self.reference[:, 0])
 
-        t_ref = self.reference[closest_idx, 0] + np.array([x*self.DT for x in range(1, self.N+1)])
+        t_ref = t0 + np.array([x*self.DT for x in range(1, self.N+1)])
 
         ref_dict['x_ref']   = np.interp(t_ref, self.reference[:, 0], self.reference[:, 1])
         ref_dict['y_ref']   = np.interp(t_ref, self.reference[:, 0], self.reference[:, 2])

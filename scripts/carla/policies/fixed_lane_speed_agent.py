@@ -11,7 +11,7 @@ if CARLA_ROOT is None:
 scriptdir = os.path.abspath(__file__).split('carla')[0] + 'carla/'
 sys.path.append(scriptdir)
 from utils import frenet_trajectory_handler as fth
-from utils.low_level_control import LowLevelControl
+from utils.low_level_control import IdealLongitudinalActuator, LowLevelControl
 
 
 class FixedLaneSpeedAgent(object):
@@ -21,6 +21,7 @@ class FixedLaneSpeedAgent(object):
         self.vehicle = vehicle
         self.nominal_speed = nominal_speed_mps
         self._low_level_control = LowLevelControl(vehicle)
+        self._ideal_actuator = IdealLongitudinalActuator(vehicle)
         self.goal_reached = False
 
     def done(self):
@@ -36,9 +37,9 @@ class FixedLaneSpeedAgent(object):
 
         z0 = np.array([x, y, psi, speed])
         u0 = np.array([0.0, 0.0])
-        control = self._low_level_control.update(
-            speed,
-            0.0,
-            self.nominal_speed,
-            0.0)
+        # No throttle: the ideal actuator holds the speed exactly, and any
+        # throttle on a pinned vehicle sustains a two-tick speed cycle once
+        # excited (+/-0.06 m/s at 7 m/s; pin experiment 2026-09-07).
+        control = carla.VehicleControl(throttle=0.0, brake=0.0, steer=0.0)
+        self._ideal_actuator.track_speed(self.nominal_speed)
         return control, z0, u0, True, np.nan
