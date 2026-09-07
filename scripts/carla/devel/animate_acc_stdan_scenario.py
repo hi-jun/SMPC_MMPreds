@@ -105,6 +105,34 @@ def _role_color(role: str) -> str:
     return "#777777"
 
 
+# The maneuvering target and the vehicle behind it, per scenario kind. Panels
+# are labelled from whichever entry the loaded run actually contains.
+SCENARIO_ROLES = (
+    ("target_cutin", "cut-in", "target_right_lane_straight", "ego_lane_id"),
+    ("target_cutout", "cut-out", "target_lead_after_cutout", "target_lane_id"),
+)
+
+
+def _scenario_roles(actors: dict[str, dict]) -> dict:
+    for primary, kind, secondary, crossing_lane_key in SCENARIO_ROLES:
+        if primary in actors:
+            return {
+                "primary": primary,
+                "kind": kind,
+                "maneuver": kind.replace("-", ""),
+                "secondary": secondary if secondary in actors else None,
+                "crossing_lane_key": crossing_lane_key,
+            }
+    primary = next((role for role in actors if role.startswith("target_")), "target_cutin")
+    return {
+        "primary": primary,
+        "kind": "cut-in",
+        "maneuver": "cutin",
+        "secondary": None,
+        "crossing_lane_key": "ego_lane_id",
+    }
+
+
 def _route_geometry(scenario: dict) -> dict:
     vehicles = scenario.get("vehicle_params", [])
     ego = next((v for v in vehicles if v.get("role") == "ego"), {})
@@ -357,7 +385,8 @@ def _occupancy_path_indices(mode_mask: np.ndarray, path: np.ndarray) -> np.ndarr
 def _series(
         steps: list[dict],
         actors: Optional[dict[str, dict]] = None,
-        target_role: str = "target_cutin") -> dict:
+        target_role: str = "target_cutin",
+        maneuver: str = "cutin") -> dict:
     actors = actors or {}
     vehicle_id_to_role = _vehicle_id_role_map(steps, actors) if actors else {}
     values = {
@@ -379,7 +408,8 @@ def _series(
         "acc_lk": [],
         "acc_cutin": [],
         "acc_cutout": [],
-        "cutin_predicted": [],
+        "acc_maneuver": [],
+        "maneuver_predicted": [],
     }
     for step in steps:
         time_s = _float(step.get("time_s"))
@@ -406,15 +436,24 @@ def _series(
         values["target_v"].append(
             _float(effective_lead.get("speed")) if effective_lead else float("nan")
         )
-        # The predictor has the cut-in vehicle entering the ego lane within the
-        # horizon (its predicted trajectory, whose length is the horizon), while
-        # it is still in the next lane.
+        # The predictor has the maneuver inside the horizon while the vehicle
+        # has not performed it yet: for a cut-in its predicted trajectory
+        # (whose length is the horizon) enters the ego lane while it is still
+        # in the next lane; for a cut-out the ego-lane vehicle is predicted to
+        # leave.
         occupancy = target.get("ego_lane_occupancy_mask") or [] if target else []
-        values["cutin_predicted"].append(bool(
-            target
-            and target.get("relation_to_ego_lane") != "ego_lane"
-            and _float(target.get("ego_lane_start_idx"), default=np.inf) < max(len(occupancy), 1)
-        ))
+        if maneuver == "cutout":
+            values["maneuver_predicted"].append(bool(
+                target
+                and target.get("relation_to_ego_lane") == "ego_lane"
+                and _float(acc.get("cutout"), default=0.0) > 0.5
+            ))
+        else:
+            values["maneuver_predicted"].append(bool(
+                target
+                and target.get("relation_to_ego_lane") != "ego_lane"
+                and _float(target.get("ego_lane_start_idx"), default=np.inf) < max(len(occupancy), 1)
+            ))
         values["accel_cmd"].append(_float(step.get("accel_cmd")))
         values["gap"].append(
             _gap_for_plot(0.0, effective_lead.get("gap")) if effective_lead
@@ -439,6 +478,7 @@ def _series(
             values[name].append(_float(raw.get(name)))
         for name in ("lk", "cutin", "cutout"):
             values[f"acc_{name}"].append(_float(acc.get(name)))
+        values["acc_maneuver"].append(_float(acc.get(maneuver)))
     return {key: np.asarray(value, dtype=float) for key, value in values.items()}
 
 
@@ -590,13 +630,18 @@ def _fixed_actual_view_limits(
     )
 
 
-def _actual_cutin_time(actors: dict[str, dict], target_log: dict) -> float | None:
-    target_actor = actors.get("target_cutin")
-    ego_lane_id = target_log.get("ego_lane_id")
+def _actual_maneuver_time(
+        actors: dict[str, dict],
+        target_log: dict,
+        roles: dict) -> float | None:
+    target_actor = actors.get(roles["primary"])
+    # The lane the target ends up in: the ego lane for a cut-in, the adjacent
+    # lane it leaves to for a cut-out.
+    crossing_lane_id = target_log.get(roles["crossing_lane_key"])
     lane_records = target_actor.get("lane_trajectory", []) if target_actor is not None else []
-    if ego_lane_id is not None and lane_records:
+    if crossing_lane_id is not None and lane_records:
         for record in lane_records:
-            if record.get("lane_id") == ego_lane_id:
+            if record.get("lane_id") == crossing_lane_id:
                 time_s = _float(record.get("time_s"))
                 if np.isfinite(time_s):
                     return time_s
@@ -619,11 +664,11 @@ def _shade_spans(ax, times, mask, color, label, alpha=0.10):
             labelled = True
             start = None
 
-def _draw_cutin_time(ax, cutin_time_s: float | None, label: str | None = None):
-    if cutin_time_s is None or not np.isfinite(float(cutin_time_s)):
+def _draw_maneuver_time(ax, maneuver_time_s: float | None, label: str | None = None):
+    if maneuver_time_s is None or not np.isfinite(float(maneuver_time_s)):
         return
     ax.axvline(
-        float(cutin_time_s),
+        float(maneuver_time_s),
         color="#d62728",
         linestyle="--",
         linewidth=1.2,
@@ -729,7 +774,8 @@ def _plot_probability_series(
         data: dict,
         label_prefix: str,
         linestyle: str = "-",
-        alpha: float = 1.0):
+        alpha: float = 1.0,
+        maneuver: str = "cutin"):
     def label(name: str) -> str:
         return f"{label_prefix} {name}" if label_prefix else name
 
@@ -759,11 +805,11 @@ def _plot_probability_series(
     )
     ax.plot(
         data["time_s"],
-        data["acc_cutin"],
+        data["acc_maneuver"],
         color="black",
         linestyle=linestyle,
         alpha=alpha,
-        label=label("ACC cutin"),
+        label=label(f"ACC {maneuver}"),
     )
 
 
@@ -792,9 +838,14 @@ def make_animation(
         if ego_states.size:
             route["ego_lane_center_x"] = float(ego_states[0, 1])
     vehicle_id_to_role = _vehicle_id_role_map(steps, actors) if actors else {}
-    data = _series(steps, actors, target_role="target_cutin")
-    data_right = _series(steps, actors, target_role="target_right_lane_straight")
-    cutin_time_s = _actual_cutin_time(actors, target_log)
+    roles = _scenario_roles(actors)
+    maneuver = roles["maneuver"]
+    data = _series(steps, actors, target_role=roles["primary"], maneuver=maneuver)
+    data_right = (
+        _series(steps, actors, target_role=roles["secondary"], maneuver="lk")
+        if roles["secondary"] else None
+    )
+    maneuver_time_s = _actual_maneuver_time(actors, target_log, roles)
 
     fig = plt.figure(figsize=(15, 11))
     gs = fig.add_gridspec(
@@ -824,7 +875,7 @@ def make_animation(
         idx = frames[frame_number]
         step = steps[idx]
         time_s = _float(step.get("time_s"))
-        target = _target_for_role(step, actors, time_s, "target_cutin")
+        target = _target_for_role(step, actors, time_s, roles["primary"])
         prediction_targets = _targets(step)
         ego_s = _float(step.get("ego_s"))
         ego_v = _float(step.get("ego_v"))
@@ -1022,36 +1073,40 @@ def make_animation(
             ["LK", "LLC", "RLC"],
             [_float(raw.get("LK")), _float(raw.get("LLC")), _float(raw.get("RLC"))],
             [MODE_COLORS["LK"], MODE_COLORS["LLC"], MODE_COLORS["RLC"]],
-            "STDAN prob (target_cutin)",
+            f"STDAN prob ({roles['primary']})",
         )
         _draw_barh(
             ax_acc,
             ["lk", "cutin", "cutout"],
             [_float(acc.get("lk")), _float(acc.get("cutin")), _float(acc.get("cutout"))],
             ["#7b2cbf", "#111111", "#2ca02c"],
-            "ACC prob (target_cutin)",
+            f"ACC prob ({roles['primary']})",
         )
 
         ax_prob.clear()
-        _plot_probability_series(ax_prob, data, "")
-        _draw_cutin_time(ax_prob, cutin_time_s, label="actual cut-in")
+        _plot_probability_series(ax_prob, data, "", maneuver=maneuver)
+        _draw_maneuver_time(ax_prob, maneuver_time_s, label=f"actual {roles['kind']}")
         ax_prob.axvline(time_s, color="0.2", linewidth=1.0)
         ax_prob.set_ylim(-0.05, 1.05)
-        ax_prob.set_title("probability (target_cutin)", fontsize=10)
+        ax_prob.set_title(f"probability ({roles['primary']})", fontsize=10)
         ax_prob.set_ylabel("probability")
         ax_prob.legend(loc="upper right", fontsize=7, ncol=2)
         ax_prob.grid(True, alpha=0.2)
 
         ax_prob_right.clear()
-        _plot_probability_series(ax_prob_right, data_right, "")
-        _draw_cutin_time(ax_prob_right, cutin_time_s, label="actual cut-in")
-        ax_prob_right.axvline(time_s, color="0.2", linewidth=1.0)
-        ax_prob_right.set_ylim(-0.05, 1.05)
-        ax_prob_right.set_title("probability (target_right_lane_straight)", fontsize=10)
-        ax_prob_right.set_xlabel("time [s]")
-        ax_prob_right.set_ylabel("probability")
-        ax_prob_right.legend(loc="upper right", fontsize=7, ncol=2)
-        ax_prob_right.grid(True, alpha=0.2)
+        if data_right is None:
+            ax_prob_right.set_axis_off()
+            ax_prob_right.set_title("no second target in this scenario", fontsize=10)
+        else:
+            _plot_probability_series(ax_prob_right, data_right, "", maneuver="lk")
+            _draw_maneuver_time(ax_prob_right, maneuver_time_s, label=f"actual {roles['kind']}")
+            ax_prob_right.axvline(time_s, color="0.2", linewidth=1.0)
+            ax_prob_right.set_ylim(-0.05, 1.05)
+            ax_prob_right.set_title(f"probability ({roles['secondary']})", fontsize=10)
+            ax_prob_right.set_xlabel("time [s]")
+            ax_prob_right.set_ylabel("probability")
+            ax_prob_right.legend(loc="upper right", fontsize=7, ncol=2)
+            ax_prob_right.grid(True, alpha=0.2)
 
         ax_ctrl.clear()
         ax_ctrl_2.clear()
@@ -1094,22 +1149,22 @@ def make_animation(
         # an infeasible stretch is visible next to the speeds that caused it.
         _shade_spans(ax_ctrl, data["time_s"], ~np.asarray(data["feasible"], dtype=bool),
                      "#d62728", "infeasible")
-        # Green while the predictor has the cut-in vehicle entering the ego
-        # lane within the horizon: the controller is already planning against
-        # it although it has not crossed yet.
-        _shade_spans(ax_ctrl, data["time_s"], np.asarray(data["cutin_predicted"], dtype=bool),
-                     "#2ca02c", "cut-in predicted")
-        _draw_cutin_time(ax_ctrl, cutin_time_s, label="actual cut-in")
+        # Green while the predictor already has the maneuver inside the
+        # horizon: the controller is planning against it although the vehicle
+        # has not crossed yet.
+        _shade_spans(ax_ctrl, data["time_s"], np.asarray(data["maneuver_predicted"], dtype=bool),
+                     "#2ca02c", f"{roles['kind']} predicted")
+        _draw_maneuver_time(ax_ctrl, maneuver_time_s, label=f"actual {roles['kind']}")
         ax_ctrl.axvline(time_s, color="0.2", linewidth=1.0)
         ax_ctrl.set_xlabel("time [s]")
         ax_ctrl.set_ylabel("speed [m/s] / gap [m]")
         ax_ctrl.grid(True, alpha=0.2)
         ax_ctrl_2.plot(data["time_s"], data["accel_cmd"], color="#9467bd", label="accel cmd", alpha=0.9)
         ax_ctrl_2.set_ylabel("accel cmd [m/s^2]")
-        ax_ctrl_3.plot(data["time_s"], data["acc_cutin"], color="#111111", linewidth=1.0,
-                       alpha=0.75, label="cut-in prob")
+        ax_ctrl_3.plot(data["time_s"], data["acc_maneuver"], color="#111111", linewidth=1.0,
+                       alpha=0.75, label=f"{roles['kind']} prob")
         ax_ctrl_3.set_ylim(-0.02, 1.02)
-        ax_ctrl_3.set_ylabel("cut-in prob")
+        ax_ctrl_3.set_ylabel(f"{roles['kind']} prob")
         lines, labels = ax_ctrl.get_legend_handles_labels()
         lines2, labels2 = ax_ctrl_2.get_legend_handles_labels()
         lines3, labels3 = ax_ctrl_3.get_legend_handles_labels()

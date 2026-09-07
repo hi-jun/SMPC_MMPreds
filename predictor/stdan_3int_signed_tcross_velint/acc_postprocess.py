@@ -200,8 +200,13 @@ def _representative_index(raw_probs: np.ndarray, indices: Sequence[int]) -> int:
 
 
 def _mode_specs_for_relation(relation: str, raw_probs: np.ndarray) -> List[tuple[str, List[int], float]]:
-    """Label-based mapping for adjacent-lane vehicles; ego-lane vehicles are split by
-    their predicted trajectories in ``_trajectory_aware_mode_specs``."""
+    """Label-based mapping of the raw LK/LLC/RLC modes onto the ACC modes.
+
+    An ego-lane vehicle's LLC and RLC merge into ``cutout`` whatever their
+    trajectories do: where each predicted trajectory actually is, in the lane
+    or not, is carried by the mode's occupancy mask (``active_mask``), which
+    is what the constraints use; the label only groups the probability mass.
+    """
     if relation == REL_LEFT_ADJACENT:
         return [
             ("lk", [0, 1], float(raw_probs[0] + raw_probs[1])),
@@ -212,22 +217,30 @@ def _mode_specs_for_relation(relation: str, raw_probs: np.ndarray) -> List[tuple
             ("lk", [0, 2], float(raw_probs[0] + raw_probs[2])),
             ("cutin", [1], float(raw_probs[1])),
         ]
+    if relation == REL_EGO_LANE:
+        return [
+            ("lk", [0], float(raw_probs[0])),
+            ("cutout", [1, 2], float(raw_probs[1] + raw_probs[2])),
+        ]
     return [("lk", [0], 1.0)]
 
 
 # Steps (0.2 s each) a trajectory must spend outside the lane at the horizon
-# end before it counts as leaving.  In steady following the LLC/RLC
-# trajectories of a lane keeper poke out for the last one or two steps on a
-# fifth of the ticks (cutout_jerk10_20260905, pre-trigger: mean phantom
-# p_cutout 0.18 with one step, 0.06 with two, 0.00 with three), while a real
+# end before ``leaves_ego_lane`` counts it as leaving.  In steady following
+# the LLC/RLC trajectories of a lane keeper poke out for the last one or two
+# steps on a fifth of the ticks (cutout_jerk10_20260905, pre-trigger), a
+# wobble about the lane edge that must not relax the standoff, while a real
 # cut-out is already 4-5 steps outside when its probability crosses 0.5, so
-# three steps cost it at most one tick (0.05 s) of detection.
+# three steps cost it at most one tick (0.05 s).
 CUTOUT_SUSTAINED_STEPS = 3
 
 
 def leaves_ego_lane(membership: Sequence[bool], sustained_steps: int = CUTOUT_SUSTAINED_STEPS) -> bool:
     """Whether a predicted trajectory takes the vehicle out of the ego lane within the horizon.
 
+    The guard of ``lateral_overlap_clearance``: a ``cutout`` label says what
+    the vehicle intends, not where its predicted trajectory goes, so the
+    standoff is only relaxed for a trajectory that actually leaves.
     ``membership`` is the trajectory's ego-lane occupancy mask, one entry per
     horizon step with step 0 the measured state, from the same source the
     constraints use (``lane_occupancy_from_d`` or the CARLA waypoint test).
@@ -249,31 +262,7 @@ def _trajectory_aware_mode_specs(
     raw_probs: np.ndarray,
     all_frenet: np.ndarray,
     ego_lane_d: float,
-    memberships: np.ndarray,
 ) -> tuple[List[tuple[str, List[int], float]], Optional[int]]:
-    """Mode specs from where the predicted trajectories go, not from their labels.
-
-    An ego-lane vehicle is ``cutout`` for the raw modes whose trajectory
-    ``leaves_ego_lane`` and ``lk`` for the rest, each group merged with its
-    probabilities summed.  The intention label alone got this wrong for a
-    vehicle that had just cut in from the left: it keeps moving right, so RLC
-    stays at 1.0 while every predicted step is inside the ego lane, and the
-    label mapping turned that into a certain cut-out the moment the relation
-    flipped to ego-lane -- the controller released the brake at a vehicle
-    squarely in its path (aggressive cut-in, 2026-09-06).  ``memberships`` is
-    the occupancy mask the constraints use, so the split agrees with them
-    whichever source (Frenet threshold, CARLA waypoints) produced it.
-    Adjacent-lane vehicles pick the cut-in candidate by lateral approach.
-    """
-    if relation == REL_EGO_LANE:
-        cutout_indices = [
-            idx for idx in range(memberships.shape[0]) if leaves_ego_lane(memberships[idx])]
-        lk_indices = [idx for idx in range(memberships.shape[0]) if idx not in cutout_indices]
-        specs = []
-        for mode_name, indices in (("lk", lk_indices), ("cutout", cutout_indices)):
-            if indices:
-                specs.append((mode_name, indices, float(np.sum(raw_probs[indices]))))
-        return specs, None
     if relation not in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT):
         return _mode_specs_for_relation(relation, raw_probs), None
     if all_frenet.ndim != 3 or all_frenet.shape[0] < 3:
@@ -429,10 +418,11 @@ def chance_cutout_clearance(
     The ``cutout`` mode stays deterministic -- no confidence, no probability
     factor -- so the ego may only start accelerating into the hypothesis that
     the vehicle stays, never into the vehicle itself.  Its standoff is relaxed
-    geometrically instead, by ``lateral_overlap_clearance``: it shrinks with
-    the predicted lateral overlap as the vehicle slides out of the ego path,
-    and since that uses no probability it holds for every policy, with or
-    without the chance constraint.  Adjacent-lane vehicles are untouched.
+    geometrically instead, by ``lateral_overlap_clearance``: once its
+    trajectory actually leaves the lane it shrinks with the predicted lateral
+    overlap as the vehicle slides out of the ego path, and since that uses no
+    probability it holds for every policy, with or without the chance
+    constraint.  Adjacent-lane vehicles are untouched.
     """
     reference_beta = float(reference_beta)
     vanish_threshold = float(vanish_threshold)
@@ -491,17 +481,25 @@ def lateral_overlap_clearance(
     on the predicted trajectory alone, so every policy gets it, with or
     without the chance constraint.
 
-    Scoped to ``cutout`` modes, i.e. vehicles already classified as leaving by
-    ``leaves_ego_lane``.  On ``lk`` it would shorten the gap to a lead merely
-    riding off-centre, and on ``cutin`` -- or on the ``lk`` mode of a vehicle
-    that has just cut in, still at |d| ~ 1.4 -- it would defend the vehicle
-    with a third of its standoff at the moment it is most in the way.
+    Scoped to ``cutout`` modes whose trajectory actually leaves the lane
+    (``leaves_ego_lane`` on the mode's occupancy mask).  The label alone is
+    not enough: an ego-lane vehicle's LLC and RLC are ``cutout`` by mapping,
+    and a vehicle that has just cut in from the left keeps RLC ~ 1.0 -- it is
+    still moving right -- while every predicted step stays inside the lane,
+    so it is a certain ``cutout`` the moment its relation flips to ego-lane,
+    at |d| ~ 1.45 m, where the taper alone would leave it 35 % of its
+    standoff at the moment it is most in the way (aggressive cut-in,
+    2026-09-06).  With the guard it keeps the full standoff, and so does a
+    lane keeper's ``cutout`` mode wobbling about the lane edge.  ``lk`` and
+    ``cutin`` are never relaxed: on ``lk`` it would shorten the gap to a lead
+    merely riding off-centre, and on ``cutin`` it would defend the vehicle
+    with a third of its standoff as it arrives.
     """
     if relation_to_ego_lane != REL_EGO_LANE:
         return {}
     scales = {}
     for mode in mode_predictions:
-        if mode.mode_name != "cutout":
+        if mode.mode_name != "cutout" or not leaves_ego_lane(mode.active_mask):
             continue
         offset = np.abs(np.asarray(mode.frenet, dtype=float)[:, 1] - float(ego_lane_d))
         overlap = np.clip((CUTOUT_BLOCK_OFFSET_M - offset) / CUTOUT_TAPER_WIDTH_M, 0.0, 1.0)
@@ -700,13 +698,10 @@ def process_vehicle_prediction(
         raw_probs,
         all_frenet,
         ego_lane_d,
-        memberships,
     )
-    # An ego-lane vehicle is always split by its predicted trajectories; the
-    # flag only switches the adjacent-lane cut-in mapping.
     mode_specs = (
         trajectory_mode_specs
-        if use_trajectory_aware_cutin_mapping or relation_to_ego_lane == REL_EGO_LANE
+        if use_trajectory_aware_cutin_mapping
         else _mode_specs_for_relation(relation_to_ego_lane, raw_probs)
     )
     prob_maps = _acc_probabilities_from_mode_specs(raw_probs, raw_map, mode_specs)

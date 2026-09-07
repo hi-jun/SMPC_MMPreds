@@ -79,12 +79,16 @@ class FrenetTrajectoryHandler(object):
 
 		psi_error = fix_angle(psi_query - psi_waypoint)
 
-		# Note: handling e_s can be ugly at kinks in the path (not smooth curvature)
-		# so for simplicity, we can just ignore the e_s component and assume it's small.
-		# Also, this approach is not well suited for cases like u-turns where the closest point
-		# is not well defined.
+		# The tangential error is added back so s is continuous rather than snapped to
+		# the sampling grid: at 0.5 m spacing the snap alternates the reported s by up to
+		# +/-0.25 m every tick, which a car-following controller sitting on its safe-distance
+		# boundary turns into command chatter.  Clipped to half the spacing so a kink in the
+		# path (where the closest point is not well defined) cannot move s by a whole cell.
+		half_cell = 0.5 * float(self.trajectory[1, 0] - self.trajectory[0, 0]) \
+		    if self.trajectory.shape[0] > 1 else 0.0
+		e_s = float(np.clip(error_frenet[0], -half_cell, half_cell))
 
-		return s_waypoint, error_frenet[1], psi_error # s, e_y, e_psi
+		return s_waypoint + e_s, error_frenet[1], psi_error # s, e_y, e_psi
 
 	def convert_frenet_to_global_frame(self, s_query, e_y_query, e_psi_query):
 		s_traj  = self.trajectory[:,0]
