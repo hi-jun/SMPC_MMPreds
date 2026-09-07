@@ -37,7 +37,7 @@ from utils.acc_nair_smpc import (
     required_standoff,
     safety_function,
 )
-from utils.low_level_control import LowLevelControl
+from utils.low_level_control import IdealLongitudinalActuator, LowLevelControl
 from utils.synthetic_lk_cutin_prediction import (
     SyntheticCutInConfig,
     SyntheticLaneKeepingCutInPredictor,
@@ -110,7 +110,7 @@ class ACCNairSMPCAgent(object):
         # vehicle, which turns the following loop into a limit cycle; the
         # ``carla_actuator`` token keeps that path for comparison.
         self.ideal_actuator = "carla_actuator" not in self.smpc_config
-        self._ideal_v_set_prev = None
+        self._ideal_actuator = IdealLongitudinalActuator(vehicle) if self.ideal_actuator else None
         # vehicle id -> time the gap re-establishment clock started for it
         self._ego_lane_entry_time = {}
         # vehicle id -> gap / full standoff when that clock started; the
@@ -516,28 +516,14 @@ class ACCNairSMPCAgent(object):
         self._remember_accel_cmd(time_s, action)
         control = self._low_level_control.update(speed, action, v_des, df_des)
         if self.ideal_actuator:
-            # The throttle/brake stay applied so the wheels keep pace with the
-            # chassis; the velocity override just pins the speed each tick.
-            self._apply_ideal_longitudinal(speed, action, command_dt)
+            # Steering only: with throttle on a pinned vehicle the speed keeps
+            # a two-tick +/-0.06 m/s cycle at 7 m/s once excited (it appeared
+            # behind the 7 m/s second lead, 2026-09-07); with the engine idle
+            # the pin converges to the integrated command exactly.
+            control.throttle = 0.0
+            control.brake = 0.0
+            self._ideal_actuator.update(action)
         return control, z0, u0, is_feasible, solve_time
-
-    def _apply_ideal_longitudinal(self, speed, action, command_dt):
-        """Integrate the accel command and pin the speed along the heading.
-
-        ``set_target_velocity`` is applied before the physics step, which then
-        moves the speed by whatever the drivetrain and drag do within the tick.
-        The difference between the speed set last tick and the speed measured
-        now is that per-tick physics effect; it is added back in advance so
-        the measured speed follows the integrated command.
-        """
-        eaten = 0.0
-        if self._ideal_v_set_prev is not None:
-            eaten = float(self._ideal_v_set_prev) - float(speed)
-        v_next = max(0.0, float(speed) + float(action) * float(command_dt) + eaten)
-        yaw = np.radians(self.vehicle.get_transform().rotation.yaw)
-        self.vehicle.set_target_velocity(carla.Vector3D(
-            x=v_next * np.cos(yaw), y=v_next * np.sin(yaw), z=0.0))
-        self._ideal_v_set_prev = v_next
 
     def get_cut_in_log(self):
         return {

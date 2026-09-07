@@ -55,12 +55,13 @@ class LowLevelControl:
 class IdealLongitudinalActuator:
     """Pins the speed along the heading to the integrated acceleration command.
 
-    The same actuator the ACC ego drives with
-    (``ACCNairSMPCAgent._apply_ideal_longitudinal``), for the target vehicles:
-    through the throttle/brake maps above a vehicle never holds its planned
-    speed exactly (the maps realise about 1.5x the commanded acceleration plus
-    0.9 m/s^2 at zero command, and the 7 m/s FixedLaneSpeedAgent hunted by
-    +/-0.15 m/s), and a predictor reads every such ripple as acceleration.
+    Drives the ACC ego (its default since 2026-09-03; the ``carla_actuator``
+    policy token keeps the throttle/brake path) and, since 2026-09-07, the
+    target vehicles: through the throttle/brake maps above a vehicle never
+    holds its planned speed exactly (the maps realise about 1.5x the
+    commanded acceleration plus 0.9 m/s^2 at zero command, and the 7 m/s
+    FixedLaneSpeedAgent hunted by +/-0.15 m/s), and a predictor reads every
+    such ripple as acceleration.
 
     ``set_target_velocity`` is applied before the physics step, which then
     moves the speed by whatever the tyres and drag do within the tick.  The
