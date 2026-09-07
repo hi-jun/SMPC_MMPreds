@@ -91,17 +91,26 @@ def expected_overlap(d_values):
 
 
 class TestLeavesEgoLane(unittest.TestCase):
-    """The horizon end decides; a transient excursion is not a departure."""
+    """The horizon end decides, and it has to stay outside for three steps.
+
+    A lane keeper's LLC/RLC trajectories poke out of the lane for the last
+    step or two on a fifth of the ticks in steady following (phantom
+    p_cutout 0.18 with a one-step rule, 0.00 with three); a real cut-out is
+    4-5 steps outside by the time its probability crosses 0.5.
+    """
 
     def test_predicate(self):
         T, F = True, False
         self.assertFalse(leaves_ego_lane([T] * 16))
         self.assertTrue(leaves_ego_lane([T] * 11 + [F] * 5))
-        self.assertTrue(leaves_ego_lane([T] * 15 + [F]))
-        self.assertTrue(leaves_ego_lane([F, T, T, F, F]), "outside now, in and then out")
+        self.assertTrue(leaves_ego_lane([T] * 13 + [F] * 3), "three steps outside at the end")
+        self.assertFalse(leaves_ego_lane([T] * 14 + [F] * 2), "two steps: a horizon-end wobble")
+        self.assertFalse(leaves_ego_lane([T] * 15 + [F]))
+        self.assertTrue(leaves_ego_lane([F, T, T, F, F, F]), "outside now, in and then out")
         self.assertFalse(leaves_ego_lane([T] * 6 + [F] * 3 + [T] * 7), "wobble about the edge")
         self.assertFalse(leaves_ego_lane([F] * 16), "never inside: nothing to leave")
         self.assertFalse(leaves_ego_lane([]))
+        self.assertTrue(leaves_ego_lane([T] * 15 + [F], sustained_steps=1), "the old one-step rule")
 
 
 class TestEgoLaneModesFollowTheTrajectory(unittest.TestCase):
@@ -308,12 +317,12 @@ class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
         raw = ego_lane_raw(
             [0.79, 0.11, 0.10], [profile((IN, HORIZON)), profile((IN, HORIZON)), rlc_d])
         memberships = np.ones((3, HORIZON + 1), dtype=bool)
-        memberships[2, -1] = False        # 15/16 in lane, as in the logs
+        memberships[2, -3:] = False       # 13/16 in lane: out for the last 0.6 s
         by_name = modes_by_name(process(
             raw, current_d=0.2, cutin_probability_threshold=0.1, **waypoint_kwargs(memberships)))
         cutout = by_name["cutout"]
         self.assertAlmostEqual(cutout.probability, 0.10)
-        np.testing.assert_array_equal(cutout.active_mask, [True] * HORIZON + [False])
+        np.testing.assert_array_equal(cutout.active_mask, [True] * (HORIZON - 2) + [False] * 3)
         np.testing.assert_allclose(cutout.clearance_scale[cutout.active_mask], 1.0)
         self.assertEqual(by_name["lk"].clearance_scale, 1.0)
 

@@ -186,6 +186,11 @@ class ACCNairSMPCAgent(object):
                     future=max(3.0, float(N) * float(dt)),
                     dt=0.1,
                     mc_dropout=False,
+                    # 0.2 s acceleration feature: cancels the target vehicles'
+                    # 0.2 s speed ripple that dithered the prediction each tick.
+                    # The LSTM adapter builds its own STDAN3IntACCAdapter with
+                    # the trained 0.1 s difference and is not affected.
+                    accel_baseline_s=0.2,
                 )
             self.stdan_history_secs = [
                 round(i * self.stdan_predictor.dt, 2)

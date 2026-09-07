@@ -9,6 +9,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "carla"))
 
+from predictor.stdan.stdan_predictor import M2FT  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_adapter import STDAN3IntACCAdapter  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
     ACCModePrediction,
@@ -407,6 +408,41 @@ class TestSTDAN3IntACCIntegration(unittest.TestCase):
         self.assertAlmostEqual(ngsim[-1, 0], -3.0)
         self.assertAlmostEqual(ngsim[-1, 1], 5.0)
 
+    def test_acceleration_feature_over_0_2_s_cancels_the_targets_speed_ripple(self):
+        """The CARLA targets' own controllers leave a 0.2 s ripple of +/-0.01 m/s on
+        their speed.  The trained one-sample (0.1 s) difference turns it into an
+        acceleration input that alternates in sign from one 20 Hz tick to the next;
+        the 0.2 s mean cancels it and still passes a real deceleration through."""
+        dv = [-0.0112, 0.0024, -0.0065, 0.0154]   # per 0.05 s tick, logged 2026-09-07
+
+        def history(phase, accel=0.0):
+            x, v, xs = 0.0, 13.0, []
+            for k in range(200):
+                xs.append(x)
+                x += v * 0.05
+                v += dv[k % 4] + (accel * 0.05 if k >= 130 else 0.0)   # braking over the last 3.5 s
+            idx = np.arange(199 - phase, -1, -2)[::-1][-33:]   # 0.1 s samples ending at the tick
+            return np.column_stack((np.asarray(xs)[idx], np.zeros(33), np.zeros(33)))
+
+        def features(adapter, phase, accel=0.0):
+            hist = history(phase, accel)
+            ngsim = adapter._history_to_ngsim(hist, hist[-1], model_yaw=0.0)
+            _, va = adapter._motion_tensors_from_ngsim(ngsim)
+            return va.numpy()
+
+        trained = STDAN3IntACCAdapter(load_model=False)
+        smoothed = STDAN3IntACCAdapter(load_model=False, accel_baseline_s=0.2)
+        self.assertAlmostEqual(trained.accel_baseline_s, 0.1)
+        latest_trained = [features(trained, phase)[-1, 1] for phase in range(4)]
+        latest_smoothed = [features(smoothed, phase)[-1, 1] for phase in range(4)]
+        self.assertGreater(max(latest_trained) - min(latest_trained), 0.3, "ft/s^2, alternating")
+        self.assertLess(max(abs(a) for a in latest_smoothed), 0.05, "ft/s^2, ripple cancelled")
+        np.testing.assert_allclose(
+            features(smoothed, 0)[:, 0], features(trained, 0)[:, 0], err_msg="speed feature untouched")
+        braking = -2.0 * M2FT
+        self.assertAlmostEqual(features(smoothed, 1, accel=-2.0)[-1, 1], braking, delta=0.05)
+        self.assertAlmostEqual(features(trained, 1, accel=-2.0)[-1, 1], braking, delta=1.0)
+
 
 class TestCutInProbabilityGate(unittest.TestCase):
     """Low-probability cut-in modes must stop generating longitudinal constraints.
@@ -486,10 +522,11 @@ class TestCutInProbabilityGate(unittest.TestCase):
 
     def test_gate_drops_a_negligible_lane_keeping_hypothesis_but_keeps_the_cutout_mode(self):
         # Ego-lane modes are split by trajectory, so the cut-out hypotheses
-        # (raw modes 1 and 2) have to leave the lane inside the horizon.
+        # (raw modes 1 and 2) have to be out of the lane for the last three
+        # steps of the horizon.
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
-        leaving = np.column_stack((s, [0.0, 0.0, 3.5]))
+        leaving = np.column_stack((s, [3.5, 3.5, 3.5]))
         raw = {
             "vehicle_id": 11,
             "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
@@ -513,7 +550,7 @@ class TestCutInProbabilityGate(unittest.TestCase):
         cutout = self._mode(processed, "cutout")
         self.assertIsNotNone(cutout)
         np.testing.assert_array_equal(
-            cutout.active_mask, [True, True, True, False], "cutout mode is never gated")
+            cutout.active_mask, [True, False, False, False], "cutout mode is never gated")
 
     def test_gate_preserves_current_ego_lane_occupancy(self):
         """A target already straddling the ego lane stays constrained at step 0."""
@@ -709,7 +746,7 @@ class TestCutInChanceConstraint(unittest.TestCase):
         """
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
-        leaving = np.column_stack((s, [0.0, 0.0, 3.5]))   # the cut-out has to leave the lane
+        leaving = np.column_stack((s, [3.5, 3.5, 3.5]))   # out for the last three steps
         raw = {
             "vehicle_id": 11,
             "raw_intention_prob": np.array([0.02, 0.49, 0.49]),

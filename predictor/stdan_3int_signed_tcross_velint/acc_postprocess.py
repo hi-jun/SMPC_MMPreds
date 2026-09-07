@@ -215,19 +215,33 @@ def _mode_specs_for_relation(relation: str, raw_probs: np.ndarray) -> List[tuple
     return [("lk", [0], 1.0)]
 
 
-def leaves_ego_lane(membership: Sequence[bool]) -> bool:
+# Steps (0.2 s each) a trajectory must spend outside the lane at the horizon
+# end before it counts as leaving.  In steady following the LLC/RLC
+# trajectories of a lane keeper poke out for the last one or two steps on a
+# fifth of the ticks (cutout_jerk10_20260905, pre-trigger: mean phantom
+# p_cutout 0.18 with one step, 0.06 with two, 0.00 with three), while a real
+# cut-out is already 4-5 steps outside when its probability crosses 0.5, so
+# three steps cost it at most one tick (0.05 s) of detection.
+CUTOUT_SUSTAINED_STEPS = 3
+
+
+def leaves_ego_lane(membership: Sequence[bool], sustained_steps: int = CUTOUT_SUSTAINED_STEPS) -> bool:
     """Whether a predicted trajectory takes the vehicle out of the ego lane within the horizon.
 
     ``membership`` is the trajectory's ego-lane occupancy mask, one entry per
     horizon step with step 0 the measured state, from the same source the
     constraints use (``lane_occupancy_from_d`` or the CARLA waypoint test).
     The trajectory leaves when it is inside the lane at some step and outside
-    at the horizon end.  Only the end counts: a step or two outside with the
-    trajectory back inside afterwards is a wobble about the lane edge, not a
-    departure, and a trajectory that is never inside has nothing to leave.
+    for the last ``sustained_steps`` steps of the horizon.  Only the end
+    counts: a step or two outside with the trajectory back inside afterwards
+    is a wobble about the lane edge, not a departure, and so is a trajectory
+    that only pokes out at the very end; a trajectory that is never inside
+    has nothing to leave.
     """
     mask = np.asarray(membership, dtype=bool).ravel()
-    return bool(mask.any()) and not bool(mask[-1])
+    if not mask.any():
+        return False
+    return int(np.argmax(mask[::-1])) >= int(sustained_steps)
 
 
 def _trajectory_aware_mode_specs(

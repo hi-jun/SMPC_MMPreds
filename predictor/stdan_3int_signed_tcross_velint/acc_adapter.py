@@ -49,6 +49,7 @@ class STDAN3IntACCAdapter:
         load_model: bool = True,
         pad_short_history: bool = True,
         min_history_samples: int = 3,
+        accel_baseline_s: Optional[float] = None,
     ):
         self.args = dict(BASE_ARGS)
         self.dt = float(dt)
@@ -70,6 +71,17 @@ class STDAN3IntACCAdapter:
         self.mc_dropout = bool(mc_dropout)
         self.pad_short_history = bool(pad_short_history)
         self.min_history_samples = int(min_history_samples)
+        # Time base of the signed-acceleration input feature.  The default is
+        # the one-sample (``dt``) finite difference the model was trained with.
+        # The CARLA target vehicles' own controllers leave a 0.2 s ripple of
+        # +/-0.01 m/s on their speed, which that difference turns into an
+        # acceleration input alternating in sign every 0.1 s sample; the model
+        # extrapolated it into a +/-0.35 m/s swing of the predicted speed from
+        # one 20 Hz tick to the next (+/-1 m at the 3 s horizon end), which was
+        # the command jitter of the STDAN policies in steady following
+        # (2026-09-07).  Averaging the differences over 0.2 s cancels the
+        # ripple exactly and leaves a ripple-free history untouched.
+        self.accel_baseline_s = float(self.dt if accel_baseline_s is None else accel_baseline_s)
         self.ckpt_path = Path(ckpt_path) if ckpt_path is not None else DEFAULT_CKPT
         if not self.ckpt_path.is_absolute():
             root = Path(__file__).resolve().parents[2]
@@ -252,6 +264,14 @@ class STDAN3IntACCAdapter:
         history_ft = torch.from_numpy(ngsim_history_m * M2FT).float().to(self.device)
         velocity = (history_ft[1:] - history_ft[:-1]) / self.dt
         acceleration = (velocity[1:] - velocity[:-1]) / self.dt
+        samples = int(round(self.accel_baseline_s / self.dt))
+        if samples > 1:
+            # Mean of the last ``samples`` one-sample differences, the first
+            # one repeated where the history is too short for a full window.
+            padded = torch.cat((acceleration[:1].expand(samples - 1, -1), acceleration), dim=0)
+            acceleration = torch.stack(
+                [padded[k : k + acceleration.shape[0]] for k in range(samples)]
+            ).mean(dim=0)
         hist = history_ft[-self.in_length :]
         final_velocity = velocity[-self.in_length :]
         speed = torch.norm(final_velocity, p=2, dim=-1, keepdim=True)
