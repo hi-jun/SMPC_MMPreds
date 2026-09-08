@@ -91,6 +91,18 @@ class STDAN3IntACCAdapter:
             checkpoint = torch.load(str(ckpt_path), map_location=self.device, weights_only=False)
         except TypeError:
             checkpoint = torch.load(str(ckpt_path), map_location=self.device)
+        # The decoder's ``mapping`` weight is (in_length, out_length, 3), so the
+        # model has to be built with the horizon the checkpoint was trained at,
+        # not with the one the caller asked for: checkpoints_out50_no_tcross
+        # would not load into a 3.0 s model at all.  Predicting further than the
+        # controller needs costs nothing -- ``_sample_future`` takes the steps
+        # it wants and clips the rest.
+        trained_out = int((checkpoint.get("args") or {}).get(
+            "out_length", self.args["out_length"]))
+        if trained_out != int(self.args["out_length"]):
+            self.args["out_length"] = trained_out
+            self.out_length = trained_out
+            self.future = trained_out * self.dt
         self.gdEncoder = GDEncoder(self.args).to(self.device)
         self.generator = Generator(self.args).to(self.device)
         self.gdEncoder.load_state_dict(checkpoint["gdEncoder"])
