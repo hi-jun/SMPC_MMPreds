@@ -1218,9 +1218,12 @@ class NairACCSMPC:
         else:
             clearance = self.config.d0 + self.config.time_headway * ego_v
         # ``clearance_scale`` multiplies the whole deterministic standoff, footprint
-        # included.  Benciolini et al. (T-IV 2023) Remark 5: leaving the footprint
-        # outside the confidence scaling keeps a fixed exclusion zone alive even for
-        # a disbelieved mode.  ``tightening`` stays outside because the risk
+        # included, which is what Benciolini et al. (T-IV 2023) eq. (19) does:
+        # ``a = (sigma_x + l_o) sqrt(zeta(beta))``.  Their Remark 5 rejects the
+        # alternative ``sigma_x sqrt(zeta(beta)) + l_o`` precisely because a
+        # footprint left outside the scaling keeps a fixed exclusion zone alive
+        # for a mode nobody believes in, so the constraints never vanish as
+        # ``beta -> 0``.  ``tightening`` stays outside because the risk
         # allocation (or the cell's confidence) already carries the mode
         # probability.
         return (
