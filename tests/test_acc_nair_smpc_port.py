@@ -777,6 +777,97 @@ class TestConfidenceChanceConstraint(unittest.TestCase):
         # Mode 0 is deterministic either way.
         np.testing.assert_allclose(with_sigma.s_ref[0], without.s_ref[0])
 
+    @staticmethod
+    def _two_lane_vehicles(horizon, far_s0):
+        """Near lead 27 m ahead at 13 m/s, a slower one further ahead at 7 m/s."""
+        steps = np.arange(horizon + 1) * 0.2
+        near = np.column_stack((27.0 + 13.0 * steps, np.full(horizon + 1, 13.0)))
+        far = np.column_stack((far_s0 + 7.0 * steps, np.full(horizon + 1, 7.0)))
+        return near, np.stack((near, far), axis=1)[None]
+
+    @staticmethod
+    def _shadowed_prediction(horizon, candidates, near, far_active):
+        mask = np.zeros((1, horizon + 1, 2), dtype=bool)
+        mask[:, :, 0] = True
+        mask[:, :, 1] = far_active
+        return MultimodalLeadPrediction(
+            means=near[None].copy(),
+            probabilities=np.array([1.0]),
+            covariances=np.zeros((1, horizon + 1, 2, 2)),
+            active_mask=np.ones((1, horizon + 1), dtype=bool),
+            lead_candidates=candidates,
+            lead_candidate_mask=mask,
+        )
+
+    def _shadowed_reference(self, far_s0, far_active=True, horizon=15):
+        config = NairACCConfig(
+            horizon=horizon, dt=0.2, desired_speed=17.0, num_modes=1,
+            a_min=-3.0, a_max=2.0,
+            safety_constraint_mode=SAFETY_NOMINAL_SAFE_DISTANCE)
+        near, candidates = self._two_lane_vehicles(horizon, far_s0)
+        return OldACCReferenceAdapter(config).generate(
+            np.array([0.0, 13.0]),
+            self._shadowed_prediction(horizon, candidates, near, far_active))
+
+    def test_reference_speed_answers_to_a_slower_vehicle_behind_the_near_lead(self):
+        """A slower vehicle further ahead has to ease the reference speed while a
+        faster one is still between: the ego ends up behind it either way, and
+        waiting for the near lead to vacate the step turns that into a step."""
+        near_only = self._shadowed_reference(54.0, far_active=False)
+        shadowed = self._shadowed_reference(54.0)
+        # Seeing only the near lead, the reference just holds its 13 m/s.
+        np.testing.assert_allclose(near_only.v_ref[0], 13.0, atol=0.2)
+        # Seeing past it, the reference eases off from the first step and keeps
+        # going down over the horizon, within the ego's own acceleration limits.
+        self.assertLess(shadowed.v_ref[0, 0], 11.0)
+        self.assertLess(shadowed.v_ref[0, -1], 9.0)
+        # The position reference is left to the near lead: at a given step it is
+        # the tighter bound, and it is what the collision constraint uses.
+        np.testing.assert_allclose(shadowed.s_ref[0], near_only.s_ref[0])
+
+    def test_a_single_vehicle_ahead_is_untouched_by_the_shadowed_leads(self):
+        """The baselines see one lead; nothing about them may change."""
+        config = NairACCConfig(
+            horizon=15, dt=0.2, desired_speed=17.0, num_modes=1,
+            a_min=-3.0, a_max=2.0,
+            safety_constraint_mode=SAFETY_NOMINAL_SAFE_DISTANCE)
+        near, _ = self._two_lane_vehicles(15, 54.0)
+        without = OldACCReferenceAdapter(config).generate(
+            np.array([0.0, 13.0]),
+            MultimodalLeadPrediction(
+                means=near[None].copy(),
+                probabilities=np.array([1.0]),
+                covariances=np.zeros((1, 16, 2, 2)),
+                active_mask=np.ones((1, 16), dtype=bool),
+            ))
+        with_masked_off = self._shadowed_reference(54.0, far_active=False)
+        np.testing.assert_allclose(with_masked_off.s_ref, without.s_ref)
+        np.testing.assert_allclose(with_masked_off.v_ref, without.v_ref)
+
+    def test_the_shadowed_pull_falls_away_with_distance(self):
+        """The blend is scaled by the distance to the vehicle, so this is
+        anticipation and not a speed limit copied off every car in sight."""
+        near_only = self._shadowed_reference(54.0, far_active=False)
+        close = self._shadowed_reference(54.0)
+        distant = self._shadowed_reference(300.0)
+        self.assertGreater(near_only.v_ref[0, -1] - close.v_ref[0, -1], 4.0)
+        # 300 m ahead of a 3 s horizon it leaves the reference alone entirely.
+        np.testing.assert_allclose(distant.v_ref[0, -1], near_only.v_ref[0, -1])
+        self.assertLess(near_only.v_ref[0, 0] - distant.v_ref[0, 0], 0.6)
+
+    def test_a_faster_vehicle_further_ahead_never_raises_the_reference(self):
+        near_only = self._shadowed_reference(54.0, far_active=False)
+        config = NairACCConfig(
+            horizon=15, dt=0.2, desired_speed=17.0, num_modes=1,
+            a_min=-3.0, a_max=2.0,
+            safety_constraint_mode=SAFETY_NOMINAL_SAFE_DISTANCE)
+        near, candidates = self._two_lane_vehicles(15, 54.0)
+        candidates[0, :, 1, 1] = 16.0   # the far vehicle now outruns the lead
+        faster = OldACCReferenceAdapter(config).generate(
+            np.array([0.0, 13.0]),
+            self._shadowed_prediction(15, candidates, near, True))
+        np.testing.assert_allclose(faster.v_ref[0], near_only.v_ref[0])
+
 
 if __name__ == "__main__":
     unittest.main()

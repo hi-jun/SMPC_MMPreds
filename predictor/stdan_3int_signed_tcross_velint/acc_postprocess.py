@@ -879,6 +879,12 @@ def build_multitarget_lead_prediction(
     scenarios = scenarios[:num_modes]
 
     means = np.zeros((len(scenarios), horizon + 1, 2), dtype=float)
+    # Every active vehicle per (scenario, step), nearest first: ``means`` keeps
+    # only the nearest, but the reference speed has to answer to a slower one
+    # further ahead as well.
+    max_candidates = max(1, len(targets))
+    lead_candidates = np.zeros((len(scenarios), horizon + 1, max_candidates, 2), dtype=float)
+    lead_candidate_mask = np.zeros((len(scenarios), horizon + 1, max_candidates), dtype=bool)
     covariances = np.zeros((len(scenarios), horizon + 1, 2, 2), dtype=float)
     active_mask = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     clearance_scale = np.ones((len(scenarios), horizon + 1), dtype=float)
@@ -909,7 +915,12 @@ def build_multitarget_lead_prediction(
                 candidates.append((s_val, mode))
             cell = None
             if candidates:
-                _, selected = min(candidates, key=lambda item: item[0])
+                candidates.sort(key=lambda item: item[0])
+                for idx, (s_val, candidate) in enumerate(candidates):
+                    lead_candidates[scenario_out_idx, step, idx] = (
+                        s_val, float(candidate.frenet[step, 2]))
+                    lead_candidate_mask[scenario_out_idx, step, idx] = True
+                selected = candidates[0][1]
                 scale = np.asarray(selected.clearance_scale, dtype=float)
                 cell = (float(selected.chance_confidence), float(scale[step] if scale.ndim else scale))
                 if reference_beta > 0.0 or vanish_threshold > 0.0:
@@ -964,6 +975,8 @@ def build_multitarget_lead_prediction(
             k_group_map[scenario_idx, step] = k_group_lookup[key]
     prediction = MultimodalLeadPrediction(
         means=means,
+        lead_candidates=lead_candidates,
+        lead_candidate_mask=lead_candidate_mask,
         probabilities=np.asarray(probabilities, dtype=float),
         covariances=covariances,
         mode_names=mode_names,

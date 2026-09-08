@@ -619,6 +619,14 @@ class ACCNairSMPCAgent(object):
             mode_names=[mode_names[best_idx]],
             policy_tree=policy_tree,
             active_mask=prediction.active_mask[best_idx: best_idx + 1].copy(),
+            lead_candidates=(
+                None if prediction.lead_candidates is None
+                else prediction.lead_candidates[best_idx: best_idx + 1].copy()
+            ),
+            lead_candidate_mask=(
+                None if prediction.lead_candidate_mask is None
+                else prediction.lead_candidate_mask[best_idx: best_idx + 1].copy()
+            ),
             k_group_map=(
                 None if prediction.k_group_map is None
                 else prediction.k_group_map[best_idx: best_idx + 1].copy()

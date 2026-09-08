@@ -227,7 +227,7 @@ def original_nair_acc_config(
         controller_variant=controller_variant,
         process_noise_cov=((0.1 ** 2, 0.0), (0.0, 0.1 ** 2)),
         tv_prediction_cov=((0.01 ** 2, 0.0), (0.0, 0.01 ** 2)),
-        q_s=5.0, # TODO 튜닝 어떻게?
+        q_s=0.0, # PROBE 2026-09-08: q_s=0 (원래 5.0)
         q_v=1.0,
         r_a=10.0,
         r_jerk=10.0,
@@ -378,6 +378,15 @@ class MultimodalLeadPrediction:
     chance_confidence: Optional[np.ndarray] = None
     k_group_map: Optional[np.ndarray] = None
     k_group_names: Optional[List[str]] = None
+    # Every ego-lane vehicle active at a (mode, step), nearest first, as
+    # (s, v); shape (J, N+1, M, 2) with ``lead_candidate_mask`` (J, N+1, M)
+    # marking the valid entries.  ``means`` keeps only the nearest of them,
+    # which is the tightest collision bound at that step and all the
+    # constraint needs, but the reference speed has to see the others too: a
+    # slower vehicle further ahead is otherwise invisible until the near lead
+    # vacates the step, and the reference then steps instead of easing off.
+    lead_candidates: Optional[np.ndarray] = None
+    lead_candidate_mask: Optional[np.ndarray] = None
 
     def __post_init__(self):
         self.means = np.asarray(self.means, dtype=float)
@@ -451,6 +460,20 @@ class MultimodalLeadPrediction:
             finite = self.chance_confidence[np.isfinite(self.chance_confidence)]
             if np.any(finite < 0.0) or np.any(finite > 1.0):
                 raise ValueError("finite chance_confidence entries must lie in [0, 1]")
+        if self.lead_candidates is not None:
+            self.lead_candidates = np.asarray(self.lead_candidates, dtype=float)
+            if (self.lead_candidates.ndim != 4
+                    or self.lead_candidates.shape[0] != self.num_modes
+                    or self.lead_candidates.shape[1] != horizon + 1
+                    or self.lead_candidates.shape[3] != NO):
+                raise ValueError("lead_candidates must have shape (J, N+1, M, 2)")
+            if self.lead_candidate_mask is None:
+                raise ValueError("lead_candidates needs lead_candidate_mask")
+            self.lead_candidate_mask = np.asarray(self.lead_candidate_mask, dtype=bool)
+            if self.lead_candidate_mask.shape != self.lead_candidates.shape[:3]:
+                raise ValueError("lead_candidate_mask must have shape (J, N+1, M)")
+        elif self.lead_candidate_mask is not None:
+            raise ValueError("lead_candidate_mask needs lead_candidates")
         if self.k_group_map is not None:
             self.k_group_map = np.asarray(self.k_group_map, dtype=int)
             expected = (self.num_modes, horizon)
@@ -711,24 +734,62 @@ class OldACCReferenceAdapter:
                 if target_s < s_ref[mode, step]:
                     s_ref[mode, step] = target_s
 
-                # Compare against where the ego is predicted to be at this step,
-                # not where it is now. Measuring a step-k gap from the current
-                # position inflates it by everything the ego covers in between,
-                # which keeps the blend near 1 and leaves v_ref close to the
-                # desired speed even where the lead is predicted to be in lane.
-                ego_s_at_step = base_s_ref[step]
-                distance_to_lead = max(lead_s - ego_s_at_step, 1.0e-6)
-                usable_gap = max(target_s - ego_s_at_step, 0.0)
-                blend = np.clip(usable_gap / distance_to_lead, 0.0, 1.0)
-                lead_limited_speed = blend * v_ref[mode, step] + (1.0 - blend) * lead_v
-                v_ref[mode, step] = min(v_ref[mode, step], lead_limited_speed)
+                v_ref[mode, step] = min(
+                    v_ref[mode, step],
+                    self._lead_limited_speed(
+                        lead_s, lead_v, safe_gap, base_s_ref[step], base_v_ref[step]),
+                )
+
+                # The lead above is the nearest vehicle at this step, which is
+                # all the collision constraint needs.  The reference speed also
+                # has to answer to a slower vehicle further ahead:
+                # while a faster one is between, it is invisible, and the ego
+                # holds the near lead's speed until that lead vacates the step
+                # and then has to brake for a car it could have been easing
+                # toward for seconds.
+                for far_s, far_v in self._shadowed_leads(lead_prediction, mode, step):
+                    far_gap = self.config.vehicle_length + self.config.d0
+                    far_gap += self.config.time_headway * planned_v[step]
+                    v_ref[mode, step] = min(
+                        v_ref[mode, step],
+                        self._lead_limited_speed(
+                            far_s, far_v, far_gap, base_s_ref[step], base_v_ref[step]),
+                    )
 
         v_ref = np.clip(v_ref, self.config.v_min, self.config.v_max)
+
         a_ref = np.zeros((num_modes, horizon))
         for mode in range(num_modes):
             a_ref[mode] = np.diff(v_ref[mode]) / dt
         a_ref = np.clip(a_ref, self.config.a_min, self.config.a_max)
         return ACCReference(s_ref=s_ref, v_ref=v_ref, a_ref=a_ref, prev_u=a_ref.copy())
+
+    @staticmethod
+    def _shadowed_leads(lead_prediction, mode, step):
+        """The active vehicles at this (mode, step) behind the nearest one."""
+        candidates = getattr(lead_prediction, "lead_candidates", None)
+        if candidates is None:
+            return ()
+        mask = lead_prediction.lead_candidate_mask[mode, step]
+        # Index 0 is the nearest, already handled as the effective lead.
+        return [tuple(candidates[mode, step, idx])
+                for idx in range(1, mask.shape[0]) if mask[idx]]
+
+    @staticmethod
+    def _lead_limited_speed(lead_s, lead_v, safe_gap, ego_s_at_step, free_speed):
+        """Desired speed eased toward a lead's, by how much of the distance to
+        it is still usable.
+
+        The ego position is where it is *predicted* to be at this step, not
+        where it is now: measuring a step-k gap from the current position
+        inflates it by everything the ego covers in between, which keeps the
+        blend near 1 and leaves the reference at the desired speed even where
+        the lead is predicted to be in lane.
+        """
+        distance_to_lead = max(lead_s - ego_s_at_step, 1.0e-6)
+        usable_gap = max((lead_s - safe_gap) - ego_s_at_step, 0.0)
+        blend = float(np.clip(usable_gap / distance_to_lead, 0.0, 1.0))
+        return blend * free_speed + (1.0 - blend) * lead_v
 
     def remember_planned_speed(self, x_nominal):
         self.previous_planned_speed = np.asarray(x_nominal[0, :, 1], dtype=float)
