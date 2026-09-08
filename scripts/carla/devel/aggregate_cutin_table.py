@@ -84,7 +84,11 @@ cut-in 응답
            RESULT.md 표의 1.85~2.50 s 와 그만큼 어긋난다. Δt_ant 에는 보수적이다.
   t_trigger = TV policy_log.trigger_time_s (차선변경 트리거; 03 그룹은 None).
   t_onset = 창 안에서 accel_cmd <= -0.3 m/s^2 가 2스텝 연속인 첫 시각.
-  Δt_ant = t_cross - t_onset  (t_onset < t_cross 일 때만; 아니면 None → 표에 '-'.
+  (2026-09-08 부터 cut-in 의 Δt_ant 도 cut-out 과 같은 **예측 선제성**이다:
+   TV 의 모드 중 지평선 끝 3 스텝이 ego 차선 안인 것들의 확률합이 0.5 이상인
+   상태가 1.0 s 이상 이어지는 첫 시점 t_pred 부터 실제 진입 t_cross 까지.
+   아래 제어 개시 기준은 dt_ant_ctrl 열로 남는다.)
+  dt_ant_ctrl = t_cross - t_onset  (t_onset < t_cross 일 때만; 아니면 None.
            차가 이미 들어온 뒤에야 반응한 제어기는 선제성이 없다).
            ※ 이 스윕에서 감속 개시가 창 시작 0.3~0.6 s 뒤에 몰린다(예측기가 조향
            개시 2.3 s 전에 cut-in 을 검출하는데 그 시점이 메인 루프 시작 근처다).
@@ -264,17 +268,25 @@ RAW_OF_FILT = {"j_avg_cmd_filt": "j_avg_filt", "j_max_cmd_filt": "j_max_filt"}
 AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "j_avg", "j_avg_filt", "j_avg_cmd", "j_avg_cmd_ev", "j_avg_cmd_filt", "j_max",
                "j_max_filt", "j_max_cmd", "j_max_cmd_ev", "j_max_cmd_filt", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
-               "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "T_rec",
+               "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "dt_ant_ctrl", "T_rec",
                "v_avg", "v_min", "passed", "t_pass")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
     "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
-    "settled_before_trigger", "dt_ant_ctrl", "t_pred_minus_trigger",
+    "settled_before_trigger", "t_pred_minus_trigger",
     "gap_excess_max", "gap_excess_avg")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
                   "04_no_cutin_decel_onset": "No Cut-in \\\\ (decel onset 22/28/34)"}
+
+
+def _predicts_lane_entry(mask, sustained_steps=CUTOUT_PRED_SUSTAINED_STEPS):
+    """이 예측 궤적이 지평선 끝에서 ego 차선 **안**에 있는가 (cut-in 쪽 거울상)."""
+    mask = np.asarray(mask, dtype=bool).ravel()
+    if mask.size < sustained_steps:
+        return False
+    return bool(mask[-int(sustained_steps):].all())
 
 
 def _predicts_lane_exit(mask, sustained_steps=CUTOUT_PRED_SUSTAINED_STEPS):
@@ -294,8 +306,8 @@ def _predicts_lane_exit(mask, sustained_steps=CUTOUT_PRED_SUSTAINED_STEPS):
     return not mask[-int(sustained_steps):].any()
 
 
-def _cutout_call_probability(target):
-    """이 틱에 예측기가 이 차량에 얹은 '차선을 벗어난다' 확률.
+def _call_probability(target, predicate):
+    """이 틱에 예측기가 이 차량에 얹은 '차선을 벗어난다/들어온다' 확률.
 
     모드별 차선 점유(mode_lane_membership)와 모드 확률(raw_mode_prob)을 키로
     맞춰 곱한 합. LSTM 은 점유 키가 'LK', 확률 키가 'lstm' 이라 키가 어긋나므로
@@ -311,19 +323,19 @@ def _cutout_call_probability(target):
         pairs = list(zip(list(probs.values()), list(membership.values())))
     else:
         return None
-    return float(sum(p for p, mask in pairs if _predicts_lane_exit(mask)))
+    return float(sum(p for p, mask in pairs if predicate(mask)))
 
 
-def _lv_cutout_call(steps, s_lv):
-    """틱마다 LV 에 대한 cut-out 예측 확률. 예측기가 없으면(SCC) 전부 NaN.
+def _target_call(steps, s_target, predicate):
+    """틱마다 그 차량에 대한 예측 호출 확률. 예측기가 없으면(SCC) 전부 NaN.
 
-    summary 에는 actor 와 CARLA id 의 대응이 없으므로, 그 틱의 LV 실제 s 에 가장
-    가까운 processed_target 을 LV 로 본다.
+    summary 에는 actor 와 CARLA id 의 대응이 없으므로, 그 틱의 실제 s 에 가장
+    가까운 processed_target 을 그 차량으로 본다.
     """
     out = np.full(len(steps), np.nan)
     for i, step in enumerate(steps):
         targets = (step.get("stdan_debug") or {}).get("processed_targets")
-        if not targets or not np.isfinite(s_lv[i]):
+        if not targets or not np.isfinite(s_target[i]):
             continue
         best, best_err = None, np.inf
         for target in targets:
@@ -331,15 +343,28 @@ def _lv_cutout_call(steps, s_lv):
             if not frenet:
                 continue
             s0 = float(np.asarray(next(iter(frenet.values())), dtype=float)[0][0])
-            err = abs(s0 - s_lv[i])
+            err = abs(s0 - s_target[i])
             if err < best_err:
                 best, best_err = target, err
         if best is None or best_err > CUTOUT_PRED_MATCH_M:
             continue
-        call = _cutout_call_probability(best)
+        call = _call_probability(best, predicate)
         if call is not None:
             out[i] = call
     return out
+
+
+def _prediction_onset(t, call, t_from, dt):
+    """확률합이 임계를 1.0 s 이상 연속으로 넘는 첫 시각 (절대 시각). 없으면 None."""
+    called = np.isfinite(call) & (call >= CUTOUT_PRED_PROB)
+    if t_from is None or not called.any():
+        return None
+    idx = np.nonzero(t >= t_from)[0]
+    if not idx.size:
+        return None
+    hold = max(1, int(round(CUTOUT_PRED_HOLD_S / dt)))
+    i_pred = _first_run_start(called[idx[0]:], hold)
+    return None if i_pred is None else float(t[idx[0] + i_pred])
 
 
 def is_cutout_group(group):
@@ -532,19 +557,11 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
     row["cutout_call_max"] = None
     if lv_key in tracks and len(steps) == t.size:
         s_lv, _x, _lane = tracks[lv_key]
-        call = _lv_cutout_call(steps, s_lv)
-        called = np.isfinite(call) & (call >= CUTOUT_PRED_PROB)
+        call = _target_call(steps, s_lv, _predicts_lane_exit)
         finite = call[np.isfinite(call)]
         row["cutout_call_max"] = round(float(np.max(finite)), 4) if finite.size else None
-        pred_abs = None
-        if trig_abs is not None and called.any():
-            win = t >= trig_abs - CUTOUT_ONSET_PRE_S
-            idx = np.nonzero(win)[0]
-            if idx.size:
-                hold = max(1, int(round(CUTOUT_PRED_HOLD_S / dt)))
-                i_pred = _first_run_start(called[idx[0]:], hold)
-                if i_pred is not None:
-                    pred_abs = float(t[idx[0] + i_pred])
+        pred_abs = _prediction_onset(
+            t, call, None if trig_abs is None else trig_abs - CUTOUT_ONSET_PRE_S, dt)
         row["t_pred"] = None if pred_abs is None else round(pred_abs - t0, 3)
         if pred_abs is not None and row["t_trigger"] is not None:
             row["t_pred_minus_trigger"] = round(row["t_pred"] - row["t_trigger"], 3)
@@ -794,11 +811,26 @@ def collect_run(policy, group, run_dir):
                     for s in steps], dtype=float)
     i_on = _first_run_start(cmd <= ONSET_ACCEL, ONSET_HOLD_STEPS)
     t_onset = None if i_on is None else float(t[i_on])
-    # t_onset 이 0 에 가까우면 창 시작 전에 이미 밟고 있었을 수 있다 = Δt_ant 좌측 절단
+    # t_onset 이 0 에 가까우면 창 시작 전에 이미 밟고 있었을 수 있다 = 좌측 절단
     row["t_onset"] = None if t_onset is None else round(t_onset - t0, 3)
-    row["dt_ant"] = (round(t_cross - t_onset, 3)
-                     if t_cross is not None and t_onset is not None and t_onset < t_cross
-                     else None)
+    row["dt_ant_ctrl"] = (round(t_cross - t_onset, 3)
+                          if t_cross is not None and t_onset is not None and t_onset < t_cross
+                          else None)
+
+    # Δt_ant: cut-out 과 같은 예측 선제성. TV 의 모드 중 지평선 끝이 ego 차선
+    # **안**인 것들의 확률합이 임계를 1.0 s 이상 넘는 첫 시점부터 실제 진입까지.
+    row["dt_ant"] = None
+    row["t_pred"] = None
+    row["cutin_call_max"] = None
+    if tv_key in tracks and len(steps) == t.size:
+        s_tv, _x, _lane = tracks[tv_key]
+        call = _target_call(steps, s_tv, _predicts_lane_entry)
+        finite = call[np.isfinite(call)]
+        row["cutin_call_max"] = round(float(np.max(finite)), 4) if finite.size else None
+        pred_abs = _prediction_onset(t, call, float(t[0]), dt)
+        row["t_pred"] = None if pred_abs is None else round(pred_abs - t0, 3)
+        if pred_abs is not None and t_cross is not None:
+            row["dt_ant"] = max(0.0, round(t_cross - pred_abs, 3))
 
     row["T_rec"] = None
     row["T_rec_censored"] = None

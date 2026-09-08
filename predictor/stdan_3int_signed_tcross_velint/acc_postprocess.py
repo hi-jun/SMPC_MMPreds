@@ -414,10 +414,17 @@ def chance_cutout_clearance(
     -- the same ``beta_j = min(p, beta_ref)`` factor a cut-in mode gets, without
     the sigma term -- lets the ego lean into the cut-out, and below
     ``vanish_threshold`` the hypothesis vanishes like an unlikely cut-in does.
-    The ``cutout`` mode stays deterministic -- no confidence, no probability
-    factor, and its standoff is never relaxed -- so the ego may only start
-    accelerating into the hypothesis that the vehicle stays, never into the
-    vehicle itself.  Adjacent-lane vehicles are untouched.
+    The ``cutout`` mode is scaled by the same factor with its own probability
+    (2026-09-08).  It is the probabilistic replacement for the geometric taper
+    that used to shrink it with the predicted lateral overlap: while the
+    vehicle is still in the lane the ego may lean into a departure it is
+    confident about, and it relaxes with the belief rather than with a
+    hand-set lateral band.  Both hypotheses of an ego-lane vehicle are
+    therefore scaled by how much they are believed, and their two standoffs
+    are the two branches the ego plans against.  ``vanish_threshold`` still
+    only drops a negligible ``lk``: a cut-out hypothesis that is unlikely
+    keeps its (already small) scale rather than disappearing, so the vehicle
+    is never left unconstrained.  Adjacent-lane vehicles are untouched.
     """
     reference_beta = float(reference_beta)
     vanish_threshold = float(vanish_threshold)
@@ -429,7 +436,7 @@ def chance_cutout_clearance(
     reference_quantile = confidence_quantile(reference_beta) if reference_beta > 0.0 else None
     result = {}
     for mode in mode_predictions:
-        if mode.mode_name != "lk":
+        if mode.mode_name not in ("lk", "cutout"):
             continue
         beta = float("nan")
         if reference_quantile is not None:
@@ -438,8 +445,11 @@ def chance_cutout_clearance(
             # following (p_lk >= beta_ref) against tonight's calibrated behaviour,
             # and an in-lane lead is already covered deterministically by the
             # cutout mode for the steps it is still predicted present.
-            mode.clearance_scale = confidence_quantile(beta) / reference_quantile
-        if mode.probability < vanish_threshold:
+            mode.clearance_scale = np.minimum(
+                np.asarray(mode.clearance_scale, dtype=float),
+                confidence_quantile(beta) / reference_quantile,
+            )
+        if mode.mode_name == "lk" and mode.probability < vanish_threshold:
             mode.active_mask[:] = False
         result[mode.mode_name] = {"confidence": beta, "scale": float(np.asarray(mode.clearance_scale).ravel()[0])}
     return result

@@ -68,8 +68,12 @@ def modes_by_name(processed):
 
 
 def assert_cutout_unscaled_in_lane(cutout):
-    """The cut-out mode gets no probability factor and no geometric taper:
-    it holds its full standoff wherever it is active."""
+    """The cut-out mode holds its full standoff wherever it is active.
+
+    True whenever the chance constraint is off, and whenever the cut-out is at
+    least as probable as ``reference_beta`` -- the factor is capped at 1.0, so
+    a confident departure keeps the standoff it already had.
+    """
     scale = np.asarray(cutout.clearance_scale, dtype=float)
     if scale.ndim:
         scale = scale[np.asarray(cutout.active_mask, dtype=bool)]
@@ -86,8 +90,10 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
     In 1-D the lane-keeping hypothesis of a vacating lead is a full lead at
     every step, so it would block the ego from ever accelerating into the
     cut-out; ``chance_cutout_clearance`` scales it by its probability and
-    vanishes it below the threshold.  The ``cutout`` mode stays deterministic:
-    no probability factor, only the geometric overlap taper on its own steps.
+    vanishes it below the threshold.  Since 2026-09-08 the ``cutout`` mode is
+    scaled by its own probability too -- the probabilistic replacement for the
+    geometric overlap taper -- but it never vanishes, so the vehicle itself is
+    always constrained by something.
     """
 
     HORIZON = 6
@@ -108,6 +114,21 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         self.assertTrue(np.isnan(cutout.chance_confidence))
         assert_cutout_unscaled_in_lane(cutout)
         np.testing.assert_array_equal(cutout.active_mask, [True, True, True, True, False, False, False])
+
+    def test_cutout_mode_is_scaled_by_its_own_probability(self):
+        """An uncertain departure keeps more of its standoff than a confident one."""
+        by_name = modes_by_name(self._lead(
+            0.7, 0.3, cutin_chance_ref=REF, cutin_probability_threshold=VANISH))
+        cutout = by_name["cutout"]
+        self.assertAlmostEqual(
+            cutout.clearance_scale,
+            confidence_quantile(0.3) / confidence_quantile(REF), places=9)
+        self.assertLess(cutout.clearance_scale, 1.0)
+        self.assertTrue(np.isnan(cutout.chance_confidence), "no sigma term, factor only")
+        self.assertTrue(cutout.active_mask[:4].any(),
+                        "an unlikely cut-out is scaled, never vanished")
+        # lk is the more probable hypothesis here and is capped at its full standoff.
+        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
 
     def test_unlikely_lk_mode_vanishes(self):
         by_name = modes_by_name(self._lead(
