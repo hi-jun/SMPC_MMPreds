@@ -169,7 +169,7 @@ cut-out 시각
   ※ 왜 제어 시점이 아닌가: subLV 가 있는 장면에서 빨리 감속하는 것이 무조건
     좋은 것이 아니다. 벌어진 간격을 다시 채워 앞차 간격을 유지하면서 subLV 까지
     절충하는 것이 목적이므로, 선제성은 예측기가 얼마나 일찍 알았는지로 재고
-    그 결과의 좋고 나쁨은 gap_excess/저크/최소간격이 따로 잰다.
+    그 결과의 좋고 나쁨은 gap_err/저크/최소간격이 따로 잰다.
 
 dt_ant_ctrl (옛 Δt_ant. 제어기 반응 개시 선제성, 진단용으로만 남긴다)
   t_onset = [t_trigger − 3 s, t_out + 5 s] 창 안에서, 부호 맞는 가속이 **1.0 s 이상
@@ -191,16 +191,22 @@ dt_ant_ctrl (옛 Δt_ant. 제어기 반응 개시 선제성, 진단용으로만 
     (cut-in 쪽 v_avg 는 창 전체 평균이다. 같은 이름이지만 구간이 다르다.)
   v_avg_window = 창 전체 평균, v_avg_post = [t_out, 창끝] 평균.
 
-LV 와의 간격이 필요 이상으로 벌어지는가
-  gap_excess = max(0, (LV 범퍼간격 − d_safe) / d_safe) * 100 [%]. delta 의
-    거울상이다 — delta 가 안전거리보다 얼마나 **모자라는지**를, gap_excess 는
-    얼마나 **남는지**를 잰다.
+LV 와의 간격이 얼마나 어긋나는가
+  gap_err = |LV 범퍼간격 − d_safe| / d_safe * 100 [%]. **부족과 초과를 모두**
+    벌한다 — 선제 감속이 과해 뒤처져도, 앞차에 바싹 붙어도 커진다. delta 는
+    부족한 쪽만 재므로 짝으로 읽는다.
   구간은 [t_trigger − 1 s, t_out] 중 LV 가 아직 ego 차선에서 앞서는 스텝.
     LV 가 빠진 뒤의 subLV 간격은 시나리오 기하(앞차를 89 m 앞에 둔다)가 지배해
     제어 품질을 재지 못하므로 제외한다.
-  gap_excess_max / gap_excess_avg = 그 구간의 최대/평균. subLV 를 위한 선제
-    감속이 과해 앞차를 놓치고 뒤처지면 커지고, 벌어진 간격을 제때 다시 채우며
-    절충하면 작아진다. table_cutout.tex 에는 max 를 싣는다.
+  gap_err_max / gap_err_avg = 그 구간의 최대/평균. table_cutout.tex 에는 max.
+
+이벤트 구간 표 (table_event_rows.tex / 마크다운 "이벤트 구간:")
+  창은 저크 지표와 같은 [t_trigger − 1 s, t_trigger + 9 s] (기동 + 회복).
+  트리거가 없는 그룹은 행이 나오지 않는다.
+  a_avg_ev  = 그 창의 |accel_cmd| 평균,  a_min_ev = 최솟값(최대 제동).
+  j_avg_cmd_ev_filt / j_max_cmd_ev_filt = 그 창의 0.2 s 대역 명령 저크
+    평균/최대. 표의 j_*_cmd_filt 은 같은 식이되 **런 전체** 평균이라 기동이
+    끝난 뒤 정상 추종 구간이 지배한다. 기동만 보려면 이 열을 쓴다.
 
 subLV (kind cutout_sublv 만)
   min_bumper_gap_sublv = subLV 가 ego 차선에 있고 앞설 때의 최소 범퍼 간격.
@@ -262,19 +268,23 @@ TEX_METRICS = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "delta_max", "delta_
                "dt_ant", "T_rec")
 TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
 TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "dt_ant",
-                      "gap_excess_max", "v_avg")
+                      "gap_err_max", "v_avg")
+# 이벤트 구간 [t_trigger-1 s, t_trigger+9 s] 만 자른 표
+TEX_METRICS_EVENT = ("a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
+                     "j_avg_cmd_ev", "dt_ant")
 # 표 값(명령 저크) 옆 괄호에 함께 보일 실측(0.2 s 대역) 값
 RAW_OF_FILT = {"j_avg_cmd_filt": "j_avg_filt", "j_max_cmd_filt": "j_max_filt"}
 AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "j_avg", "j_avg_filt", "j_avg_cmd", "j_avg_cmd_ev", "j_avg_cmd_filt", "j_max",
                "j_max_filt", "j_max_cmd", "j_max_cmd_ev", "j_max_cmd_filt", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
                "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "dt_ant_ctrl", "T_rec",
-               "v_avg", "v_min", "passed", "t_pass")
+               "v_avg", "v_min", "passed", "t_pass",
+               "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
     "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
     "settled_before_trigger", "t_pred_minus_trigger",
-    "gap_excess_max", "gap_excess_avg")
+    "gap_err_max", "gap_err_avg")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
@@ -470,7 +480,7 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
                 "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
                 "trigger_distance_at_start", "cutout_started", "cutout_completed",
                 "lv_inlane_at_trigger", "t_pred", "t_pred_minus_trigger",
-                "dt_ant_ctrl", "dt_ant_ctrl_signed", "gap_excess_max", "gap_excess_avg"):
+                "dt_ant_ctrl", "dt_ant_ctrl_signed", "gap_err_max", "gap_err_avg"):
         row[key] = None
     row["sublv_inlane_steps"] = 0
     row["lv_sublv_contact"] = False
@@ -569,9 +579,10 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
             row["dt_ant_signed"] = round(out_abs - pred_abs, 3)
             row["dt_ant"] = max(0.0, row["dt_ant_signed"])
 
-    # --- LV 와의 간격이 필요 이상으로 벌어지는가 ---
-    # LV 가 아직 ego 차선에서 앞서는 동안만 본다. LV 가 빠진 뒤의 subLV 간격은
-    # 시나리오 기하(앞차를 89 m 앞에 둔다)가 지배해 제어 품질을 재지 못한다.
+    # --- LV 와의 간격이 얼마나 어긋나는가 (부족·초과 모두) ---
+    # |범퍼간격 - d_safe| / d_safe. 뒤처져도 붙어도 벌한다. LV 가 아직 ego
+    # 차선에서 앞서는 동안만 본다: LV 가 빠진 뒤의 subLV 간격은 시나리오
+    # 기하(앞차를 89 m 앞에 둔다)가 지배해 제어 품질을 재지 못한다.
     if lv_key in tracks and trig_abs is not None:
         s_lv, x_lv, lane_lv = tracks[lv_key]
         lead = ((lane_lv == ego_lane_id) & (np.abs(x_lv - ego_x) <= LANE_HALF_WIDTH)
@@ -579,10 +590,9 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
         if out_abs is not None:
             lead &= t <= out_abs
         if lead.any():
-            excess = np.maximum(0.0, (s_lv[lead] - ego_s[lead] - VEH_LEN - d_safe[lead])
-                                / d_safe[lead]) * 100.0
-            row["gap_excess_max"] = round(float(np.max(excess)), 4)
-            row["gap_excess_avg"] = round(float(np.mean(excess)), 4)
+            err = np.abs(s_lv[lead] - ego_s[lead] - VEH_LEN - d_safe[lead]) / d_safe[lead] * 100.0
+            row["gap_err_max"] = round(float(np.max(err)), 4)
+            row["gap_err_avg"] = round(float(np.mean(err)), 4)
 
     # --- 속도 ---
     if trig_abs is not None:
@@ -858,6 +868,15 @@ def collect_run(policy, group, run_dir):
     # [t_trigger-1 s, t_trigger+9 s] 로 잘라 기동 구간만 본다(트리거 없는 03/04 는 전 구간).
     row["j_avg_cmd_ev"] = row["j_avg_cmd"]
     row["j_max_cmd_ev"] = row["j_max_cmd"]
+    # 이벤트 구간 + 대역 제한 (표 지표 j_*_cmd_filt 과 같은 식, 창만 자른 것).
+    # j_*_cmd_ev 는 대역 제한 없는 원시 명령 저크이고, j_*_cmd_filt 은 대역
+    # 제한이지만 런 전체 평균이라 정상 추종 구간이 지배한다. 기동만 보려면
+    # 둘을 겹친 이 열을 쓴다. cmd_jf[k] 는 [k,k+w) 평균과 [k+w,k+2w) 평균의
+    # 차이라 t[k+w] 부근이 중심이다.
+    row["a_avg_ev"] = row["a_avg_cmd"]
+    row["a_min_ev"] = row["a_min_cmd"]
+    row["j_avg_cmd_ev_filt"] = row["j_avg_cmd_filt"]
+    row["j_max_cmd_ev_filt"] = row["j_max_cmd_filt"]
     if row.get("t_trigger") is not None and len(steps) == t.size:
         lo = t0 + row["t_trigger"] + EVENT_PRE_S
         hi = t0 + row["t_trigger"] + EVENT_POST_S
@@ -868,6 +887,16 @@ def collect_run(policy, group, run_dir):
         if cj.size:
             row["j_avg_cmd_ev"] = float(np.mean(cj))
             row["j_max_cmd_ev"] = float(np.max(cj))
+        ev_cmd = (t >= lo) & (t <= hi)
+        if ev_cmd.any():
+            row["a_avg_ev"] = float(np.mean(np.abs(cmd_full[ev_cmd])))
+            row["a_min_ev"] = float(np.nanmin(cmd_full[ev_cmd]))
+        if cmd_jf.size:
+            t_j = t[width:width + cmd_jf.size]
+            ev_j = (t_j >= lo) & (t_j <= hi)
+            if ev_j.any():
+                row["j_avg_cmd_ev_filt"] = float(np.mean(cmd_jf[ev_j]))
+                row["j_max_cmd_ev_filt"] = float(np.max(cmd_jf[ev_j]))
 
     for key in ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                 "j_avg", "j_avg_filt", "j_avg_cmd", "j_avg_cmd_ev", "j_avg_cmd_filt", "j_max",
@@ -1005,9 +1034,49 @@ def write_cutout_tex(path, agg):
     open(str(path), "w").write("\n".join(lines) + "\n")
 
 
+def write_event_tex(path, agg):
+    lines = ["% aggregate_cutin_table.py 자동 생성 — 이벤트 구간만 자른 표",
+             "% 창 = [t_trigger - 1 s, t_trigger + 9 s] (기동 + 회복)",
+             "% a_avg_ev, a_min_ev, j_avg, j_max (0.2 s 대역 명령 저크), j_avg 원시, dt_ant",
+             "% 표의 j_*_cmd_filt 은 같은 식이되 런 전체 평균이라 정상 추종 구간이 지배한다."]
+    groups = sorted({k[0] for k in agg if agg[k]["a_avg_ev"][0] is not None})
+    for gi, group in enumerate(groups):
+        cells = [k for k in agg if k[0] == group and agg[k]["a_avg_ev"][0] is not None]
+        lines.append("")
+        lines.append("\\multirow{%d}{*}{\\shortstack[l]{%s}} %% %s"
+                     % (len(cells), cutout_label(group) if is_cutout_group(group)
+                        else SCENARIO_LABEL.get(group, group), group))
+        for key in cells:
+            stats = agg[key]
+            vals = [fmt(stats[m][0]) for m in TEX_METRICS_EVENT]
+            lines.append(" & %s & %s \\\\ %% n=%d"
+                         % (stats["_label"], " & ".join(vals), stats["_n_runs"]))
+        lines.append("\\midrule" if gi < len(groups) - 1 else "\\bottomrule")
+    open(str(path), "w").write("\n".join(lines) + "\n")
+
+
+def markdown_table_event(agg):
+    """이벤트 구간 [t_trigger-1 s, t_trigger+9 s] 만 자른 지표."""
+    head = ("| 시나리오 | 제어기 | n | a_avg | a_min | j_avg 대역 | j_max 대역 "
+            "| j_avg 원시 | Δt_ant |")
+    lines = [head, "|" + "---|" * 9]
+    for (group, _policy), stats in agg.items():
+        if stats["a_avg_ev"][0] is None:
+            continue
+        cells = []
+        for metric in TEX_METRICS_EVENT:
+            mean, std, n = stats[metric]
+            cells.append("-" if mean is None
+                         else "%.2f ± %.2f%s" % (mean, std, "" if n == stats["_n_runs"]
+                                                 else " (n=%d)" % n))
+        lines.append("| %s | %s | %d | %s |"
+                     % (group, stats["_label"], stats["_n_runs"], " | ".join(cells)))
+    return "\n".join(lines)
+
+
 def markdown_table_cutout(agg):
     head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 필터(원시) | j_max 필터(원시) "
-            "| Δt_ant | gap초과_max | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
+            "| Δt_ant | gap오차_max | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
             "| subLV 최소간격 | ego충돌 | LV-subLV접촉 |")
     lines = [head, "|" + "---|" * 16]
     for (group, _policy), stats in agg.items():
@@ -1190,6 +1259,9 @@ def main():
     if has_cutout:
         write_cutout_tex(root / "table_cutout_rows.tex",
                          aggregate(rows, group_key=pooled_cutout_group))
+    has_event = any(r.get("t_trigger") is not None for r in rows)
+    if has_event:
+        write_event_tex(root / "table_event_rows.tex", agg)
     note = "aggregate_cutin_table.py %s%s%s" % (
         root, " --ego-speeds " + args.ego_speeds if speeds else "",
         " --groups " + args.groups if groups else "")
@@ -1202,6 +1274,9 @@ def main():
     if has_cutout:
         print("\ncut-out:")
         print(markdown_table_cutout(agg))
+    if has_event:
+        print("\n이벤트 구간 [t_trigger-1 s, t_trigger+9 s]:")
+        print(markdown_table_event(agg))
     bad = [r for r in rows if not r["valid"]]
     if bad:
         print("\n제외 %d런:" % len(bad))
