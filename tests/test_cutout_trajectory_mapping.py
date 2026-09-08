@@ -109,46 +109,62 @@ class TestLeavesEgoLane(unittest.TestCase):
         self.assertTrue(leaves_ego_lane([T] * 15 + [F], sustained_steps=1), "the old one-step rule")
 
 
-class TestEgoLaneModesFollowTheLabel(unittest.TestCase):
-    """An ego-lane vehicle's raw LLC and RLC merge into ``cutout`` whatever their trajectories do.
+class TestEgoLaneModesFollowTheTrajectory(unittest.TestCase):
+    """An ego-lane vehicle's raw LLC/RLC is ``cutout`` only when its trajectory leaves.
 
-    Where a predicted trajectory actually is, in the lane or not, is carried
-    by the mode's occupancy mask, which is what the constraints use; the
-    label only groups the probability mass.  Splitting the ego-lane modes by
-    trajectory instead (caf17f2) changed no command in an offline replay and
-    is reverted.
+    The label alone puts phantom cut-out mass on every lane keeper: 0.07
+    median and 0.33 peak on the straight-driving second lead of the
+    2026-09-08 runs, and 0.18 on the lead itself before its lane change
+    begins.  Nothing downstream can tell that mass from a real departure, so
+    a probabilistic standoff relaxation reacts to a car that is going
+    nowhere.  Splitting by trajectory removes it where it is created and
+    leaves the real departure untouched: on those runs the second lead's
+    cut-out mass falls to zero at all 500 ticks while the 79 ticks of the
+    departure keep theirs, because the trajectory starts leaving on the same
+    tick the intention flips.  (Tried once before as caf17f2, reverted then
+    as a no-op; it stopped being one when the standoff started reading the
+    probability.)
     """
 
-    def test_llc_and_rlc_merge_into_cutout_with_their_probabilities_summed(self):
+    def test_a_raw_mode_that_leaves_the_lane_carries_its_own_mass_into_cutout(self):
         stays = profile((IN, HORIZON))
         leaves = profile((IN, 10), (OUT, HORIZON - 10))
-        for llc_d, cutout_mask in ((stays, [True] * (HORIZON + 1)), (leaves, [True] * 11 + [False] * 5)):
-            processed = process(ego_lane_raw([0.3, 0.6, 0.1], [stays, llc_d, stays]), current_d=IN)
-            by_name = modes_by_name(processed)
-            self.assertEqual(sorted(by_name), ["cutout", "lk"])
-            self.assertEqual(list(by_name["lk"].raw_mode_indices), [0])
-            self.assertAlmostEqual(by_name["lk"].probability, 0.3)
-            self.assertEqual(list(by_name["cutout"].raw_mode_indices), [1, 2])
-            self.assertAlmostEqual(by_name["cutout"].probability, 0.7)
-            self.assertAlmostEqual(processed.acc_mode_prob["cutout"], 0.7)
-            self.assertAlmostEqual(processed.acc_mode_prob["lk"], 0.3)
-            # The trajectory shows in the occupancy mask (of the most probable raw mode), not in the label.
-            np.testing.assert_array_equal(by_name["cutout"].active_mask, cutout_mask)
-            self.assertTrue(by_name["lk"].active_mask.all())
+        processed = process(ego_lane_raw([0.3, 0.6, 0.1], [stays, leaves, stays]), current_d=IN)
+        by_name = modes_by_name(processed)
+        self.assertEqual(sorted(by_name), ["cutout", "lk"])
+        self.assertEqual(list(by_name["cutout"].raw_mode_indices), [1], "LLC leaves, RLC does not")
+        self.assertAlmostEqual(by_name["cutout"].probability, 0.6)
+        self.assertEqual(list(by_name["lk"].raw_mode_indices), [0, 2])
+        self.assertAlmostEqual(by_name["lk"].probability, 0.4)
+        self.assertAlmostEqual(processed.acc_mode_prob["cutout"], 0.6)
+        self.assertAlmostEqual(processed.acc_mode_prob["lk"], 0.4)
+        np.testing.assert_array_equal(by_name["cutout"].active_mask, [True] * 11 + [False] * 5)
+        self.assertTrue(by_name["lk"].active_mask.all())
 
-    def test_a_certain_rlc_is_a_certain_cutout_even_with_every_step_in_lane(self):
+    def test_a_lane_keeper_has_no_cutout_mode_at_all(self):
+        stays = profile((IN, HORIZON))
+        processed = process(ego_lane_raw([0.3, 0.6, 0.1], [stays, stays, stays]), current_d=IN)
+        by_name = modes_by_name(processed)
+        self.assertEqual(sorted(by_name), ["lk"], "no trajectory leaves: nothing to cut out")
+        self.assertEqual(list(by_name["lk"].raw_mode_indices), [0, 1, 2])
+        self.assertAlmostEqual(by_name["lk"].probability, 1.0)
+        self.assertAlmostEqual(processed.acc_mode_prob["cutout"], 0.0)
+        self.assertTrue(by_name["lk"].active_mask.all())
+
+    def test_a_certain_rlc_that_never_leaves_the_lane_is_lane_keeping(self):
         # The completed cut-in: |d| 1.45 now, RLC +1.40 -> -0.49 over the
-        # horizon, 16/16 in lane by the CARLA waypoint test.
+        # horizon, 16/16 in lane by the CARLA waypoint test.  The label turned
+        # it into a certain cut-out the moment the relation flipped to
+        # ego-lane, at a vehicle squarely in the ego path.
         rlc_d = np.linspace(1.40, -0.49, HORIZON)
         processed = process(
             ego_lane_raw([0.0, 0.0, 1.0], [rlc_d, rlc_d, rlc_d]), current_d=1.45,
             cutin_probability_threshold=0.1, **waypoint_kwargs(np.ones((3, HORIZON + 1), dtype=bool)))
         by_name = modes_by_name(processed)
-        self.assertEqual(sorted(by_name), ["cutout"], "lk has no mass")
-        self.assertEqual(list(by_name["cutout"].raw_mode_indices), [1, 2])
-        self.assertAlmostEqual(by_name["cutout"].probability, 1.0)
-        self.assertAlmostEqual(processed.acc_mode_prob["cutout"], 1.0)
-        self.assertTrue(by_name["cutout"].active_mask.all())
+        self.assertEqual(sorted(by_name), ["lk"])
+        self.assertAlmostEqual(by_name["lk"].probability, 1.0)
+        self.assertAlmostEqual(processed.acc_mode_prob["cutout"], 0.0)
+        self.assertTrue(by_name["lk"].active_mask.all())
 
 
 class TestCutOutModeKeepsItsFullStandoff(unittest.TestCase):
@@ -170,7 +186,7 @@ class TestCutOutModeKeepsItsFullStandoff(unittest.TestCase):
         memberships[2, -3:] = False
         processed = process(raw, current_d=IN, **waypoint_kwargs(memberships))
         cutout = modes_by_name(processed)["cutout"]
-        self.assertEqual(list(cutout.raw_mode_indices), [1, 2])
+        self.assertEqual(list(cutout.raw_mode_indices), [2], "RLC is the trajectory that leaves")
         np.testing.assert_array_equal(
             np.broadcast_to(cutout.clearance_scale, HORIZON + 1), 1.0)
         self.assertNotIn("lateral_overlap_scales", processed.branch_info)
@@ -183,15 +199,17 @@ class TestCutOutModeKeepsItsFullStandoff(unittest.TestCase):
     def test_a_completed_cutin_also_keeps_it(self):
         # Logged case: |d| 1.45 now, RLC +1.40 -> -0.49 over the horizon, 16/16
         # in lane by the CARLA waypoint test; the taper alone would have left
-        # it 35 % of its standoff at the moment it is most in the way.
+        # it 35 % of its standoff at the moment it is most in the way.  It is
+        # lane keeping under the trajectory split, and a lane keeper at p = 1
+        # is not relaxed either.
         rlc_d = np.linspace(1.40, -0.49, HORIZON)
         processed = process(
             ego_lane_raw([0.0, 0.0, 1.0], [rlc_d, rlc_d, rlc_d]), current_d=1.45,
             cutin_probability_threshold=0.1, **waypoint_kwargs(np.ones((3, HORIZON + 1), dtype=bool)))
-        cutout = modes_by_name(processed)["cutout"]
-        self.assertAlmostEqual(cutout.probability, 1.0)
-        self.assertTrue(cutout.active_mask.all())
-        np.testing.assert_array_equal(np.broadcast_to(cutout.clearance_scale, HORIZON + 1), 1.0)
+        lk = modes_by_name(processed)["lk"]
+        self.assertAlmostEqual(lk.probability, 1.0)
+        self.assertTrue(lk.active_mask.all())
+        np.testing.assert_array_equal(np.broadcast_to(lk.clearance_scale, HORIZON + 1), 1.0)
 
 
 class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
@@ -199,7 +217,7 @@ class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
 
     An earlier relaxation with a sigma term moved ordinary following by
     |delta a| = 0.49 m/s^2; the phantom ``cutout`` mass (~0.2) the label
-    mapping puts on a lane keeper may not.
+    mapping used to put on a lane keeper may not, and no longer exists to.
     """
 
     @staticmethod
@@ -212,17 +230,17 @@ class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
         wobble = 0.15 + 0.1 * np.sin(np.linspace(0.0, np.pi, HORIZON))   # |d| < 0.3
         return ego_lane_raw([0.79, 0.11, 0.10], [wobble, -wobble, wobble])
 
-    def test_both_label_mapped_modes_at_full_standoff(self):
+    def test_a_lane_keeper_carries_no_cutout_mass(self):
         processed = process(self._straight_lead(), current_d=0.2, cutin_probability_threshold=0.1)
         by_name = modes_by_name(processed)
-        self.assertEqual(sorted(by_name), ["cutout", "lk"])
-        self.assertAlmostEqual(processed.acc_mode_prob["cutout"], 0.21)
-        for name, mode in by_name.items():
-            self.assertTrue(mode.active_mask.all(), name)
-            self.assertEqual(mode.clearance_scale, 1.0, name)
+        self.assertEqual(sorted(by_name), ["lk"], "the 0.21 of phantom cut-out mass is gone")
+        self.assertAlmostEqual(processed.acc_mode_prob["cutout"], 0.0)
+        self.assertAlmostEqual(by_name["lk"].probability, 1.0)
+        self.assertTrue(by_name["lk"].active_mask.all())
+        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
 
     def test_command_matches_a_single_lane_keeping_mode(self):
-        """The phantom cut-out (same trajectory) moves the command by < 0.02: the mask decides."""
+        """The merged lane keeper commands what a single lane-keeping mode does."""
         processed = process(self._straight_lead(), current_d=0.2, cutin_probability_threshold=0.1)
         lk = modes_by_name(processed)["lk"]
         single_lk = ACCProcessedPrediction(
@@ -255,7 +273,8 @@ class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
         by_name = modes_by_name(process(
             raw, current_d=0.2, cutin_probability_threshold=0.1, **waypoint_kwargs(memberships)))
         cutout = by_name["cutout"]
-        self.assertAlmostEqual(cutout.probability, 0.21)
+        self.assertEqual(list(cutout.raw_mode_indices), [2], "only RLC ends outside")
+        self.assertAlmostEqual(cutout.probability, 0.11)
         np.testing.assert_array_equal(cutout.active_mask, [True] * (HORIZON - 2) + [False] * 3)
         np.testing.assert_array_equal(
             np.broadcast_to(cutout.clearance_scale, HORIZON + 1), 1.0)

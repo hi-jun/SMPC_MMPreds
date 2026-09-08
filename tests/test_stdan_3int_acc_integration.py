@@ -487,10 +487,13 @@ class TestCutInProbabilityGate(unittest.TestCase):
     def test_gate_drops_a_negligible_lane_keeping_hypothesis_but_keeps_the_cutout_mode(self):
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
+        # The LLC/RLC trajectories leave the lane, which is what makes them
+        # cut-out modes: the label alone would say so for a lane keeper too.
+        away = np.column_stack((s, np.full_like(s, 3.5)))
         raw = {
             "vehicle_id": 11,
             "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
-            "pred_traj_frenet": np.stack((ahead, ahead, ahead)),
+            "pred_traj_frenet": np.stack((ahead, away, away)),
             "raw_pred_vel": np.ones((3, 3, 2)),
             "signed_t_cross": 1.0,
             "valid_mask": np.ones((3, 3), dtype=bool),
@@ -509,7 +512,10 @@ class TestCutInProbabilityGate(unittest.TestCase):
         self.assertFalse(lead.active_mask.any(), "negligible lk hypothesis vanishes")
         cutout = self._mode(processed, "cutout")
         self.assertIsNotNone(cutout)
-        self.assertTrue(cutout.active_mask.all(), "cutout mode is never gated")
+        self.assertTrue(cutout.active_mask[0], "the vehicle is in the lane now")
+        np.testing.assert_array_equal(
+            cutout.active_mask, [True, False, False, False],
+            "cutout mode is never gated: it holds exactly where its trajectory is")
 
     def test_gate_preserves_current_ego_lane_occupancy(self):
         """A target already straddling the ego lane stays constrained at step 0."""
@@ -705,10 +711,13 @@ class TestCutInChanceConstraint(unittest.TestCase):
         """
         s = np.array([20.0, 22.0, 24.0])
         ahead = np.column_stack((s, np.zeros_like(s)))
+        # The LLC/RLC trajectories leave the lane, which is what makes them
+        # cut-out modes: the label alone would say so for a lane keeper too.
+        away = np.column_stack((s, np.full_like(s, 3.5)))
         raw = {
             "vehicle_id": 11,
             "raw_intention_prob": np.array([0.02, 0.49, 0.49]),
-            "pred_traj_frenet": np.stack((ahead, ahead, ahead)),
+            "pred_traj_frenet": np.stack((ahead, away, away)),
             "raw_pred_vel": np.ones((3, 3, 2)),
             "signed_t_cross": 1.0,
             "valid_mask": np.ones((3, 3), dtype=bool),
