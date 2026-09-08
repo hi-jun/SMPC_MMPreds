@@ -130,6 +130,17 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         # lk is the more probable hypothesis here and is capped at its full standoff.
         self.assertEqual(by_name["lk"].clearance_scale, 1.0)
 
+    def test_a_cutout_mode_that_stays_in_lane_is_not_scaled(self):
+        """The label mapping puts phantom cut-out mass on a lane keeper; scaling
+        it would relax the standoff against a car that is going nowhere."""
+        raw = ego_lane_raw(1, 20.0, 10.0, 0.7, 0.3, self.HORIZON, leave_step=None)
+        by_name = modes_by_name(process(
+            raw, REL_EGO_LANE, 20.0, 0.0, 10.0, self.HORIZON,
+            cutin_chance_ref=REF, cutin_probability_threshold=VANISH))
+        cutout = by_name["cutout"]
+        self.assertTrue(cutout.active_mask.all(), "its trajectory never leaves the lane")
+        assert_cutout_unscaled_in_lane(cutout)
+
     def test_unlikely_lk_mode_vanishes(self):
         by_name = modes_by_name(self._lead(
             0.05, 0.95, cutin_chance_ref=REF, cutin_probability_threshold=VANISH))

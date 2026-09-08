@@ -415,16 +415,18 @@ def chance_cutout_clearance(
     the sigma term -- lets the ego lean into the cut-out, and below
     ``vanish_threshold`` the hypothesis vanishes like an unlikely cut-in does.
     The ``cutout`` mode is scaled by the same factor with its own probability
-    (2026-09-08).  It is the probabilistic replacement for the geometric taper
-    that used to shrink it with the predicted lateral overlap: while the
-    vehicle is still in the lane the ego may lean into a departure it is
-    confident about, and it relaxes with the belief rather than with a
-    hand-set lateral band.  Both hypotheses of an ego-lane vehicle are
-    therefore scaled by how much they are believed, and their two standoffs
-    are the two branches the ego plans against.  ``vanish_threshold`` still
-    only drops a negligible ``lk``: a cut-out hypothesis that is unlikely
-    keeps its (already small) scale rather than disappearing, so the vehicle
-    is never left unconstrained.  Adjacent-lane vehicles are untouched.
+    (2026-09-08), but only once its predicted trajectory actually leaves the
+    lane.  It is the probabilistic replacement for the geometric taper that
+    used to shrink it with the predicted lateral overlap: while the vehicle is
+    still in the lane the ego may lean into a departure it is confident about,
+    and the standoff relaxes with the belief rather than with a hand-set
+    lateral band.  The guard is what the taper carried and is not optional --
+    without it the phantom LLC/RLC mass the label mapping puts on every lane
+    keeper relaxes the standoff against a car that is going nowhere.
+    ``vanish_threshold`` still only drops a negligible ``lk``: a cut-out
+    hypothesis that is unlikely keeps its (already small) scale rather than
+    disappearing, so the vehicle is never left unconstrained.  Adjacent-lane
+    vehicles are untouched.
     """
     reference_beta = float(reference_beta)
     vanish_threshold = float(vanish_threshold)
@@ -437,6 +439,16 @@ def chance_cutout_clearance(
     result = {}
     for mode in mode_predictions:
         if mode.mode_name not in ("lk", "cutout"):
+            continue
+        # A ``cutout`` label says what the vehicle intends, not where its
+        # predicted trajectory goes.  The label mapping puts phantom LLC/RLC
+        # mass (0.07-0.32, measured on a straight-driving second lead) on every
+        # lane keeper, and scaling that mode hands the ego a 10 % standoff
+        # against a car that is going nowhere: the plan closed to 1.2 m of the
+        # 7 m/s second lead, min_gap -6.6 m (2026-09-08).  Only a trajectory
+        # that actually leaves the lane may be relaxed -- the same guard the
+        # geometric taper carried.
+        if mode.mode_name == "cutout" and not leaves_ego_lane(mode.active_mask):
             continue
         beta = float("nan")
         if reference_quantile is not None:
