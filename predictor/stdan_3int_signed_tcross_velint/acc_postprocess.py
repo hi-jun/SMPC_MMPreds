@@ -462,8 +462,9 @@ def chance_cutout_clearance(
     reach here on every lane keeper is gone before the scaling runs and the
     ``leaves_ego_lane`` test below is an invariant rather than a filter; it
     stays because this function is also called on modes built by the label
-    fallback, where relaxing a phantom cut-out closed the plan to 1.2 m of a
-    straight-driving second lead (min_gap -6.6 m).  The relaxation is close to
+    fallback, where relaxing a phantom cut-out scaled a straight-driving
+    second lead's standoff to 0.11 of itself -- 24.2 m of required gap down to
+    2.4 m, 1.8 m at its worst (2026-09-08 runs).  The relaxation is close to
     inert either way: once a trajectory does leave, its probability is already
     past ``reference_beta`` on 75 of 79 ticks, so ``min(p, beta_ref)`` saturates
     and the factor is 1.0.  Confidence cannot do the geometric taper's job --

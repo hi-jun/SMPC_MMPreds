@@ -135,8 +135,8 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
     def test_a_lane_keeper_has_no_cutout_mode_to_scale(self):
         """The phantom cut-out mass a lane keeper used to carry is gone at the
         mapping, so the chance factor has nothing to relax.  Scaling it handed
-        the ego a 10 % standoff against a car that was going nowhere: the plan
-        closed to 1.2 m of the 7 m/s second lead, min_gap -6.6 m (2026-09-08)."""
+        the ego a 0.11 standoff factor against a car that was going nowhere:
+        24.2 m of required gap down to 2.4 m, 1.8 m at its worst (2026-09-08)."""
         raw = ego_lane_raw(1, 20.0, 10.0, 0.7, 0.3, self.HORIZON, leave_step=None)
         by_name = modes_by_name(process(
             raw, REL_EGO_LANE, 20.0, 0.0, 10.0, self.HORIZON,
