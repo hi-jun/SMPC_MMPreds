@@ -199,6 +199,15 @@ def original_nair_acc_config(
     A_DOT_MIN=-1.5, A_DOT_MAX=1.5, TIGHTENING=1.64,
     NOISE_STD=[0.1, .1, .01, .1, .01], Q=[5, 2.5, 10, 1], R=[10, 1000].
 
+    ``r_a`` deviates from that source's 10 and is lowered to 1.  The term is
+    ``r_a (u - a_ref)^2``, and ``a_ref`` is now zero (see
+    ``OldACCReferenceAdapter.generate``), so it is no longer a tracking weight
+    but the only penalty on the size of the command.  At 10 it outweighed
+    ``q_v`` ten to one and the ego could barely accelerate; at 1 it matches
+    ``q_v`` and the speed reference does the work.  Between 1.0 and 0.1 the
+    closed loop barely moves (aref0_probe_20260909, 12 runs), so the value is
+    not delicate.
+
     ``jerk_limit`` deviates from that source's 1.5 and is raised to 10.  At 1.5
     the command needs 2 s to reach ``a_min``, which is longer than the 1.0-1.3 s
     time-to-collision a +6 m/s cut-in leaves: every policy collided in those
@@ -229,7 +238,7 @@ def original_nair_acc_config(
         tv_prediction_cov=((0.01 ** 2, 0.0), (0.0, 0.01 ** 2)),
         q_s=0.0,
         q_v=1.0,
-        r_a=10.0,
+        r_a=1.0,
         r_jerk=10.0,
         slack_weight=5000.0,
         solver_name="gurobi",
@@ -719,10 +728,19 @@ class OldACCReferenceAdapter:
 
         v_ref = np.clip(v_ref, self.config.v_min, self.config.v_max)
 
+        # There is no acceleration reference (2026-09-09).  It used to be
+        # ``diff(v_ref)/dt``, and ``v_ref`` is a ``min`` of the free-running ramp
+        # against each lead's limited speed, so the reference the ``r_a`` term
+        # tracked -- the heaviest term in the objective -- was the derivative of
+        # a ``min``: discontinuous wherever the argmin or an ``active_mask``
+        # entry switched.  Measured over 4 runs it moved more per tick than the
+        # command itself (mean ``|d a_ref|`` up to 2.5x ``|d a_cmd|``), and the
+        # 7-30% of ticks carrying such a switch produced 14-48% of the command's
+        # whole variation.  Zeroing it drops per-tick command variation by
+        # 16-49% and the cut-out event jerk by up to 86%, at no cost in
+        # anticipation or intrusion (aref0_probe_20260909).  ``r_a`` comes down
+        # to 1.0 with it: the term is now the only penalty on command size.
         a_ref = np.zeros((num_modes, horizon))
-        for mode in range(num_modes):
-            a_ref[mode] = np.diff(v_ref[mode]) / dt
-        a_ref = np.clip(a_ref, self.config.a_min, self.config.a_max)
         return ACCReference(s_ref=s_ref, v_ref=v_ref, a_ref=a_ref, prev_u=a_ref.copy())
 
     @staticmethod
