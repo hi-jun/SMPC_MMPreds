@@ -256,7 +256,7 @@ def _mode_specs_for_relation(
 
 
 # Steps (0.2 s each) a trajectory must spend outside the lane at the horizon
-# end before ``leaves_ego_lane`` counts it as leaving.  In steady following
+# end before ``ends_outside_ego_lane`` counts it as a departure.  In steady following
 # the LLC/RLC trajectories of a lane keeper poke out for the last one or two
 # steps on a fifth of the ticks (cutout_jerk10_20260905, pre-trigger), a
 # wobble about the lane edge that must not relax the standoff, while a real
@@ -277,24 +277,14 @@ def ends_outside_ego_lane(
     counts: a step or two outside with the trajectory back inside afterwards is
     a wobble about the lane edge, not a departure, and neither is a trajectory
     that pokes out for fewer than ``sustained_steps`` steps at the very end.
-    A trajectory that is outside for the whole horizon has already left, which
-    is why this and not ``leaves_ego_lane`` is what the mapping asks: a lead
-    that is fully out must not come back as lane-keeping mass.
+    A trajectory that is outside for the whole horizon has already left and
+    counts too: a lead that is fully out must not come back as lane-keeping
+    mass.
     """
     mask = np.asarray(membership, dtype=bool).ravel()
     if mask.size < int(sustained_steps):
         return False
     return not mask[-int(sustained_steps):].any()
-
-
-def leaves_ego_lane(membership: Sequence[bool], sustained_steps: int = CUTOUT_SUSTAINED_STEPS) -> bool:
-    """Whether a predicted trajectory takes the vehicle out of the ego lane within the horizon.
-
-    ``ends_outside_ego_lane`` for a trajectory that was inside the lane at some
-    step, so a vehicle that is already fully out does not count as leaving.
-    """
-    mask = np.asarray(membership, dtype=bool).ravel()
-    return bool(mask.any()) and ends_outside_ego_lane(mask, sustained_steps)
 
 
 def _trajectory_aware_mode_specs(
@@ -457,19 +447,21 @@ def chance_cutout_clearance(
     the sigma term -- lets the ego lean into the cut-out, and below
     ``vanish_threshold`` the hypothesis vanishes like an unlikely cut-in does.
     The ``cutout`` mode is scaled by the same factor with its own probability
-    (2026-09-08).  Since the mapping only calls a mode ``cutout`` when its
-    trajectory ends outside the lane, the phantom LLC/RLC mass that used to
-    reach here on every lane keeper is gone before the scaling runs and the
-    ``leaves_ego_lane`` test below is an invariant rather than a filter; it
-    stays because this function is also called on modes built by the label
-    fallback, where relaxing a phantom cut-out scaled a straight-driving
-    second lead's standoff to 0.11 of itself -- 24.2 m of required gap down to
-    2.4 m, 1.8 m at its worst (2026-09-08 runs).  The relaxation is close to
-    inert either way: once a trajectory does leave, its probability is already
-    past ``reference_beta`` on 75 of 79 ticks, so ``min(p, beta_ref)`` saturates
-    and the factor is 1.0.  Confidence cannot do the geometric taper's job --
-    it says how much the hypothesis is believed, not how much of the vehicle is
-    still in the lane.
+    (2026-09-08).  Nothing here tests where the trajectory goes: a mode is only
+    named ``cutout`` when the mapping has already seen it end outside the lane,
+    so the phantom LLC/RLC mass that used to relax a straight-driving lead --
+    to 0.11 of its standoff, 24.2 m of required gap down to 2.4 m -- never
+    reaches this function.
+
+    The relaxation is close to inert as written.  A departure's probability is
+    already past ``reference_beta`` on the first tick its trajectory leaves
+    (0.654 at t = 10.00 s, 0.765 median over the 79 ticks that follow), so
+    ``min(p, beta_ref)`` saturates and the factor is 1.0 for the whole
+    departure, while the vehicle still has 3.6 s of lateral motion to do.
+    Confidence and lateral overlap are not the same quantity: this factor
+    answers how much the hypothesis is believed, the geometric taper answered
+    how much of the vehicle is still in the lane given that it is true, and the
+    second keeps falling long after the first has saturated.
     ``vanish_threshold`` still only drops a negligible ``lk``: a cut-out
     hypothesis that is unlikely keeps its (already small) scale rather than
     disappearing, so the vehicle is never left unconstrained.  Adjacent-lane
@@ -486,12 +478,6 @@ def chance_cutout_clearance(
     result = {}
     for mode in mode_predictions:
         if mode.mode_name not in ("lk", "cutout"):
-            continue
-        # Only a trajectory that actually leaves the lane may be relaxed.  The
-        # trajectory-split mapping already guarantees this for modes built by
-        # ``process_vehicle_prediction``; the test is kept for the label
-        # fallback, where a phantom cut-out would otherwise be relaxed.
-        if mode.mode_name == "cutout" and not leaves_ego_lane(mode.active_mask):
             continue
         beta = float("nan")
         if reference_quantile is not None:

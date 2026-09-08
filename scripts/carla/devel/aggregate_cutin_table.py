@@ -302,13 +302,11 @@ def _predicts_lane_entry(mask, sustained_steps=CUTOUT_PRED_SUSTAINED_STEPS):
 def _predicts_lane_exit(mask, sustained_steps=CUTOUT_PRED_SUSTAINED_STEPS):
     """이 예측 궤적이 지평선 끝에서 ego 차선 밖에 있는가.
 
-    predictor 의 ``leaves_ego_lane`` 과 같은 3 스텝 규칙이지만 "차선 안에 있던
-    적이 있어야 한다"는 조건은 뺐다. 그 조건은 standoff 를 완화해도 되는지
-    판정용이고, 여기서는 예측 시점을 재기 때문이다 — LV 가 이미 완전히 빠져
-    점유 마스크가 전부 0 이 되면 leaves_ego_lane 은 False 가 되어 예측 호출이
-    t_out 직전에 1.0 s 를 못 채우고 끊긴다(LSTM, 2026-09-08). 끝 3 스텝만 보면
-    "곧 벗어난다"와 "이미 벗어났다"를 모두 호출로 센다. 차선 가장자리에서 한두
-    스텝 삐져나오는 흔들림은 여전히 걸러진다.
+    predictor 의 ``ends_outside_ego_lane`` 과 같은 3 스텝 규칙이다. 끝 3 스텝만
+    보므로 "곧 벗어난다"와 "이미 벗어났다"를 모두 호출로 센다 — LV 가 이미
+    완전히 빠져 점유 마스크가 전부 0 이 되는 구간에서도 예측 호출이 t_out 직전
+    1.0 s 를 채운다(LSTM, 2026-09-08). 차선 가장자리에서 한두 스텝 삐져나오는
+    흔들림은 여전히 걸러진다.
     """
     mask = np.asarray(mask, dtype=bool).ravel()
     if mask.size < sustained_steps:

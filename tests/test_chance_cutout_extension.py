@@ -13,12 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Imported as a module so its test cases are not collected a second time here.
 import test_stdan_3int_acc_integration as integration  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
-    ACCModePrediction,
     REL_EGO_LANE,
     REL_LEFT_ADJACENT,
     REL_RIGHT_ADJACENT,
     build_multitarget_lead_prediction,
-    chance_cutout_clearance,
     process_vehicle_prediction,
 )
 from utils.acc_nair_smpc import confidence_quantile  # noqa: E402
@@ -146,17 +144,6 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         self.assertAlmostEqual(lk.probability, 1.0)
         self.assertEqual(lk.clearance_scale, 1.0, "a certain lane keeper keeps its standoff")
         self.assertTrue(lk.active_mask.all())
-
-    def test_the_guard_still_covers_a_cutout_mode_built_by_the_label(self):
-        """``chance_cutout_clearance`` is called on modes from the label
-        fallback too, where a phantom cut-out would otherwise be relaxed."""
-        mask = np.ones(self.HORIZON + 1, dtype=bool)
-        mode = ACCModePrediction(
-            vehicle_id=1, mode_name="cutout", probability=0.3,
-            frenet=np.zeros((self.HORIZON + 1, 3)), active_mask=mask,
-            raw_mode_indices=[1, 2], ego_lane_membership_split_step=0)
-        chance_cutout_clearance([mode], REL_EGO_LANE, REF, VANISH)
-        self.assertEqual(mode.clearance_scale, 1.0, "its trajectory never leaves the lane")
 
     def test_unlikely_lk_mode_vanishes(self):
         by_name = modes_by_name(self._lead(

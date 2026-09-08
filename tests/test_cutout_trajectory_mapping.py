@@ -15,7 +15,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa:
     REL_EGO_LANE,
     REL_LEFT_ADJACENT,
     build_multitarget_lead_prediction,
-    leaves_ego_lane,
+    ends_outside_ego_lane,
     process_vehicle_prediction,
 )
 from utils.acc_nair_smpc import NairACCSMPC, original_nair_acc_config  # noqa: E402
@@ -87,7 +87,7 @@ def fake_mode(name, d_values, scale=1.0, active_mask=None):
     )
 
 
-class TestLeavesEgoLane(unittest.TestCase):
+class TestEndsOutsideEgoLane(unittest.TestCase):
     """The horizon end decides, and it has to stay outside for three steps.
 
     A lane keeper's LLC/RLC trajectories poke out of the lane for the last
@@ -97,16 +97,17 @@ class TestLeavesEgoLane(unittest.TestCase):
 
     def test_predicate(self):
         T, F = True, False
-        self.assertFalse(leaves_ego_lane([T] * 16))
-        self.assertTrue(leaves_ego_lane([T] * 11 + [F] * 5))
-        self.assertTrue(leaves_ego_lane([T] * 13 + [F] * 3), "three steps outside at the end")
-        self.assertFalse(leaves_ego_lane([T] * 14 + [F] * 2), "two steps: a horizon-end wobble")
-        self.assertFalse(leaves_ego_lane([T] * 15 + [F]))
-        self.assertTrue(leaves_ego_lane([F, T, T, F, F, F]), "outside now, in and then out")
-        self.assertFalse(leaves_ego_lane([T] * 6 + [F] * 3 + [T] * 7), "wobble about the edge")
-        self.assertFalse(leaves_ego_lane([F] * 16), "never inside: nothing to leave")
-        self.assertFalse(leaves_ego_lane([]))
-        self.assertTrue(leaves_ego_lane([T] * 15 + [F], sustained_steps=1), "the old one-step rule")
+        self.assertFalse(ends_outside_ego_lane([T] * 16))
+        self.assertTrue(ends_outside_ego_lane([T] * 11 + [F] * 5))
+        self.assertTrue(ends_outside_ego_lane([T] * 13 + [F] * 3), "three steps outside at the end")
+        self.assertFalse(ends_outside_ego_lane([T] * 14 + [F] * 2), "two steps: a horizon-end wobble")
+        self.assertFalse(ends_outside_ego_lane([T] * 15 + [F]))
+        self.assertTrue(ends_outside_ego_lane([F, T, T, F, F, F]), "outside now, in and then out")
+        self.assertFalse(ends_outside_ego_lane([T] * 6 + [F] * 3 + [T] * 7), "wobble about the edge")
+        self.assertTrue(ends_outside_ego_lane([F] * 16), "already fully out: still a cut-out")
+        self.assertFalse(ends_outside_ego_lane([]))
+        self.assertTrue(
+            ends_outside_ego_lane([T] * 15 + [F], sustained_steps=1), "the old one-step rule")
 
 
 class TestEgoLaneModesFollowTheTrajectory(unittest.TestCase):
