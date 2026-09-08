@@ -227,7 +227,7 @@ def original_nair_acc_config(
         controller_variant=controller_variant,
         process_noise_cov=((0.1 ** 2, 0.0), (0.0, 0.1 ** 2)),
         tv_prediction_cov=((0.01 ** 2, 0.0), (0.0, 0.01 ** 2)),
-        q_s=0.0, # PROBE 2026-09-08: q_s=0 (원래 5.0)
+        q_s=5.0, # TODO 튜닝 어떻게?
         q_v=1.0,
         r_a=10.0,
         r_jerk=10.0,

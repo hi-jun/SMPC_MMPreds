@@ -3,6 +3,16 @@ import os
 import sys
 import numpy as np
 
+def lane_keeping_steer(ey, epsi):
+    """Front steering angle [rad] that holds a lane.
+
+    ``ey`` is the lateral offset to the lane centre (+left) and ``epsi`` the
+    heading error, both in the right-handed frame the agents use (y and yaw
+    negated from CARLA).  Shared by the ACC ego and the fixed-lane traffic.
+    """
+    return float(np.clip(-0.15 * ey - 0.8 * epsi, -0.45, 0.45))
+
+
 class LowLevelControl:
     def __init__(self, vehicle):
         # Control setup and parameters.

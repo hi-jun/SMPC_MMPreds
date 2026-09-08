@@ -37,7 +37,8 @@ from utils.acc_nair_smpc import (
     required_standoff,
     safety_function,
 )
-from utils.low_level_control import IdealLongitudinalActuator, LowLevelControl
+from utils.low_level_control import (
+    IdealLongitudinalActuator, LowLevelControl, lane_keeping_steer)
 from utils.synthetic_lk_cutin_prediction import (
     SyntheticCutInConfig,
     SyntheticLaneKeepingCutInPredictor,
@@ -1291,7 +1292,7 @@ class ACCNairSMPCAgent(object):
 
     @staticmethod
     def _lane_keeping_steer(ey, epsi):
-        return float(np.clip(-0.15 * ey - 0.8 * epsi, -0.45, 0.45))
+        return lane_keeping_steer(ey, epsi)
 
     def _min_gap(self, solution, prediction):
         min_gap = np.inf
