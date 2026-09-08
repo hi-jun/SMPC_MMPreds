@@ -15,7 +15,6 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa:
     REL_EGO_LANE,
     REL_LEFT_ADJACENT,
     build_multitarget_lead_prediction,
-    lateral_overlap_clearance,
     leaves_ego_lane,
     process_vehicle_prediction,
 )
@@ -88,10 +87,6 @@ def fake_mode(name, d_values, scale=1.0, active_mask=None):
     )
 
 
-def expected_overlap(d_values):
-    return np.clip((1.8 - np.abs(np.asarray(d_values, dtype=float))) / 1.0, 0.0, 1.0)
-
-
 class TestLeavesEgoLane(unittest.TestCase):
     """The horizon end decides, and it has to stay outside for three steps.
 
@@ -121,8 +116,7 @@ class TestEgoLaneModesFollowTheLabel(unittest.TestCase):
     by the mode's occupancy mask, which is what the constraints use; the
     label only groups the probability mass.  Splitting the ego-lane modes by
     trajectory instead (caf17f2) changed no command in an offline replay and
-    is reverted; the vehicle that has just cut in, which motivated it, is
-    handled by the guard on ``lateral_overlap_clearance`` instead.
+    is reverted.
     """
 
     def test_llc_and_rlc_merge_into_cutout_with_their_probabilities_summed(self):
@@ -157,98 +151,39 @@ class TestEgoLaneModesFollowTheLabel(unittest.TestCase):
         self.assertTrue(by_name["cutout"].active_mask.all())
 
 
-class TestLateralOverlapClearance(unittest.TestCase):
-    """Defect 2 (cutout_no_sublv, 2026-09-06).
+class TestCutOutModeKeepsItsFullStandoff(unittest.TestCase):
+    """No geometric relaxation of a cut-out mode (2026-09-08).
 
-    Binary occupancy held the full standoff until the lane was completely
-    clear, 1.2 s after the predictor had called the cut-out; the ego sat on
-    its desired gap and could not accelerate.
+    ``lateral_overlap_clearance`` used to shrink a cut-out mode's standoff
+    with the predicted lateral overlap.  It was removed: it raised the
+    reference speed on the steps before the predicted crossing, which reads
+    as "accelerate into the vacated gap, then brake" and delayed the response
+    to a slower vehicle beyond the vacating one.  The cut-out mode is now
+    deterministic and unrelaxed wherever it is active, for every policy.
     """
 
-    D = [0.0, 0.5, 0.8, 1.0, 1.3, 1.8, 2.5]
-    EXPECTED = [1.0, 1.0, 1.0, 0.8, 0.5, 0.0, 0.0]
-    LEAVING = [True, True, False, False, False, False, False]   # D at the 0.5 m threshold
-
-    def test_scale_is_one_within_0_8_zero_beyond_1_8_and_linear_between(self):
-        for sign in (1.0, -1.0):
-            mode = fake_mode("cutout", sign * np.array(self.D), active_mask=self.LEAVING)
-            scales = lateral_overlap_clearance([mode], REL_EGO_LANE)
-            np.testing.assert_allclose(mode.clearance_scale, self.EXPECTED, atol=1e-12)
-            np.testing.assert_allclose(scales["cutout"], self.EXPECTED, atol=1e-12)
-
-    def test_takes_the_minimum_with_an_existing_scale(self):
-        mode = fake_mode("cutout", self.D, scale=np.full(len(self.D), 0.6), active_mask=self.LEAVING)
-        lateral_overlap_clearance([mode], REL_EGO_LANE)
-        np.testing.assert_allclose(mode.clearance_scale, np.minimum(self.EXPECTED, 0.6))
-
-    def test_is_measured_from_the_ego_lane_centre(self):
-        mode = fake_mode("cutout", np.array(self.D) + 3.5, active_mask=self.LEAVING)
-        lateral_overlap_clearance([mode], REL_EGO_LANE, ego_lane_d=3.5)
-        np.testing.assert_allclose(mode.clearance_scale, self.EXPECTED, atol=1e-12)
-
-    def test_lk_and_cutin_modes_are_left_alone(self):
-        modes = [fake_mode("lk", self.D, active_mask=self.LEAVING),
-                 fake_mode("cutin", self.D, active_mask=self.LEAVING)]
-        self.assertEqual(lateral_overlap_clearance(modes, REL_EGO_LANE), {})
-        for mode in modes:
-            self.assertEqual(mode.clearance_scale, 1.0, mode.mode_name)
-        adjacent = fake_mode("cutout", self.D, active_mask=self.LEAVING)
-        self.assertEqual(lateral_overlap_clearance([adjacent], REL_LEFT_ADJACENT), {})
-        self.assertEqual(adjacent.clearance_scale, 1.0)
-
-    def test_a_cutout_mode_whose_trajectory_stays_in_lane_is_left_alone(self):
-        """The guard: a cut-out label on a trajectory that does not leave is not relaxed."""
-        for mask, why in (
-                ([True] * 7, "never leaves"),
-                ([True] * 5 + [False] * 2, "two steps out at the end: a wobble"),
-                ([False] * 7, "never inside: nothing to leave")):
-            mode = fake_mode("cutout", self.D, active_mask=mask)
-            self.assertEqual(lateral_overlap_clearance([mode], REL_EGO_LANE), {}, why)
-            self.assertEqual(mode.clearance_scale, 1.0, why)
-        mode = fake_mode("cutout", self.D, active_mask=[True] * 4 + [False] * 3)
-        lateral_overlap_clearance([mode], REL_EGO_LANE)
-        np.testing.assert_allclose(mode.clearance_scale, self.EXPECTED, err_msg="three steps out: a departure")
-
-    def test_cutout_mode_from_the_processor_carries_the_overlap(self):
-        llc_d = np.linspace(0.35, 2.45, HORIZON)   # slides out over the horizon
+    def test_a_cutout_leaving_the_lane_is_not_relaxed(self):
+        rlc_d = np.linspace(0.25, 1.6, HORIZON)    # drifts right, out of the lane
         raw = ego_lane_raw(
-            [0.3, 0.7, 0.0], [profile((IN, HORIZON)), llc_d, profile((IN, HORIZON))])
+            [0.79, 0.10, 0.11], [profile((IN, HORIZON)), profile((IN, HORIZON)), rlc_d])
         memberships = np.ones((3, HORIZON + 1), dtype=bool)
-        memberships[1, 1:] = llc_d < 1.75           # the waypoint test: lane half-width
+        memberships[2, -3:] = False
         processed = process(raw, current_d=IN, **waypoint_kwargs(memberships))
-        by_name = modes_by_name(processed)
-        cutout = by_name["cutout"]
-        expected = expected_overlap(np.concatenate(([IN], llc_d)))
-        np.testing.assert_allclose(cutout.clearance_scale, expected)
-        np.testing.assert_allclose(processed.branch_info["lateral_overlap_scales"]["cutout"], expected)
-        self.assertEqual(by_name["lk"].clearance_scale, 1.0)
-        self.assertLess(cutout.clearance_scale[cutout.active_mask][-1], 1.0,
-                        "the standoff relaxes before the vehicle has left the lane")
+        cutout = modes_by_name(processed)["cutout"]
+        self.assertEqual(list(cutout.raw_mode_indices), [1, 2])
+        np.testing.assert_array_equal(
+            np.broadcast_to(cutout.clearance_scale, HORIZON + 1), 1.0)
+        self.assertNotIn("lateral_overlap_scales", processed.branch_info)
         prediction, _ = build_multitarget_lead_prediction(
             [processed], ego_state=np.array([0.0, 13.0]), horizon=HORIZON,
             desired_speed=17.0, num_modes=8)
         idx = prediction.mode_names.index("1:cutout")
-        active = prediction.active_mask[idx]
-        np.testing.assert_array_equal(active, cutout.active_mask)
-        np.testing.assert_allclose(prediction.clearance_scale[idx, active], expected[active])
-        self.assertTrue(np.all(prediction.clearance_scale[idx, ~active] == 1.0))
+        np.testing.assert_array_equal(prediction.clearance_scale[idx], 1.0)
 
-
-class TestCompletedCutInKeepsItsStandoff(unittest.TestCase):
-    """The guard on ``lateral_overlap_clearance`` (aggressive cut-in, 2026-09-06).
-
-    A vehicle that has just cut in from the left keeps RLC = 1.00 -- it is
-    still moving right -- while every predicted step stays inside the ego
-    lane, so under the label mapping it is a certain ``cutout`` the moment
-    its relation flips to ego-lane.  It sits at |d| ~ 1.45 m, where the
-    overlap taper alone would leave it 35 % of its standoff at the moment it
-    is most in the way; the taper therefore needs the mode's trajectory to
-    actually leave the lane.
-    """
-
-    def test_completed_cutin_keeps_the_full_standoff_at_every_step(self):
+    def test_a_completed_cutin_also_keeps_it(self):
         # Logged case: |d| 1.45 now, RLC +1.40 -> -0.49 over the horizon, 16/16
-        # in lane by the CARLA waypoint test (the lane is 3.5 m wide).
+        # in lane by the CARLA waypoint test; the taper alone would have left
+        # it 35 % of its standoff at the moment it is most in the way.
         rlc_d = np.linspace(1.40, -0.49, HORIZON)
         processed = process(
             ego_lane_raw([0.0, 0.0, 1.0], [rlc_d, rlc_d, rlc_d]), current_d=1.45,
@@ -257,41 +192,14 @@ class TestCompletedCutInKeepsItsStandoff(unittest.TestCase):
         self.assertAlmostEqual(cutout.probability, 1.0)
         self.assertTrue(cutout.active_mask.all())
         np.testing.assert_array_equal(np.broadcast_to(cutout.clearance_scale, HORIZON + 1), 1.0)
-        self.assertEqual(processed.branch_info["lateral_overlap_scales"], {})
-        self.assertAlmostEqual(expected_overlap([1.45])[0], 0.35, msg="what the taper alone would apply now")
-        prediction, _ = build_multitarget_lead_prediction(
-            [processed], ego_state=np.array([0.0, 17.0]), horizon=HORIZON,
-            desired_speed=17.0, num_modes=8)
-        self.assertEqual(prediction.mode_names, ["1:cutout"])
-        self.assertTrue(prediction.active_mask.all())
-        np.testing.assert_array_equal(prediction.clearance_scale, 1.0)
-
-    def test_a_real_cutout_is_tapered_once_three_steps_are_outside(self):
-        rlc_d = np.linspace(0.25, 1.6, HORIZON)    # drifts right, through the taper band
-        raw = ego_lane_raw(
-            [0.79, 0.10, 0.11], [profile((IN, HORIZON)), profile((IN, HORIZON)), rlc_d])
-        expected = expected_overlap(np.concatenate(([IN], rlc_d)))
-        for steps_out in (3, 2):
-            memberships = np.ones((3, HORIZON + 1), dtype=bool)
-            memberships[2, -steps_out:] = False
-            processed = process(raw, current_d=IN, **waypoint_kwargs(memberships))
-            cutout = modes_by_name(processed)["cutout"]
-            self.assertEqual(list(cutout.raw_mode_indices), [1, 2])
-            if steps_out >= 3:
-                np.testing.assert_allclose(cutout.clearance_scale, expected)
-                np.testing.assert_allclose(processed.branch_info["lateral_overlap_scales"]["cutout"], expected)
-                self.assertLess(cutout.clearance_scale[cutout.active_mask].min(), 0.5)
-            else:
-                self.assertEqual(cutout.clearance_scale, 1.0, "two steps out: a horizon-end wobble")
-                self.assertEqual(processed.branch_info["lateral_overlap_scales"], {})
 
 
 class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
     """A lead driving straight at |d| < 0.3 keeps the full standoff and the same command.
 
     An earlier relaxation with a sigma term moved ordinary following by
-    |delta a| = 0.49 m/s^2; the overlap taper must not, and neither may the
-    phantom ``cutout`` mass (~0.2) the label mapping puts on a lane keeper.
+    |delta a| = 0.49 m/s^2; the phantom ``cutout`` mass (~0.2) the label
+    mapping puts on a lane keeper may not.
     """
 
     @staticmethod
@@ -312,7 +220,6 @@ class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
         for name, mode in by_name.items():
             self.assertTrue(mode.active_mask.all(), name)
             self.assertEqual(mode.clearance_scale, 1.0, name)
-        self.assertEqual(processed.branch_info["lateral_overlap_scales"], {})
 
     def test_command_matches_a_single_lane_keeping_mode(self):
         """The phantom cut-out (same trajectory) moves the command by < 0.02: the mask decides."""
@@ -338,8 +245,8 @@ class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
         a_label, a_single = solve(processed), solve(single_lk)
         self.assertLess(abs(a_label - a_single), 0.02, (a_label, a_single))
 
-    def test_a_cutout_mode_still_inside_0_8_m_keeps_the_full_standoff(self):
-        """A drifting lead predicted out only at the horizon end is not relaxed inside 0.8 m."""
+    def test_a_cutout_mode_predicted_out_only_at_the_horizon_end_is_unrelaxed(self):
+        """A drifting lead predicted out only at the horizon end keeps its standoff."""
         rlc_d = np.linspace(0.25, 0.75, HORIZON)
         raw = ego_lane_raw(   # RLC is the more probable, hence the representative, cut-out trajectory
             [0.79, 0.10, 0.11], [profile((IN, HORIZON)), profile((IN, HORIZON)), rlc_d])
@@ -350,7 +257,8 @@ class TestOrdinaryFollowingIsUntouched(unittest.TestCase):
         cutout = by_name["cutout"]
         self.assertAlmostEqual(cutout.probability, 0.21)
         np.testing.assert_array_equal(cutout.active_mask, [True] * (HORIZON - 2) + [False] * 3)
-        np.testing.assert_allclose(cutout.clearance_scale[cutout.active_mask], 1.0)
+        np.testing.assert_array_equal(
+            np.broadcast_to(cutout.clearance_scale, HORIZON + 1), 1.0)
         self.assertEqual(by_name["lk"].clearance_scale, 1.0)
 
 

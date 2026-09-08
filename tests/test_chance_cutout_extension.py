@@ -68,13 +68,12 @@ def modes_by_name(processed):
 
 
 def assert_cutout_unscaled_in_lane(cutout):
-    """The cut-out mode gets no probability factor: full standoff at every in-lane step.
-
-    Its per-step scale follows the lateral overlap
-    (``lateral_overlap_clearance``), which is 1.0 at the lane centre and zero
-    once the trajectory is outside -- on steps that are inactive anyway.
-    """
-    np.testing.assert_array_equal(np.asarray(cutout.clearance_scale)[cutout.active_mask], 1.0)
+    """The cut-out mode gets no probability factor and no geometric taper:
+    it holds its full standoff wherever it is active."""
+    scale = np.asarray(cutout.clearance_scale, dtype=float)
+    if scale.ndim:
+        scale = scale[np.asarray(cutout.active_mask, dtype=bool)]
+    np.testing.assert_array_equal(scale, 1.0)
 
 
 def scenario_index(prediction, name):

@@ -152,7 +152,22 @@ cut-out 시각
   gap_at_trigger = t_trigger 시각의 ego-LV 범퍼 간격(중심거리 - 4.5 m),
   v_ego_at_trigger / v_lv_at_trigger = 같은 시각 두 차의 속도.
 
-Δt_ant (제어기 반응 선제성; cut-in 과 같은 뜻이되 기준점이 t_out 이다)
+Δt_ant (**예측 선제성**; 2026-09-08 부터 제어 반응이 아니라 예측 시점이다)
+  t_pred = LV 가 ego 차선을 벗어난다고 예측기가 처음 말한 순간. 틱마다 LV 의
+    모드별 예측 궤적 중 지평선 안에서 차선을 벗어나는(끝 3 스텝이 밖) 모드들의
+    확률을 합치고, 그 합이 0.5 이상인 상태가 [t_trigger − 3 s, 끝] 안에서 1.0 s
+    이상 연속되는 첫 시점을 쓴다. LV 는 그 틱의 실제 s 에 가장 가까운
+    processed_target 으로 찾는다(summary 에 actor–CARLA id 대응이 없다).
+    STDAN 계열은 cutout 모드가, LSTM 은 단일 모드가 이 조건을 만든다. 예측기가
+    없는 SCC 는 항상 None → 표에 '-'.
+  Δt_ant = max(0, t_out − t_pred); 부호 있는 값은 dt_ant_signed.
+    cutout_call_max 는 그 런에서 관측된 확률합의 최대(왜 안 잡혔는지 진단용).
+  ※ 왜 제어 시점이 아닌가: subLV 가 있는 장면에서 빨리 감속하는 것이 무조건
+    좋은 것이 아니다. 벌어진 간격을 다시 채워 앞차 간격을 유지하면서 subLV 까지
+    절충하는 것이 목적이므로, 선제성은 예측기가 얼마나 일찍 알았는지로 재고
+    그 결과의 좋고 나쁨은 gap_excess/저크/최소간격이 따로 잰다.
+
+dt_ant_ctrl (옛 Δt_ant. 제어기 반응 개시 선제성, 진단용으로만 남긴다)
   t_onset = [t_trigger − 3 s, t_out + 5 s] 창 안에서, 부호 맞는 가속이 **1.0 s 이상
     연속으로** 임계를 넘는 첫 구간의 시작:
     accel_cmd >= +0.3 m/s^2 (kind cutout_no_sublv: 비워진 차선으로 가속) 또는
@@ -162,9 +177,8 @@ cut-out 시각
     1.0 s hold 는 진동(0.2 s 안팎)과 트리거 전의 약한 예비 제동(-0.25)을 걸러내고
     본격 반응 램프만 잡는다. 쓴 부호는 onset_sign 열에 남긴다. t_settle_end /
     settled_before_trigger 는 진단용으로만 남긴다.
-  Δt_ant = max(0, t_out − t_onset) (표); 부호 있는 값은 dt_ant_signed 열(음수 =
-    t_out 이후에야 반응; no-chance STDAN 은 A 에서 +0.7~1.0 s 늦다). 창 안에 onset 이
-    없으면 None → 표에 '-'.
+  dt_ant_ctrl = max(0, t_out − t_onset); 부호 있는 값은 dt_ant_ctrl_signed 열
+    (음수 = t_out 이후에야 반응). 창 안에 onset 이 없으면 None.
   ※ 정상상태를 기준점으로 잡는 이유: cut-out 은 트리거 전이 정속 추종 구간이라
     창 시작 직후의 스폰 과도를 onset 으로 잘못 집기 쉽다.
 
@@ -172,6 +186,17 @@ cut-out 시각
   v_avg = **[t_trigger, 창끝] 의 ego 속도 평균** — table_cutout.tex 의 v_avg 열.
     (cut-in 쪽 v_avg 는 창 전체 평균이다. 같은 이름이지만 구간이 다르다.)
   v_avg_window = 창 전체 평균, v_avg_post = [t_out, 창끝] 평균.
+
+LV 와의 간격이 필요 이상으로 벌어지는가
+  gap_excess = max(0, (LV 범퍼간격 − d_safe) / d_safe) * 100 [%]. delta 의
+    거울상이다 — delta 가 안전거리보다 얼마나 **모자라는지**를, gap_excess 는
+    얼마나 **남는지**를 잰다.
+  구간은 [t_trigger − 1 s, t_out] 중 LV 가 아직 ego 차선에서 앞서는 스텝.
+    LV 가 빠진 뒤의 subLV 간격은 시나리오 기하(앞차를 89 m 앞에 둔다)가 지배해
+    제어 품질을 재지 못하므로 제외한다.
+  gap_excess_max / gap_excess_avg = 그 구간의 최대/평균. subLV 를 위한 선제
+    감속이 과해 앞차를 놓치고 뒤처지면 커지고, 벌어진 간격을 제때 다시 채우며
+    절충하면 작아진다. table_cutout.tex 에는 max 를 싣는다.
 
 subLV (kind cutout_sublv 만)
   min_bumper_gap_sublv = subLV 가 ego 차선에 있고 앞설 때의 최소 범퍼 간격.
@@ -221,6 +246,10 @@ EVENT_POST_S = 9.0    # 트리거 9 s 후까지 (기동 + 회복)
 
 CUTOUT_CONTACT_PRE_S = 0.5
 CUTOUT_CONTACT_POST_S = 2.0
+CUTOUT_PRED_PROB = 0.5        # 예측 개시: 차선을 벗어나는 모드들의 확률합 임계
+CUTOUT_PRED_HOLD_S = 1.0      # 임계를 이만큼 연속으로 넘어야 예측 개시 (예측 떨림 배제)
+CUTOUT_PRED_SUSTAINED_STEPS = 3   # 궤적이 지평선 끝에서 이만큼 나가 있어야 "이탈"
+CUTOUT_PRED_MATCH_M = 3.0     # processed_target 을 LV 로 인정할 s 오차 한계
 
 SWEEP_PARAMS = ("ego_speed", "target_speed", "lane_change_distance",
                 "lane_change_time_s", "target_lead_gap", "trigger_distance",
@@ -228,7 +257,8 @@ SWEEP_PARAMS = ("ego_speed", "target_speed", "lane_change_distance",
 TEX_METRICS = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "delta_max", "delta_avg",
                "dt_ant", "T_rec")
 TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
-TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "dt_ant", "v_avg")
+TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "dt_ant",
+                      "gap_excess_max", "v_avg")
 # 표 값(명령 저크) 옆 괄호에 함께 보일 실측(0.2 s 대역) 값
 RAW_OF_FILT = {"j_avg_cmd_filt": "j_avg_filt", "j_max_cmd_filt": "j_max_filt"}
 AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
@@ -239,11 +269,77 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
     "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
-    "settled_before_trigger")
+    "settled_before_trigger", "dt_ant_ctrl", "t_pred_minus_trigger",
+    "gap_excess_max", "gap_excess_avg")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
                   "04_no_cutin_decel_onset": "No Cut-in \\\\ (decel onset 22/28/34)"}
+
+
+def _predicts_lane_exit(mask, sustained_steps=CUTOUT_PRED_SUSTAINED_STEPS):
+    """이 예측 궤적이 지평선 끝에서 ego 차선 밖에 있는가.
+
+    predictor 의 ``leaves_ego_lane`` 과 같은 3 스텝 규칙이지만 "차선 안에 있던
+    적이 있어야 한다"는 조건은 뺐다. 그 조건은 standoff 를 완화해도 되는지
+    판정용이고, 여기서는 예측 시점을 재기 때문이다 — LV 가 이미 완전히 빠져
+    점유 마스크가 전부 0 이 되면 leaves_ego_lane 은 False 가 되어 예측 호출이
+    t_out 직전에 1.0 s 를 못 채우고 끊긴다(LSTM, 2026-09-08). 끝 3 스텝만 보면
+    "곧 벗어난다"와 "이미 벗어났다"를 모두 호출로 센다. 차선 가장자리에서 한두
+    스텝 삐져나오는 흔들림은 여전히 걸러진다.
+    """
+    mask = np.asarray(mask, dtype=bool).ravel()
+    if mask.size < sustained_steps:
+        return False
+    return not mask[-int(sustained_steps):].any()
+
+
+def _cutout_call_probability(target):
+    """이 틱에 예측기가 이 차량에 얹은 '차선을 벗어난다' 확률.
+
+    모드별 차선 점유(mode_lane_membership)와 모드 확률(raw_mode_prob)을 키로
+    맞춰 곱한 합. LSTM 은 점유 키가 'LK', 확률 키가 'lstm' 이라 키가 어긋나므로
+    개수가 같으면 순서로 짝짓는다. 짝지을 수 없으면 None.
+    """
+    membership = target.get("mode_lane_membership") or {}
+    probs = target.get("raw_mode_prob") or {}
+    if not membership or not probs:
+        return None
+    if set(membership) <= set(probs):
+        pairs = [(probs[k], membership[k]) for k in membership]
+    elif len(membership) == len(probs):
+        pairs = list(zip(list(probs.values()), list(membership.values())))
+    else:
+        return None
+    return float(sum(p for p, mask in pairs if _predicts_lane_exit(mask)))
+
+
+def _lv_cutout_call(steps, s_lv):
+    """틱마다 LV 에 대한 cut-out 예측 확률. 예측기가 없으면(SCC) 전부 NaN.
+
+    summary 에는 actor 와 CARLA id 의 대응이 없으므로, 그 틱의 LV 실제 s 에 가장
+    가까운 processed_target 을 LV 로 본다.
+    """
+    out = np.full(len(steps), np.nan)
+    for i, step in enumerate(steps):
+        targets = (step.get("stdan_debug") or {}).get("processed_targets")
+        if not targets or not np.isfinite(s_lv[i]):
+            continue
+        best, best_err = None, np.inf
+        for target in targets:
+            frenet = target.get("pred_traj_frenet") or {}
+            if not frenet:
+                continue
+            s0 = float(np.asarray(next(iter(frenet.values())), dtype=float)[0][0])
+            err = abs(s0 - s_lv[i])
+            if err < best_err:
+                best, best_err = target, err
+        if best is None or best_err > CUTOUT_PRED_MATCH_M:
+            continue
+        call = _cutout_call_probability(best)
+        if call is not None:
+            out[i] = call
+    return out
 
 
 def is_cutout_group(group):
@@ -330,7 +426,7 @@ def _mask_runs(mask, hold):
 
 
 def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
-                    cmd, ego_s, ego_x, ego_v, ego_lane_id):
+                    cmd, ego_s, ego_x, ego_v, ego_lane_id, steps, d_safe):
     """cut-out 그룹 전용 지표. cut-in 블록이 None 으로 남긴 열을 덮어쓴다."""
     name = "%s/%s" % (group, run_name)
     row["cutout_kind"] = re.sub(r"_[0-9]+$", "", run_name)
@@ -348,7 +444,8 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
     for key in ("t_out", "t_out_minus_trigger", "t_settle_end", "gap_at_trigger",
                 "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
                 "trigger_distance_at_start", "cutout_started", "cutout_completed",
-                "lv_inlane_at_trigger"):
+                "lv_inlane_at_trigger", "t_pred", "t_pred_minus_trigger",
+                "dt_ant_ctrl", "dt_ant_ctrl_signed", "gap_excess_max", "gap_excess_avg"):
         row[key] = None
     row["sublv_inlane_steps"] = 0
     row["lv_sublv_contact"] = False
@@ -419,11 +516,56 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
             if i_on is not None:
                 t_onset = float(t[idx[0] + i_on])
     row["t_onset"] = None if t_onset is None else round(t_onset - t0, 3)
+    row["dt_ant_ctrl"] = None
+    row["dt_ant_ctrl_signed"] = None
+    if t_onset is not None and out_abs is not None:
+        row["dt_ant_ctrl_signed"] = round(out_abs - t_onset, 3)
+        row["dt_ant_ctrl"] = max(0.0, row["dt_ant_ctrl_signed"])
+
+    # --- Δt_ant: 예측 선제성 (제어 반응이 아니라 예측 시점) ---
+    # LV 가 차선을 벗어난다고 예측기가 처음 말한 순간부터 실제로 벗어난 t_out
+    # 까지. 제어기가 그 예측으로 무엇을 했는지와 무관한 예측기 지표다. subLV 가
+    # 있는 장면에서 무조건 빨리 감속하는 것이 좋은 것은 아니어서(벌어진 간격을
+    # 다시 채우는 절충이 중요하다) 제어 개시 시점은 dt_ant_ctrl 로 따로 남긴다.
     row["dt_ant"] = None
     row["dt_ant_signed"] = None
-    if t_onset is not None and out_abs is not None:
-        row["dt_ant_signed"] = round(out_abs - t_onset, 3)
-        row["dt_ant"] = max(0.0, row["dt_ant_signed"])
+    row["cutout_call_max"] = None
+    if lv_key in tracks and len(steps) == t.size:
+        s_lv, _x, _lane = tracks[lv_key]
+        call = _lv_cutout_call(steps, s_lv)
+        called = np.isfinite(call) & (call >= CUTOUT_PRED_PROB)
+        finite = call[np.isfinite(call)]
+        row["cutout_call_max"] = round(float(np.max(finite)), 4) if finite.size else None
+        pred_abs = None
+        if trig_abs is not None and called.any():
+            win = t >= trig_abs - CUTOUT_ONSET_PRE_S
+            idx = np.nonzero(win)[0]
+            if idx.size:
+                hold = max(1, int(round(CUTOUT_PRED_HOLD_S / dt)))
+                i_pred = _first_run_start(called[idx[0]:], hold)
+                if i_pred is not None:
+                    pred_abs = float(t[idx[0] + i_pred])
+        row["t_pred"] = None if pred_abs is None else round(pred_abs - t0, 3)
+        if pred_abs is not None and row["t_trigger"] is not None:
+            row["t_pred_minus_trigger"] = round(row["t_pred"] - row["t_trigger"], 3)
+        if pred_abs is not None and out_abs is not None:
+            row["dt_ant_signed"] = round(out_abs - pred_abs, 3)
+            row["dt_ant"] = max(0.0, row["dt_ant_signed"])
+
+    # --- LV 와의 간격이 필요 이상으로 벌어지는가 ---
+    # LV 가 아직 ego 차선에서 앞서는 동안만 본다. LV 가 빠진 뒤의 subLV 간격은
+    # 시나리오 기하(앞차를 89 m 앞에 둔다)가 지배해 제어 품질을 재지 못한다.
+    if lv_key in tracks and trig_abs is not None:
+        s_lv, x_lv, lane_lv = tracks[lv_key]
+        lead = ((lane_lv == ego_lane_id) & (np.abs(x_lv - ego_x) <= LANE_HALF_WIDTH)
+                & (s_lv > ego_s) & (t >= trig_abs + EVENT_PRE_S))
+        if out_abs is not None:
+            lead &= t <= out_abs
+        if lead.any():
+            excess = np.maximum(0.0, (s_lv[lead] - ego_s[lead] - VEH_LEN - d_safe[lead])
+                                / d_safe[lead]) * 100.0
+            row["gap_excess_max"] = round(float(np.max(excess)), 4)
+            row["gap_excess_avg"] = round(float(np.mean(excess)), 4)
 
     # --- 속도 ---
     if trig_abs is not None:
@@ -677,7 +819,7 @@ def collect_run(policy, group, run_dir):
     row["v_min"] = float(np.min(ego_v))
     if is_cutout_group(group):
         cutout_response(row, data, group, run_dir.name, sweep, tracks, t, t0, dt,
-                        cmd, ego_s, ego_x, ego_v, ego_lane_id)
+                        cmd, ego_s, ego_x, ego_v, ego_lane_id, steps, d_safe)
     # 이벤트 구간 명령 저크: 창 전체 평균은 이벤트가 끝난 뒤의 정상 추종 구간(창의
     # 절반 이상)이 지배한다. 예측기를 쓰는 정책은 그 구간에서 틱마다 예측이 조금씩
     # 흔들려 ±0.2 m/s^2 의 미세 진동이 남고, 그것이 컷인 응답 자체의 매끄러움을 덮는다.
@@ -833,9 +975,9 @@ def write_cutout_tex(path, agg):
 
 def markdown_table_cutout(agg):
     head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 필터(원시) | j_max 필터(원시) "
-            "| Δt_ant | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
+            "| Δt_ant | gap초과_max | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
             "| subLV 최소간격 | ego충돌 | LV-subLV접촉 |")
-    lines = [head, "|" + "---|" * 15]
+    lines = [head, "|" + "---|" * 16]
     for (group, _policy), stats in agg.items():
         if not is_cutout_group(group):
             continue
