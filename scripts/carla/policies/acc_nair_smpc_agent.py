@@ -102,6 +102,7 @@ class ACCNairSMPCAgent(object):
         self.cutin_clearance_ramp_ref = self._parse_cutin_clearance_ramp_ref(smpc_config)
         self.cutin_chance_ref = self._parse_cutin_chance_ref(smpc_config)
         self.intention_lpf_s = self._parse_intention_lpf_s(smpc_config)
+        self.track_smooth_samples = self._parse_track_smooth_samples(smpc_config)
         if self.cutin_chance_ref > 0.0 and self.cutin_clearance_ramp_ref > 0.0:
             raise ValueError(
                 "cutin_ramp and cutin_chance both set the cut-in standoff scale; use one")
@@ -546,6 +547,7 @@ class ACCNairSMPCAgent(object):
             "mode_probabilities": list(self.mode_probabilities),
             "cutin_chance_ref": float(self.cutin_chance_ref),
             "intention_lpf_s": float(self.intention_lpf_s),
+            "track_smooth_samples": int(self.track_smooth_samples),
             "cutin_probability_threshold": float(self.cutin_probability_threshold),
             "steps": self.policy_log,
         }
@@ -1050,8 +1052,39 @@ class ACCNairSMPCAgent(object):
                 if abs(float(times[idx]) - query_time) <= self.stdan_history_closeness_eps:
                     history.append(poses[idx])
             if history:
-                trackings[actor.id] = np.asarray(history, dtype=np.float64)
+                trackings[actor.id] = self._smooth_track(
+                    np.asarray(history, dtype=np.float64))
         return trackings
+
+    def _smooth_track(self, history):
+        """국소 2차 평활(Savitzky-Golay 형)을 이력 좌표에 건다. 기본은 꺼짐.
+
+        예측기가 보는 위치에는 CARLA 타이어 모델이 남기는 밀리미터급 잔떨림이
+        있고, 오프라인 절제(2026-09-10)에서 **완전히 매끈한 합성 이력을 넣으면
+        의도확률의 틱간 변화가 정확히 0** 이 나왔다 -- 진동은 전부 이 잔떨림이
+        모델을 통과해 증폭된 것이다. 배포 스택이라면 원시 단일 프레임 자세가
+        아니라 추적 필터의 추정치를 예측기에 주므로, 이 평활은 시뮬 아티팩트를
+        가리는 것이 아니라 빠져 있던 추적 단계를 세우는 쪽이다.
+
+        차수 2 라 등가속 운동을 정확히 재현한다 -- 우리 시나리오의 차선변경도
+        0.5 s 창 안에서는 등가속에 가까우므로 지연이 생기지 않는다. 창이 이력
+        안에서만 앞뒤를 보므로 미래 정보를 쓰지 않는다.
+        """
+        w = int(self.track_smooth_samples)
+        if w < 2 or history.shape[0] < 2 * w + 1:
+            return history
+        out = history.copy()
+        n = history.shape[0]
+        idx = np.arange(n)
+        for col in range(min(2, history.shape[1])):      # x, y 만 (yaw 는 그대로)
+            y = history[:, col]
+            sm = np.empty(n)
+            for i in range(n):
+                lo, hi = max(0, i - w), min(n, i + w + 1)
+                k = idx[lo:hi] - i
+                sm[i] = np.polyval(np.polyfit(k, y[lo:hi], 2), 0.0)
+            out[:, col] = sm
+        return out
 
     def _ego_state_rhs(self):
         transform = self.vehicle.get_transform()
@@ -1243,6 +1276,17 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"cutin_ramp([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_track_smooth_samples(smpc_config):
+        """Read ``track_smooth<half-window in samples>`` (default: off).
+
+        Half-width of the local quadratic fit applied to the tracked history
+        before it reaches the predictor.  ``track_smooth2`` is +/-2 samples,
+        a 0.5 s window at the predictor's 0.1 s spacing.  See ``_smooth_track``.
+        """
+        match = re.search(r"track_smooth([0-9]+)", str(smpc_config))
+        return int(match.group(1)) if match else 0
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):
