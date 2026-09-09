@@ -17,13 +17,18 @@ GAIN_LIMITS = (0.5, 2.0)
 #: Samples of history averaged for the measured speed.  One step is the
 #: tracker's own quantisation; three is still well inside a lane change.
 SPEED_SAMPLES = 3
-#: Predicted steps averaged for the anchor.  The gain has to be read off the
-#: *start* of the horizon, not its mean: a target that the model predicts will
-#: slow down has a mean speed below its current one, and matching the mean to
-#: the measurement then stretches the whole horizon and cancels the predicted
-#: deceleration.  Five steps is 0.5 s -- near enough to the start to leave the
-#: profile alone, long enough to average out the decoder's step noise.
-ANCHOR_STEPS = 5
+#: Predicted steps averaged for the anchor.  ``None`` means the whole horizon.
+#: Reading the gain off the first 0.5 s instead was tried and reverted
+#: (2026-09-09, 96 runs): it was meant to keep a predicted deceleration from
+#: being stretched away, and on a synthetic 2 m/s^2 decel it does, but in CARLA
+#: it changed nothing in the cut-in cells it was aimed at (delta_max 50.16 ->
+#: 50.35, dt_ant 0.28 -> 0.27) and cost the cut-out cells their gain, because a
+#: cut-out lead is mostly constant speed and five steps carry the decoder's
+#: noise into the gain: excess gap error 3.13 -> 10.55 (05), 11.03 -> 17.51
+#: (06), 15.87 -> 21.15 (07).  The cut-in regression it was chasing is more
+#: likely the jerk limit -- this policy saturates it in all 36 cut-in cells --
+#: than the anchor.
+ANCHOR_STEPS = None
 
 
 class LSTMVelACCAdapter(LSTMACCAdapter):
@@ -45,13 +50,6 @@ class LSTMVelACCAdapter(LSTMACCAdapter):
     defect rather than a prediction one, and left alone it costs the LSTM
     baseline far more than its trajectory quality does -- it lags every lead
     and holds a gap error the controller cannot close.
-
-    The gain is read off the first 0.5 s of the horizon, not its mean.  Matching
-    the mean makes a predicted deceleration disappear -- the mean of a slowing
-    target is below its current speed, so the gain stretches the whole horizon
-    to compensate -- and that cost the cut-in cells their lead time when the
-    first version anchored on ``disp[-1]`` (delta_max 37.9 -> 50.2 %, dt_ant
-    0.68 -> 0.28 s in 01_cutin_normal, 2026-09-09).
 
     The anchor uses only the speed a tracker already measures now, never the
     future the model is being asked for, so it is not oracle information: any
@@ -81,7 +79,7 @@ class LSTMVelACCAdapter(LSTMACCAdapter):
         measured = self._measured_speed(track)
         if measured is None or measured <= 0.1:
             return 1.0
-        steps = min(int(ANCHOR_STEPS), disp_ft.shape[0])
+        steps = disp_ft.shape[0] if ANCHOR_STEPS is None else min(int(ANCHOR_STEPS), disp_ft.shape[0])
         predicted = float(np.linalg.norm(disp_ft[steps - 1])) * FT2M / (steps * self.dt)
         if predicted <= 0.1:
             return 1.0
