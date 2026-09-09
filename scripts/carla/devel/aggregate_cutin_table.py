@@ -199,6 +199,14 @@ LV 와의 간격이 얼마나 어긋나는가
     LV 가 빠진 뒤의 subLV 간격은 시나리오 기하(앞차를 89 m 앞에 둔다)가 지배해
     제어 품질을 재지 못하므로 제외한다.
   gap_err_max / gap_err_avg = 그 구간의 최대/평균. table_cutout.tex 에는 max.
+  gap_err_signed_avg / gap_err_short_max / gap_err_excess_max = 절대값을 씌우기
+    전의 분해. signed = (범퍼간격 - d_safe)/d_safe*100 이고 음수가 안전거리 안,
+    양수가 뒤처진 쪽이다. short_max = max(-signed, 0) 의 최대(안으로 얼마나
+    들어갔나 = 안전), excess_max = max(signed, 0) 의 최대(얼마나 뒤처졌나 =
+    선제 감속의 대가). gap_err_max = max(short_max, excess_max) 라 정확히
+    쪼개진다. **선제 감속은 excess 만 키우므로, 두 방향을 합쳐 재는
+    gap_err_max 는 일찍 감속한 정책과 늦게 감속한 정책을 같은 방향으로
+    벌한다** — 정책을 가릴 때는 분해한 쪽을 보는 편이 낫다.
 
 이벤트 구간 표 (table_event_rows.tex / 마크다운 "이벤트 구간:")
   창은 저크 지표와 같은 [t_trigger − 1 s, t_trigger + 9 s] (기동 + 회복).
@@ -281,6 +289,7 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "v_avg", "v_min", "passed", "t_pass",
                "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
+    "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max",
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
     "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
     "settled_before_trigger", "t_pred_minus_trigger",
@@ -478,7 +487,8 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
                 "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
                 "trigger_distance_at_start", "cutout_started", "cutout_completed",
                 "lv_inlane_at_trigger", "t_pred", "t_pred_minus_trigger",
-                "dt_ant_ctrl", "dt_ant_ctrl_signed", "gap_err_max", "gap_err_avg"):
+                "dt_ant_ctrl", "dt_ant_ctrl_signed", "gap_err_max", "gap_err_avg",
+                "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max"):
         row[key] = None
     row["sublv_inlane_steps"] = 0
     row["lv_sublv_contact"] = False
@@ -588,9 +598,17 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
         if out_abs is not None:
             lead &= t <= out_abs
         if lead.any():
-            err = np.abs(s_lv[lead] - ego_s[lead] - VEH_LEN - d_safe[lead]) / d_safe[lead] * 100.0
+            signed = (s_lv[lead] - ego_s[lead] - VEH_LEN - d_safe[lead]) / d_safe[lead] * 100.0
+            err = np.abs(signed)
             row["gap_err_max"] = round(float(np.max(err)), 4)
             row["gap_err_avg"] = round(float(np.mean(err)), 4)
+            # 부호를 살린 분해. 음수는 안전거리 안으로 들어간 쪽(부족), 양수는
+            # 뒤처진 쪽(초과)이고 gap_err_max = max(short_max, excess_max) 이다.
+            # 선제 감속은 초과만 키우므로, 둘을 합쳐 재는 gap_err_max 는 일찍
+            # 감속한 정책을 늦게 감속한 정책과 같은 방향으로 벌한다.
+            row["gap_err_signed_avg"] = round(float(np.mean(signed)), 4)
+            row["gap_err_short_max"] = round(float(np.max(np.maximum(-signed, 0.0))), 4)
+            row["gap_err_excess_max"] = round(float(np.max(np.maximum(signed, 0.0))), 4)
 
     # --- 속도 ---
     if trig_abs is not None:
