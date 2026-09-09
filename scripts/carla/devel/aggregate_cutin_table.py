@@ -311,9 +311,15 @@ TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
 TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "dt_ant",
                       "gap_err_max", "v_avg")
 # 이벤트 구간 [t_trigger-5 s, t_trigger+9 s] 만 자른 표
-TEX_METRICS_EVENT = ("a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
-                     "j_avg_cmd_ev", "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev",
-                     "v_avg_ev", "v_min_ev", "dt_ant")
+# 이벤트 구간 표는 전체구간 표와 **같은 열**을 쓴다. 여기 없는 열(dt_ant,
+# t_out_minus_trigger, gap_at_trigger, settled_before_trigger, gap_err_max)은
+# 이미 이벤트 시각 기준이라 창을 바꿔도 같은 값이다.
+EV_OF = {"a_avg": "a_avg_ev",
+         "j_avg_cmd_filt": "j_avg_cmd_ev_filt", "j_max_cmd_filt": "j_max_cmd_ev_filt",
+         "j_avg_filt": "j_avg_filt_ev", "j_max_filt": "j_max_filt_ev",
+         "delta_max": "delta_max_ev", "delta_avg": "delta_avg_ev",
+         "T_rec": "T_rec_ev", "v_avg": "v_avg_ev",
+         "min_bumper_gap_sublv": "min_bumper_gap_sublv_ev"}
 # 표 값(명령 저크) 옆 괄호에 함께 보일 실측(0.2 s 대역) 값
 RAW_OF_FILT = {"j_avg_cmd_filt": "j_avg_filt", "j_max_cmd_filt": "j_max_filt"}
 AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
@@ -322,13 +328,14 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "dt_ant_ctrl", "T_rec",
                "v_avg", "v_min", "passed", "t_pass",
                "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
-               "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev")
+               "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev",
+               "j_avg_filt_ev", "j_max_filt_ev", "T_rec_ev")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max",
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
     "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
     "settled_before_trigger", "t_pred_minus_trigger",
-    "gap_err_max", "gap_err_avg")
+    "gap_err_max", "gap_err_avg", "min_bumper_gap_sublv_ev")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
@@ -962,6 +969,10 @@ def collect_run(policy, group, run_dir, window_s=None):
     # 충돌도 같은 창으로 세어 컷인과 무관한 뒤쪽 경로주행 충돌을 뺀다.
     # T_rec 은 이미 t_cross 기준이고 gap_err_* 는 [t_trigger-1 s, t_out] 로 따로 좁아
     # 이벤트판이 따로 없다.
+    row["j_avg_filt_ev"] = row["j_avg_filt"]
+    row["j_max_filt_ev"] = row["j_max_filt"]
+    row["T_rec_ev"] = row["T_rec"]
+    row["min_bumper_gap_sublv_ev"] = row.get("min_bumper_gap_sublv")
     row["delta_max_ev"] = row["delta_max"]
     row["delta_avg_ev"] = row["delta_avg"]
     row["min_bumper_gap_ev"] = row["min_bumper_gap"]
@@ -981,6 +992,36 @@ def collect_run(policy, group, run_dir, window_s=None):
                                         if lead_ev.any() else None)
             row["v_avg_ev"] = float(np.mean(ego_v[ev]))
             row["v_min_ev"] = float(np.min(ego_v[ev]))
+            sub = tracks.get(next((k for k in data if k.startswith(
+                "target_lead_after_cutout")), None))
+            if sub is not None:
+                s_sub, x_sub, lane_sub = sub
+                m = (ev & (lane_sub == ego_lane_id)
+                     & (np.abs(x_sub - ego_x) <= LANE_HALF_WIDTH) & (s_sub > ego_s))
+                row["min_bumper_gap_sublv_ev"] = (
+                    float(np.min(s_sub[m] - ego_s[m]) - VEH_LEN) if m.any() else None)
+        # 실측 0.2 s 대역 저크의 이벤트판. accel 은 첫 샘플을 버리고 만들므로
+        # jerk_f[k] 의 시각은 t[1+width+k] 다. 중간에 결측이 있어 길이가 어긋나면
+        # 정렬을 믿을 수 없으니 창 전체 값을 그대로 둔다.
+        if jerk_f.size and accel.size == len(steps) - 1:
+            t_jf = t[1 + width:1 + width + jerk_f.size]
+            ev_jf = (t_jf >= lo) & (t_jf <= hi)
+            if ev_jf.any():
+                row["j_avg_filt_ev"] = float(np.mean(jerk_f[ev_jf]))
+                row["j_max_filt_ev"] = float(np.max(jerk_f[ev_jf]))
+        # T_rec 의 이벤트판: 회복을 창 끝이 아니라 t_trigger+9 s 에서 자른다.
+        if t_cross is not None:
+            i_cross = int(np.searchsorted(t, t_cross))
+            hold = max(1, int(round(REC_HOLD_S / dt)))
+            keep = t[i_cross:] <= hi
+            ok = (delta[i_cross:] == 0.0) & keep
+            row["T_rec_ev"] = None
+            if delta[i_cross] == 0.0:
+                row["T_rec_ev"] = 0.0
+            else:
+                i_ok = _first_run_start(ok, hold)
+                if i_ok is not None:
+                    row["T_rec_ev"] = round(float(t[i_cross + i_ok]) - t_cross, 3)
         pairs_ev, ego_hit_ev = set(), False
         for e in data.get("_collision_log", []):
             ts = float(e.get("time_s", 0.0))
@@ -1136,7 +1177,8 @@ def write_event_tex(path, agg):
              "% a_avg_ev, a_min_ev, j_avg, j_max (0.2 s 대역 명령 저크), j_avg 원시,\n"
              "% delta_max_ev, delta_avg_ev, min_bumper_gap_ev, v_avg_ev, v_min_ev, dt_ant",
              "% 표의 j_*_cmd_filt 은 같은 식이되 런 전체 평균이라 정상 추종 구간이 지배한다."]
-    groups = sorted({k[0] for k in agg if agg[k]["a_avg_ev"][0] is not None})
+    groups = sorted({k[0] for k in agg if agg[k]["a_avg_ev"][0] is not None
+                     and not is_cutout_group(k[0])})
     for gi, group in enumerate(groups):
         cells = [k for k in agg if k[0] == group and agg[k]["a_avg_ev"][0] is not None]
         lines.append("")
@@ -1145,35 +1187,29 @@ def write_event_tex(path, agg):
                         else SCENARIO_LABEL.get(group, group), group))
         for key in cells:
             stats = agg[key]
-            vals = [fmt(stats[m][0]) for m in TEX_METRICS_EVENT]
+            vals = [fmt(stats[EV_OF.get(m, m)][0]) for m in TEX_METRICS]
             lines.append(" & %s & %s \\\\ %% n=%d"
                          % (stats["_label"], " & ".join(vals), stats["_n_runs"]))
         lines.append("\\midrule" if gi < len(groups) - 1 else "\\bottomrule")
     open(str(path), "w").write("\n".join(lines) + "\n")
 
 
-def markdown_table_event(agg):
-    """이벤트 구간 [t_trigger-5 s, t_trigger+9 s] 만 자른 지표."""
-    head = ("| 시나리오 | 제어기 | n | a_avg | a_min | j_avg 대역 | j_max 대역 "
-            "| j_avg 원시 | δ_max | δ_avg | 최소범퍼간격 | v_avg | v_min | Δt_ant "
-            "| ego충돌 |")
-    lines = [head, "|" + "---|" * 15]
-    for (group, _policy), stats in agg.items():
-        if stats["a_avg_ev"][0] is None:
-            continue
-        cells = []
-        for metric in TEX_METRICS_EVENT:
-            mean, std, n = stats[metric]
-            cells.append("-" if mean is None
-                         else "%.2f ± %.2f%s" % (mean, std, "" if n == stats["_n_runs"]
-                                                 else " (n=%d)" % n))
-        lines.append("| %s | %s | %d | %s | %d |"
-                     % (group, stats["_label"], stats["_n_runs"], " | ".join(cells),
-                        stats["_ego_collisions_ev"]))
-    return "\n".join(lines)
+def _cell(stats, metric, event):
+    """전체구간/이벤트 구간 공통 셀. event 면 같은 열의 이벤트판을 읽는다."""
+    key = EV_OF.get(metric, metric) if event else metric
+    mean, std, n = stats[key]
+    cell = ("-" if mean is None
+            else "%.2f ± %.2f%s" % (mean, std, "" if n == stats["_n_runs"]
+                                    else " (n=%d)" % n))
+    raw = RAW_OF_FILT.get(metric)
+    if raw is not None:
+        raw_mean = stats[EV_OF.get(raw, raw) if event else raw][0]
+        if raw_mean is not None:
+            cell += " (%.2f)" % raw_mean
+    return cell
 
 
-def markdown_table_cutout(agg):
+def markdown_table_cutout(agg, event=False):
     head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 명령대역(실측대역) | j_max 명령대역(실측대역) "
             "| Δt_ant | gap오차_max | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
             "| subLV 최소간격 | ego충돌 | LV-subLV접촉 |")
@@ -1181,46 +1217,30 @@ def markdown_table_cutout(agg):
     for (group, _policy), stats in agg.items():
         if not is_cutout_group(group):
             continue
-        cells = []
-        for metric in TEX_METRICS_CUTOUT:
-            mean, std, n = stats[metric]
-            cell = ("-" if mean is None
-                    else "%.2f ± %.2f%s" % (mean, std, "" if n == stats["_n_runs"]
-                                            else " (n=%d)" % n))
-            raw = RAW_OF_FILT.get(metric)
-            if raw is not None and stats[raw][0] is not None:
-                cell += " (%.2f)" % stats[raw][0]
-            cells.append(cell)
+        cells = [_cell(stats, m, event) for m in TEX_METRICS_CUTOUT]
         for metric in ("t_out_minus_trigger", "gap_at_trigger",
                        "settled_before_trigger", "delta_max", "min_bumper_gap_sublv"):
-            mean = stats[metric][0]
+            mean = stats[EV_OF.get(metric, metric) if event else metric][0]
             cells.append("-" if mean is None else "%.2f" % mean)
         lines.append("| %s | %s | %d | %s | %d | %d |"
                      % (group, stats["_label"], stats["_n_runs"], " | ".join(cells),
-                        stats["_ego_collisions"], stats["_tv_lead_contacts"]))
+                        stats["_ego_collisions_ev" if event else "_ego_collisions"],
+                        stats["_tv_lead_contacts"]))
     return "\n".join(lines)
 
 
-def markdown_table(agg):
+def markdown_table(agg, event=False):
     head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 명령대역(실측대역) | j_max 명령대역(실측대역) "
             "| δ_max | δ_avg | Δt_ant | T_rec | ego충돌 | TV-앞차접촉 |")
     lines = [head, "|" + "---|" * 12]
     for (group, _policy), stats in agg.items():
         if is_cutout_group(group):
             continue
-        cells = []
-        for metric in TEX_METRICS:
-            mean, std, n = stats[metric]
-            cell = ("-" if mean is None
-                    else "%.2f ± %.2f%s" % (mean, std, "" if n == stats["_n_runs"]
-                                            else " (n=%d)" % n))
-            raw = RAW_OF_FILT.get(metric)
-            if raw is not None and stats[raw][0] is not None:
-                cell += " (%.2f)" % stats[raw][0]
-            cells.append(cell)
+        cells = [_cell(stats, m, event) for m in TEX_METRICS]
         lines.append("| %s | %s | %d | %s | %d | %d |"
                      % (group, stats["_label"], stats["_n_runs"], " | ".join(cells),
-                        stats["_ego_collisions"], stats["_tv_lead_contacts"]))
+                        stats["_ego_collisions_ev" if event else "_ego_collisions"],
+                        stats["_tv_lead_contacts"]))
     return "\n".join(lines)
 
 
@@ -1377,8 +1397,11 @@ def main():
         print("\ncut-out:")
         print(markdown_table_cutout(agg))
     if has_event:
-        print("\n이벤트 구간 [t_trigger-5 s, t_trigger+9 s]:")
-        print(markdown_table_event(agg))
+        print("\n이벤트 구간 [t_trigger-5 s, t_trigger+9 s] — 열은 위 표와 같다:")
+        print(markdown_table(agg, event=True))
+        if has_cutout:
+            print("\ncut-out (이벤트 구간):")
+            print(markdown_table_cutout(agg, event=True))
     bad = [r for r in rows if not r["valid"]]
     if bad:
         print("\n제외 %d런:" % len(bad))
