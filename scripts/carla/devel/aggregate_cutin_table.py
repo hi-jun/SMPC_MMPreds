@@ -308,8 +308,12 @@ SWEEP_PARAMS = ("ego_speed", "target_speed", "lane_change_distance",
 TEX_METRICS = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "delta_max", "delta_avg",
                "dt_ant", "T_rec")
 TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
+# gap_err_max 는 절댓값이라 부호 두 방향이 한 열에 섞인다: 뒤처져도 붙어도 같은
+# 크기로 찍혀, 안전거리를 일부러 완화하는 정책과 그냥 못 따라가는 정책이 구분되지
+# 않는다(2026-09-10, 05: SCC 7.17 은 전부 뒤처짐, Proposed 7.55 는 전부 파고듦).
+# 표는 분해한 두 열을 쓴다.
 TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "dt_ant",
-                      "gap_err_max", "v_avg")
+                      "gap_err_short_max", "gap_err_excess_max", "v_avg")
 # 이벤트 구간 [t_trigger-5 s, t_trigger+9 s] 만 자른 표
 # 이벤트 구간 표는 전체구간 표와 **같은 열**을 쓴다. 여기 없는 열(dt_ant,
 # t_out_minus_trigger, gap_at_trigger, settled_before_trigger, gap_err_max)은
@@ -1153,9 +1157,12 @@ def write_tex(path, agg):
 
 def write_cutout_tex(path, agg):
     lines = ["% aggregate_cutin_table.py 자동 생성 — table_cutout.tex 열 순서 그대로",
-             "% a_avg, j_avg, j_max, dt_ant, v_avg (셀 평균; subLV 행은 트리거 17 m + 13 m 합산)",
+             "% a_avg, j_avg, j_max, dt_ant, gap부족_max, gap초과_max, v_avg",
+             "% (셀 평균; subLV 행은 트리거 17 m + 13 m 합산)",
              "% j_avg/j_max 는 **대역 제한 명령 저크**(accel_cmd 0.2 s 대역 후 Δ/Δt),",
-             "% dt_ant = t_out - t_onset (선제성 없으면 0.00), v_avg 는 [t_trigger, 창끝] 평균."]
+             "% dt_ant = t_out - t_onset (선제성 없으면 0.00), v_avg 는 [t_trigger, 창끝] 평균.",
+             "% gap부족/초과 = 안전거리 안으로 들어간 쪽 / 뒤처진 쪽의 최대치. 합쳐서 재면",
+             "% 완화해서 붙는 정책과 못 따라가는 정책이 같은 값으로 찍힌다."]
     groups = sorted({k[0] for k in agg if is_cutout_group(k[0])})
     for gi, group in enumerate(groups):
         cells = [k for k in agg if k[0] == group]
@@ -1211,9 +1218,9 @@ def _cell(stats, metric, event):
 
 def markdown_table_cutout(agg, event=False):
     head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 명령대역(실측대역) | j_max 명령대역(실측대역) "
-            "| Δt_ant | gap오차_max | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
-            "| subLV 최소간격 | ego충돌 | LV-subLV접촉 |")
-    lines = [head, "|" + "---|" * 16]
+            "| Δt_ant | gap부족_max | gap초과_max | v_avg | t_out-t_trig | gap@trig "
+            "| 정상상태 | δ_max | subLV 최소간격 | ego충돌 | LV-subLV접촉 |")
+    lines = [head, "|" + "---|" * 17]
     for (group, _policy), stats in agg.items():
         if not is_cutout_group(group):
             continue
