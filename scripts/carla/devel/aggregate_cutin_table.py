@@ -333,7 +333,8 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "v_avg", "v_min", "passed", "t_pass",
                "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
                "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev",
-               "j_avg_filt_ev", "j_max_filt_ev", "T_rec_ev")
+               "j_avg_filt_ev", "j_max_filt_ev", "T_rec_ev",
+               "j_at_limit", "j_at_limit_ev")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max",
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
@@ -791,6 +792,15 @@ def collect_run(policy, group, run_dir, window_s=None):
     cmd_jerk = np.abs(np.array(_finite([s.get("command_jerk") for s in steps])[1:]))
     row["j_avg_cmd"] = float(np.mean(cmd_jerk)) if cmd_jerk.size else None
     row["j_max_cmd"] = float(np.max(cmd_jerk)) if cmd_jerk.size else None
+    # 명령 저크가 한계에 붙어 있던 시간 비율. j_max 는 컷인에서 전 셀이 한계에
+    # 닿아(원시 j_max 가 4 정책 18/18 셀 모두 5.00) **검열된 지표**라 정책을 못
+    # 가른다. 붙어 있던 비율은 가른다: 컷인 aggressive 에서 SCC 12.4 % · LSTM 12.6 %
+    # 대 STDAN 7.9 % · Proposed 9.6 % (2026-09-10). 표 열은 아직 안 바꿨고 CSV 에만
+    # 낸다 -- 논문 표에 j_max 대신 이걸 쓸지는 따로 정할 것.
+    lim = np.array(_finite([s.get("command_jerk_limit") for s in steps]), dtype=float)
+    lim = float(np.median(lim)) if lim.size else float("nan")
+    row["j_at_limit"] = (float(np.mean(cmd_jerk >= 0.95 * lim))
+                         if cmd_jerk.size and np.isfinite(lim) and lim > 0 else None)
     cmd_accel = np.array(_finite([s.get("accel_cmd") for s in steps])[1:])
     row["a_avg_cmd"] = float(np.mean(np.abs(cmd_accel))) if cmd_accel.size else None
     row["a_min_cmd"] = float(np.min(cmd_accel)) if cmd_accel.size else None
@@ -944,6 +954,7 @@ def collect_run(policy, group, run_dir, window_s=None):
     # 차이라 t[k+w] 부근이 중심이다.
     row["a_avg_ev"] = row["a_avg_cmd"]
     row["a_min_ev"] = row["a_min_cmd"]
+    row["j_at_limit_ev"] = row["j_at_limit"]
     row["j_avg_cmd_ev_filt"] = row["j_avg_cmd_filt"]
     row["j_max_cmd_ev_filt"] = row["j_max_cmd_filt"]
     if row.get("t_trigger") is not None and len(steps) == t.size:
@@ -956,6 +967,8 @@ def collect_run(policy, group, run_dir, window_s=None):
         if cj.size:
             row["j_avg_cmd_ev"] = float(np.mean(cj))
             row["j_max_cmd_ev"] = float(np.max(cj))
+            if np.isfinite(lim) and lim > 0:
+                row["j_at_limit_ev"] = float(np.mean(cj >= 0.95 * lim))
         ev_cmd = (t >= lo) & (t <= hi)
         if ev_cmd.any():
             row["a_avg_ev"] = float(np.mean(np.abs(cmd_full[ev_cmd])))
