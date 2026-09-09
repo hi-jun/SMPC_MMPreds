@@ -17,6 +17,13 @@ GAIN_LIMITS = (0.5, 2.0)
 #: Samples of history averaged for the measured speed.  One step is the
 #: tracker's own quantisation; three is still well inside a lane change.
 SPEED_SAMPLES = 3
+#: Predicted steps averaged for the anchor.  The gain has to be read off the
+#: *start* of the horizon, not its mean: a target that the model predicts will
+#: slow down has a mean speed below its current one, and matching the mean to
+#: the measurement then stretches the whole horizon and cancels the predicted
+#: deceleration.  Five steps is 0.5 s -- near enough to the start to leave the
+#: profile alone, long enough to average out the decoder's step noise.
+ANCHOR_STEPS = 5
 
 
 class LSTMVelACCAdapter(LSTMACCAdapter):
@@ -38,6 +45,13 @@ class LSTMVelACCAdapter(LSTMACCAdapter):
     defect rather than a prediction one, and left alone it costs the LSTM
     baseline far more than its trajectory quality does -- it lags every lead
     and holds a gap error the controller cannot close.
+
+    The gain is read off the first 0.5 s of the horizon, not its mean.  Matching
+    the mean makes a predicted deceleration disappear -- the mean of a slowing
+    target is below its current speed, so the gain stretches the whole horizon
+    to compensate -- and that cost the cut-in cells their lead time when the
+    first version anchored on ``disp[-1]`` (delta_max 37.9 -> 50.2 %, dt_ant
+    0.68 -> 0.28 s in 01_cutin_normal, 2026-09-09).
 
     The anchor uses only the speed a tracker already measures now, never the
     future the model is being asked for, so it is not oracle information: any
@@ -67,8 +81,8 @@ class LSTMVelACCAdapter(LSTMACCAdapter):
         measured = self._measured_speed(track)
         if measured is None or measured <= 0.1:
             return 1.0
-        horizon_s = disp_ft.shape[0] * self.dt
-        predicted = float(np.linalg.norm(disp_ft[-1])) * FT2M / horizon_s
+        steps = min(int(ANCHOR_STEPS), disp_ft.shape[0])
+        predicted = float(np.linalg.norm(disp_ft[steps - 1])) * FT2M / (steps * self.dt)
         if predicted <= 0.1:
             return 1.0
         return float(np.clip(measured / predicted, *GAIN_LIMITS))
