@@ -76,29 +76,10 @@ class IdealLongitudinalActuator:
     ``set_target_velocity`` is applied before the physics step, which then
     moves the speed by whatever the tyres and drag do within the tick.  The
     difference between the speed set last tick and the speed measured now is
-    that per-tick effect, and the value it had **one tick earlier** is added
-    back in advance so the measured speed follows ``v += a*dt``.
-
-    The compensation predicts the *next* tick's loss, so the estimator has to
-    match the disturbance it is predicting.  Feeding this tick's loss straight
-    back sustains a two-tick alternation once excited, and the two-tick mean
-    used until 2026-09-10 only halved it: for a loss ``e_k = e + (-1)^k d``
-    the mean is flat at ``e`` while the next tick's loss is ``e - (-1)^k d``,
-    so ``d`` is passed through undamped every tick.  The same-phase value
-    ``e_{k-1}`` equals ``e_{k+1}`` for that disturbance and cancels it
-    exactly.  Numerically, against a +/-0.02 m/s two-tick disturbance with
-    0.02 m/s of drag: no compensation 7.98 m/s (drag uncompensated), one-tick
-    feedback 0.040 m/s of residual ripple, two-tick mean 0.020, same-phase
-    0.000; with no alternating component both the mean and the same-phase
-    value hold the speed exactly, and on an ``a = 1 m/s^2`` ramp the
-    same-phase value tracks 0.0500 m/s per tick against the mean's 0.0507.
-    Measured cause: a cut-in target at 11 m/s still carried a +0.055/-0.028
-    two-tick saw-tooth under the mean (sign alternating on 92-100 % of ticks,
-    |dv| 0.042 m/s) where the same target at 13 m/s was monotone -- the
-    residue of the reference-snap limit cycle that 3a00ce0 fixed at 13 m/s
-    but not at 11.  ``08bbaf2`` had answered the same ripple at the predictor
-    input with a 0.2 s acceleration feature; that belongs here, at the
-    vehicle, not in a feature the model was not trained on.  Only the
+    that per-tick effect; the mean of its last two values is added back in
+    advance so the measured speed follows ``v += a*dt`` (a two-tick mean
+    because the effect alternates with the speed once excited, and feeding
+    one tick's loss straight back sustains that alternation).  Only the
     component along the heading is pinned: the lateral velocity is left as
     the tyres made it, so steering turns the vehicle as before.  The callers
     apply no throttle: with the engine driving the wheels a pinned vehicle
@@ -128,7 +109,7 @@ class IdealLongitudinalActuator:
     def update(self, a_des):
         dt, heading, v_lon, v_lat = self._longitudinal_state()
         eaten = 0.0 if self._v_set_prev is None else self._v_set_prev - v_lon
-        compensation = self._eaten_prev   # 같은 위상 1스텝 예측: e_{k-1} == e_{k+1}
+        compensation = 0.5 * (eaten + self._eaten_prev)
         self._eaten_prev = eaten
         v_next = max(0.0, v_lon + float(a_des) * dt + compensation)
         target = v_next * heading + v_lat
