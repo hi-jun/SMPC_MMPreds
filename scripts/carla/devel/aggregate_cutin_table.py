@@ -226,9 +226,14 @@ LV 와의 간격이 얼마나 어긋나는가
   대비 −4.2 s 라 재려던 기동의 앞부분이 창 밖이었다. 대신 정속주행이 4 s 더
   섞이므로 **평균 열(a_avg_ev / j_avg_cmd_ev / delta_avg_ev)은 낮아진다** —
   −1 s 로 잰 이전 표와 직접 비교하지 말 것.
-  cut-out 의 gap_err_* 는 이 상수를 쓰지 않는다(GAP_ERR_PRE_S = −1 s). 거기를
-  넓히면 트리거 전 정속주행이 들어와 전 정책의 excess 가 함께 부풀어, 정책 차이가
-  아니라 시나리오 초기 간격을 재게 된다.
+  cut-out 의 gap_err_* 도 같은 상수를 쓴다. 넓혀도 **표에 쓰는 gap_err_max /
+  gap_err_excess_max 는 사실상 안 변한다** — 최댓값은 언제나 트리거 이후 기동에서
+  나오고, 4 정책 3 그룹 모두 순위가 같다(06/07 은 소수 둘째 자리까지 동일, SCC 만
+  +0.2~0.5). 대신 **평균 gap_err_signed_avg 는 절반으로 줄고 순위가 뒤집힌다** —
+  오차 0 인 정속주행이 평균에 섞이는데, 선제 감속으로 트리거 뒤에 오차를 많이 낸
+  정책일수록 더 많이 깎인다(STDAN 06: 14.69 → 6.13, SCC 는 6.06 → 6.10 로 거의
+  그대로). −1 s 에서는 SCC < Proposed < STDAN, −5 s 에서는 Proposed < SCC ≈ STDAN
+  이다. 평균 열을 쓸 거면 창을 의식하고 고를 것.
   a_avg_ev  = 그 창의 |accel_cmd| 평균,  a_min_ev = 최솟값(최대 제동).
   j_avg_cmd_ev_filt / j_max_cmd_ev_filt = 그 창의 0.2 s 대역 명령 저크
     평균/최대. 표의 j_*_cmd_filt 은 같은 식이되 **런 전체** 평균이라 기동이
@@ -289,10 +294,6 @@ EVENT_PRE_S = -5.0    # 이벤트 구간: 트리거 5 s 전부터 (2026-09-10, -
                       # 정작 재려던 기동의 앞부분이 빠졌다. 대신 정속주행 4 s 가
                       # 섞여 들어와 평균 열(j_avg_ev / delta_avg_ev)은 낮아진다.
 EVENT_POST_S = 9.0    # 트리거 9 s 후까지 (기동 + 회복)
-GAP_ERR_PRE_S = -1.0  # cut-out gap_err 창의 시작. 이벤트 창과 같은 상수를 쓰다가
-                      # 2026-09-10 에 분리했다. 여기를 -5 로 넓히면 트리거 전
-                      # 정속주행이 들어와 전 정책의 excess 가 함께 부풀어, 정책 간
-                      # 비교가 아니라 시나리오 초기 간격을 재게 된다.
 
 CUTOUT_CONTACT_PRE_S = 0.5
 CUTOUT_CONTACT_POST_S = 2.0
@@ -628,7 +629,7 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
     if lv_key in tracks and trig_abs is not None:
         s_lv, x_lv, lane_lv = tracks[lv_key]
         lead = ((lane_lv == ego_lane_id) & (np.abs(x_lv - ego_x) <= LANE_HALF_WIDTH)
-                & (s_lv > ego_s) & (t >= trig_abs + GAP_ERR_PRE_S))
+                & (s_lv > ego_s) & (t >= trig_abs + EVENT_PRE_S))
         if out_abs is not None:
             lead &= t <= out_abs
         if lead.any():
