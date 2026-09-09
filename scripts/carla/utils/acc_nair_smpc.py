@@ -208,13 +208,17 @@ def original_nair_acc_config(
     closed loop barely moves (aref0_probe_20260909, 12 runs), so the value is
     not delicate.
 
-    ``jerk_limit`` deviates from that source's 1.5 and is raised to 10.  At 1.5
+    ``jerk_limit`` deviates from that source's 1.5 and is raised to 5.  At 1.5
     the command needs 2 s to reach ``a_min``, which is longer than the 1.0-1.3 s
     time-to-collision a +6 m/s cut-in leaves: every policy collided in those
-    cells for a reason that has nothing to do with how well it predicts.  The
-    comfort metrics are reported on the commanded jerk, which the same limit
-    bounds, so the looser limit widens the range the controllers can differ in
-    rather than hiding the difference.
+    cells for a reason that has nothing to do with how well it predicts.  At 5
+    it takes 0.6 s, half that time-to-collision.  It was 10 (0.3 s) until
+    2026-09-09; 10 is an emergency-braking rate rather than an ACC one, and the
+    limit was doing nothing for comfort anyway -- over the 240-run sweep the
+    per-tick command jerk sits at a median of 0.04-0.17 and a 90th percentile
+    of 0.43-1.24, and the limit bound on 0.2-1.0% of ticks, all inside the
+    cut-in.  Normal following is shaped by ``r_jerk``, not by this bound, so
+    lowering it costs nothing there and only paces the emergency response.
     """
     tightening = 1.64
     return NairACCConfig(
@@ -225,7 +229,7 @@ def original_nair_acc_config(
         v_max=20.0,
         a_min=-3.0,
         a_max=2.0,
-        jerk_limit=10.0,
+        jerk_limit=5.0,
         epsilon=1.0 - norm.cdf(tightening),
         fixed_risk_level=1.0 - norm.cdf(tightening),
         eta_max=0.49,
@@ -694,6 +698,22 @@ class OldACCReferenceAdapter:
             if planned_v.shape[0] != horizon + 1:
                 planned_v = np.full(horizon + 1, v_ego)
 
+        # Where the ego is expected to be at step k, for the blend below.  It
+        # used to be ``base_s_ref``, the free-running ramp, which made the blend
+        # erase its own signal: the ramp spends the usable gap inside the
+        # horizon, so a lead-limited speed that should say "close the gap"
+        # decays back to the lead's speed by the horizon end (measured 2026-09-09
+        # on SCC, usable gap 1.49 m at step 0 down to 0.6 m at step 5, blend
+        # 0.064 -> 0.027).  The plan is the honest answer to "where will the ego
+        # be", and ``safe_gap`` below already uses ``planned_v`` for the time
+        # gap, so the two now agree.  Only the shape of the previous plan is
+        # used; step 0 is re-anchored to the measured position so a stale plan
+        # cannot accumulate an offset.
+        planned_s = np.empty(horizon + 1)
+        planned_s[0] = s_ego
+        for step in range(horizon):
+            planned_s[step + 1] = planned_s[step] + planned_v[step] * dt
+
         for mode in range(num_modes):
             for step in range(horizon + 1):
                 if not lead_prediction.active_mask[mode, step]:
@@ -723,7 +743,7 @@ class OldACCReferenceAdapter:
                 v_ref[mode, step] = min(
                     v_ref[mode, step],
                     self._lead_limited_speed(
-                        lead_s, lead_v, safe_gap, base_s_ref[step], base_v_ref[step]),
+                        lead_s, lead_v, safe_gap, planned_s[step], base_v_ref[step]),
                 )
 
         v_ref = np.clip(v_ref, self.config.v_min, self.config.v_max)

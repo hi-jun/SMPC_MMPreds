@@ -54,6 +54,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
 )
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 from predictor.lstm.acc_adapter import LSTMACCAdapter
+from predictor.lstm_vel.acc_adapter import LSTMVelACCAdapter
 
 
 class ACCNairSMPCAgent(object):
@@ -157,8 +158,16 @@ class ACCNairSMPCAgent(object):
         self.stdan_history_secs = None
         self.stdan_history_closeness_eps = None
         self.agent_history = None
-        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm"):
-            if self.predictor_type == "lstm":
+        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm", "lstm_vel"):
+            if self.predictor_type == "lstm_vel":
+                self.stdan_predictor = LSTMVelACCAdapter(
+                    ckpt_path=os.getenv("ACC_NAIR_LSTM_VEL_CKPT",
+                                        "predictor/lstm_vel/ckpt/best_model.pt"),
+                    history=3.0,
+                    future=5.0,
+                    dt=0.1,
+                )
+            elif self.predictor_type == "lstm":
                 self.stdan_predictor = LSTMACCAdapter(
                     ckpt_path=os.getenv("ACC_NAIR_LSTM_CKPT", "predictor/lstm/ckpt/best_model.pt"),
                     history=3.0,
@@ -539,7 +548,7 @@ class ACCNairSMPCAgent(object):
     def _prediction_bundle(self, s_ego, speed):
         if self.predictor_type == "constant_velocity_lead":
             return self._constant_velocity_lead_prediction_bundle(s_ego, speed)
-        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm"):
+        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm", "lstm_vel"):
             bundle = self._stdan_prediction_bundle(s_ego, speed)
             if bundle is not None:
                 return self._maybe_collapse_bundle_to_best_mode(bundle)
@@ -1121,6 +1130,8 @@ class ACCNairSMPCAgent(object):
         config = str(smpc_config)
         if "const_lead" in config or "constant_lead" in config:
             return "constant_velocity_lead"
+        if "lstm_vel" in config:
+            return "lstm_vel"
         if "lstm" in config:
             return "lstm"
         if "stdan_vel" in config:
