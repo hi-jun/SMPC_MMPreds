@@ -418,7 +418,22 @@ class STDAN3IntACCAdapter:
 
         Symmetric on purpose, so one number explains the whole effect: the lag
         also delays a rising cut-in probability, and that cost shows up
-        directly in ``dt_ant``.  Read the two together before picking a tau.
+        directly in ``dt_ant``.
+
+        **Measured and not adopted (2026-09-10).**  ``intent_lpf0.3`` on the
+        Proposed policy, 34 runs (``cutin_lpf_20260910`` /
+        ``cutout_lpf_20260910``) against the same cells without it: event-window
+        jerk got *worse* in three of the four groups -- j_avg +0.036 / j_max
+        +0.034 on 02_cutin_aggressive, +0.029 / +0.337 on 06, +0.043 / +0.290
+        on 07 -- and only 05's j_max improved (-0.152).  Anticipation cost
+        0.14-0.23 s of dt_ant everywhere.  A smaller tau does not fix a sign:
+        it shrinks the harm and the benefit together.
+
+        The likely reason is that only the probabilities are filtered while the
+        mode trajectories are not, so the weights lag geometry that has already
+        moved and the weighted reference is internally inconsistent; the
+        controller then corrects later and harder.  Left in, off by default, so
+        the negative result is reproducible rather than re-discovered.
         """
         if self.intention_lpf_s <= 0.0:
             return probs
