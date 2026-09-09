@@ -320,7 +320,8 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "j_max_filt", "j_max_cmd", "j_max_cmd_ev", "j_max_cmd_filt", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
                "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "dt_ant_ctrl", "T_rec",
                "v_avg", "v_min", "passed", "t_pass",
-               "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt")
+               "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
+               "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max",
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
@@ -1034,6 +1035,7 @@ def aggregate(rows, group_key=None):
         stats["_n_runs"] = len(sel)
         stats["_collisions"] = sum(1 for r in sel if r.get("collisions_in_window"))
         stats["_ego_collisions"] = sum(1 for r in sel if r.get("ego_collision"))
+        stats["_ego_collisions_ev"] = sum(1 for r in sel if r.get("ego_collision_ev"))
         # cut-out 셀에서는 같은 열이 LV↔subLV 접촉 수를 뜻한다
         stats["_tv_lead_contacts"] = sum(
             1 for r in sel if r.get("tv_lead_contact") or r.get("lv_sublv_contact"))
@@ -1164,8 +1166,9 @@ def markdown_table_event(agg):
             cells.append("-" if mean is None
                          else "%.2f ± %.2f%s" % (mean, std, "" if n == stats["_n_runs"]
                                                  else " (n=%d)" % n))
-        lines.append("| %s | %s | %d | %s |"
-                     % (group, stats["_label"], stats["_n_runs"], " | ".join(cells)))
+        lines.append("| %s | %s | %d | %s | %d |"
+                     % (group, stats["_label"], stats["_n_runs"], " | ".join(cells),
+                        stats["_ego_collisions_ev"]))
     return "\n".join(lines)
 
 
