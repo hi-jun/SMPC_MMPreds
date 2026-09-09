@@ -1108,7 +1108,7 @@ def markdown_table_event(agg):
 
 
 def markdown_table_cutout(agg):
-    head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 필터(원시) | j_max 필터(원시) "
+    head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 명령대역(실측대역) | j_max 명령대역(실측대역) "
             "| Δt_ant | gap오차_max | v_avg | t_out-t_trig | gap@trig | 정상상태 | δ_max "
             "| subLV 최소간격 | ego충돌 | LV-subLV접촉 |")
     lines = [head, "|" + "---|" * 16]
@@ -1136,7 +1136,7 @@ def markdown_table_cutout(agg):
 
 
 def markdown_table(agg):
-    head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 필터(원시) | j_max 필터(원시) "
+    head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 명령대역(실측대역) | j_max 명령대역(실측대역) "
             "| δ_max | δ_avg | Δt_ant | T_rec | ego충돌 | TV-앞차접촉 |")
     lines = [head, "|" + "---|" * 12]
     for (group, _policy), stats in agg.items():
