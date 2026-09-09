@@ -5,7 +5,7 @@ import json
 import math
 import pickle
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import matplotlib
 matplotlib.use("Agg")
@@ -822,7 +822,9 @@ def make_animation(
         scene_equal_aspect: bool = False,
         scene_y_ahead: float = 90.0,
         scene_y_behind: float = 20.0,
-        scene_expand_to_points: bool = False):
+        scene_expand_to_points: bool = False,
+        accel_ylim: Optional[Sequence[float]] = None,
+        speed_ylim: Optional[Sequence[float]] = None):
     summary = _load_summary(input_path)
     steps = _ego_steps(summary)
     if not steps:
@@ -1161,6 +1163,13 @@ def make_animation(
         ax_ctrl.grid(True, alpha=0.2)
         ax_ctrl_2.plot(data["time_s"], data["accel_cmd"], color="#9467bd", label="accel cmd", alpha=0.9)
         ax_ctrl_2.set_ylabel("accel cmd [m/s^2]")
+        # Both control axes autoscale per run, so the same command reads as a
+        # different slope in two panels and the figures cannot be compared side
+        # by side.  Pinning them is the caller's choice: a_min/a_max are -3/2.
+        if accel_ylim is not None:
+            ax_ctrl_2.set_ylim(float(accel_ylim[0]), float(accel_ylim[1]))
+        if speed_ylim is not None:
+            ax_ctrl.set_ylim(float(speed_ylim[0]), float(speed_ylim[1]))
         ax_ctrl_3.plot(data["time_s"], data["acc_maneuver"], color="#111111", linewidth=1.0,
                        alpha=0.75, label=f"{roles['kind']} prob")
         ax_ctrl_3.set_ylim(-0.02, 1.02)
@@ -1330,6 +1339,11 @@ def main():
     )
     parser.add_argument("--fps", type=int, default=12)
     parser.add_argument("--stride", type=int, default=2)
+    parser.add_argument("--accel-ylim", type=float, nargs=2, metavar=("MIN", "MAX"),
+                        help="Pin the accel-cmd axis so figures compare across runs "
+                             "(e.g. -3.2 2.2 for the a_min/a_max range).")
+    parser.add_argument("--speed-ylim", type=float, nargs=2, metavar=("MIN", "MAX"),
+                        help="Pin the speed/gap axis the same way.")
     parser.add_argument(
         "--scene-x-window",
         type=float,
@@ -1376,6 +1390,8 @@ def main():
         scene_y_ahead=args.scene_y_ahead,
         scene_y_behind=args.scene_y_behind,
         scene_expand_to_points=args.scene_expand_to_points,
+        accel_ylim=args.accel_ylim,
+        speed_ylim=args.speed_ylim,
     ))
     if not args.skip_actual_trajectory:
         if args.actual_output is None:

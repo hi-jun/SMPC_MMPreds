@@ -11,6 +11,16 @@ resolved_config.json, metrics.json, summary.json}
 채점 구간(window) 과 시간 기준 t0
   t0 = ego policy_log.steps[0].time_s (= state_trajectory 첫 샘플 시각, 제어 시작),
   창 = [t0, t0 + sweep_params.max_sim_time_s (기본 25 s)] = 메인 루프 전체.
+  ``--window-s`` 로 더 짧게 자를 수 있다. **컷인 그룹은 17.5 (절대 시각 약 32 s)
+  를 쓴다**: 컷인이 끝난 뒤 ego 가 CARLA 경로를 따라 계속 달리며 추적 리드가 옆
+  차선 차량으로 넘어가고, 범퍼 간격이 단조 붕괴하는데 ``accel_cmd`` 는 0 근처에
+  머문다 (01/cutin_0014, 절대 21.5 s 부터 간격 19.9 -> -6.3 m, delta 135 %).
+  그 구간의 충돌은 시나리오와 무관한 주행 아티팩트이지 제어 실패가 아니다
+  (사용자 확인, 2026-09-09) -- 이 시나리오가 재려는 것은 컷인 근처뿐이다.
+  자르면 SCC aggressive 의 충돌 런이 5 -> 3 이 되는데, 줄어든 2 건이 그것이다.
+  delta_max / min_bumper_gap / dt_ant / T_rec 은 창을 잘라도 사실상 불변이고
+  (컷인 응답이 32 s 안에 끝난다), j_avg / delta_avg 는 평균이라 뒤쪽의 조용한
+  정상주행이 빠지면서 18~29 % 올라간다.
   충돌 판정과 모든 상대시각(t_trigger/t_cross/t_onset/t_pass)도 같은 t0 를 쓴다.
   **`_spawn_settle_log.sim_elapsed_s + _cruise_warmup_log.sim_elapsed_s` 를 t0 로
   쓰면 안 된다.** CARLA 의 time_s 는 서버 경과 시계라 시나리오 스폰 전에 이미 ~5 s
@@ -643,7 +653,7 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
             row[key] = round(row[key], 4)
 
 
-def collect_run(policy, group, run_dir):
+def collect_run(policy, group, run_dir, window_s=None):
     row = collections.OrderedDict()
     row["policy"] = policy
     row["policy_label"] = policy_label(policy)
@@ -676,7 +686,14 @@ def collect_run(policy, group, run_dir):
     steps = ego["policy_log"]["steps"]
     all_t = np.array([s["time_s"] for s in steps], dtype=float)
     w0 = float(all_t[0])
+    # 창 상한. 기본은 스윕이 돈 시간 전체이고, ``window_s`` 로 더 짧게 자를 수
+    # 있다.  컷인 런의 뒤쪽에서 추적 리드가 옆 차선 차량으로 넘어가 범퍼 간격이
+    # 단조 붕괴하는데 ``accel_cmd`` 는 0 근처에 머무는 구간이 있다(2026-09-09,
+    # 01/cutin_0014 에서 t 절대 21.5 s 부터 간격 19.9 -> -6.3 m, delta 135 %).
+    # 제어 결과가 아니라 리드 판정 아티팩트라 지표를 오염시킨다.
     w1 = w0 + float(sweep.get("max_sim_time_s") or DEFAULT_WINDOW_S)
+    if window_s is not None:
+        w1 = min(w1, w0 + float(window_s))
     keep = np.nonzero(all_t <= w1 + 1e-9)[0]
     steps = [steps[i] for i in keep]
     t = all_t[keep]
@@ -1247,6 +1264,9 @@ def main():
     ap.add_argument("root", nargs="?", default=".")
     ap.add_argument("--ego-speeds", default="", help="예: 14,17 (기본: 전부)")
     ap.add_argument("--groups", default="", help="예: 01_cutin_normal (기본: 전부)")
+    ap.add_argument("--window-s", type=float, default=None,
+                    help="채점 창을 제어 시작 이후 이 초수로 자른다 (기본: 스윕 전체 25 s). "
+                         "런마다 t0 가 14.4~14.6 s 라 17.5 는 절대 시각 약 32 s 에 해당한다.")
     args = ap.parse_args()
     root = pathlib.Path(args.root).resolve()
     speeds = [float(v) for v in args.ego_speeds.split(",") if v.strip()]
@@ -1259,7 +1279,7 @@ def main():
             continue  # _discarded_* 같은 보관 디렉터리는 건너뛴다
         if groups and rel[1] not in groups:
             continue
-        row = collect_run(rel[0], rel[1], pkl.parent)
+        row = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s)
         if speeds and row.get("ego_speed") not in speeds:
             continue
         rows.append(row)
