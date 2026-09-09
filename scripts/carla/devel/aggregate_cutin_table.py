@@ -11,19 +11,8 @@ resolved_config.json, metrics.json, summary.json}
 채점 구간(window) 과 시간 기준 t0
   t0 = ego policy_log.steps[0].time_s (= state_trajectory 첫 샘플 시각, 제어 시작),
   창 = [t0, t0 + sweep_params.max_sim_time_s (기본 25 s)] = 메인 루프 전체.
-  ``--window-s`` (제어 시작 기준) 또는 ``--window-abs-s`` (절대 시각) 로 더 짧게
-  자를 수 있고, 둘 다 주면 짧은 쪽이 이긴다.
-  **2026-09-10 부터 모든 시나리오의 표는 ``--window-abs-s 35`` 를 쓴다** (사용자
-  결정). 컷인만 17.5 상대(절대 약 32 s)로 자르던 것을 절대 시각 하나로 통일한
-  것이다. 잘라내려는 것이 절대 시각에 걸린 시나리오 아티팩트라 절대 기준이 맞고,
-  런마다 t0 가 14.4~14.6 s 로 흔들리는 것도 흡수한다. 바꿔도 안전한 것을 확인했다:
-  컷인은 32 → 35 s 로 **넓혀도** 충돌이 돌아오지 않고(3→3, 0→0) δ_max 도 불변,
-  δ_avg 만 희석돼 내려간다. 컷아웃은 39.5 → 35 s 로 **좁혀도** j_max·δ_max·gap 오차가
-  사실상 불변이고 j_avg 평균만 10~15 % 오른다(조용한 꼬리가 빠져서). 순위는 양쪽 다
-  그대로다. ※ 스윕의 ``max_sim_time`` 이 35 s 절대보다 짧으면 그쪽이 먼저 자른다 —
-  ``max-sim-time 19`` 로 돈 런은 절대 33.5 s 에서 끝나므로 평균 열이 1.6 s 만큼 짧은
-  구간을 본다. 최종 표는 한 ``max_sim_time`` 으로 돌린 스윕에서 뽑을 것.
-  컷인을 자르는 이유는 그대로다: 컷인이 끝난 뒤 ego 가 CARLA 경로를 따라 계속 달리며 추적 리드가 옆
+  ``--window-s`` 로 더 짧게 자를 수 있다. **컷인 그룹은 17.5 (절대 시각 약 32 s)
+  를 쓴다**: 컷인이 끝난 뒤 ego 가 CARLA 경로를 따라 계속 달리며 추적 리드가 옆
   차선 차량으로 넘어가고, 범퍼 간격이 단조 붕괴하는데 ``accel_cmd`` 는 0 근처에
   머문다 (01/cutin_0014, 절대 21.5 s 부터 간격 19.9 -> -6.3 m, delta 135 %).
   그 구간의 충돌은 시나리오와 무관한 주행 아티팩트이지 제어 실패가 아니다
@@ -700,7 +689,7 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
             row[key] = round(row[key], 4)
 
 
-def collect_run(policy, group, run_dir, window_s=None, window_abs_s=None):
+def collect_run(policy, group, run_dir, window_s=None):
     row = collections.OrderedDict()
     row["policy"] = policy
     row["policy_label"] = policy_label(policy)
@@ -741,8 +730,6 @@ def collect_run(policy, group, run_dir, window_s=None, window_abs_s=None):
     w1 = w0 + float(sweep.get("max_sim_time_s") or DEFAULT_WINDOW_S)
     if window_s is not None:
         w1 = min(w1, w0 + float(window_s))
-    if window_abs_s is not None:
-        w1 = min(w1, float(window_abs_s))
     keep = np.nonzero(all_t <= w1 + 1e-9)[0]
     steps = [steps[i] for i in keep]
     t = all_t[keep]
@@ -1373,10 +1360,6 @@ def main():
     ap.add_argument("--window-s", type=float, default=None,
                     help="채점 창을 제어 시작 이후 이 초수로 자른다 (기본: 스윕 전체 25 s). "
                          "런마다 t0 가 14.4~14.6 s 라 17.5 는 절대 시각 약 32 s 에 해당한다.")
-    ap.add_argument("--window-abs-s", type=float, default=None,
-                    help="채점 창을 이 **절대** 시각(CARLA 서버 경과 시계)에서 자른다. "
-                         "자르려는 것이 시나리오 아티팩트처럼 절대 시각에 걸린 현상일 때 "
-                         "쓴다. --window-s 와 같이 주면 더 짧은 쪽이 이긴다.")
     args = ap.parse_args()
     root = pathlib.Path(args.root).resolve()
     speeds = [float(v) for v in args.ego_speeds.split(",") if v.strip()]
@@ -1389,8 +1372,7 @@ def main():
             continue  # _discarded_* 같은 보관 디렉터리는 건너뛴다
         if groups and rel[1] not in groups:
             continue
-        row = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s,
-                          window_abs_s=args.window_abs_s)
+        row = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s)
         if speeds and row.get("ego_speed") not in speeds:
             continue
         rows.append(row)
@@ -1409,11 +1391,9 @@ def main():
     has_event = any(r.get("t_trigger") is not None for r in rows)
     if has_event:
         write_event_tex(root / "table_event_rows.tex", agg)
-    note = "aggregate_cutin_table.py %s%s%s%s%s" % (
+    note = "aggregate_cutin_table.py %s%s%s" % (
         root, " --ego-speeds " + args.ego_speeds if speeds else "",
-        " --groups " + args.groups if groups else "",
-        " --window-s %g" % args.window_s if args.window_s is not None else "",
-        " --window-abs-s %g" % args.window_abs_s if args.window_abs_s is not None else "")
+        " --groups " + args.groups if groups else "")
     write_metrics_md(root / "METRICS.md", agg, rows, note)
     print("%d runs (%d valid) -> table_cutin_runs.csv, table_cutin_summary.csv, "
           "table_cutin_rows.tex, %sMETRICS.md in %s\n"
