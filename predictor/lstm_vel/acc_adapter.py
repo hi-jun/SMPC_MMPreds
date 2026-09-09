@@ -29,6 +29,20 @@ SPEED_SAMPLES = 3
 #: likely the jerk limit -- this policy saturates it in all 36 cut-in cells --
 #: than the anchor.
 ANCHOR_STEPS = None
+#: Anchor target as ``(intercept, slope)`` applied to the measured speed:
+#: ``v_target = intercept + slope * v_measured``.  ``(0.0, 1.0)`` anchors to
+#: the measured speed, which is what the baseline ships with.
+#:
+#: ``STDAN_LIKE_SHRINK`` reproduces STDAN's own speed bias instead, so the two
+#: predictors can be compared with the same calibration error rather than one
+#: of them being accidentally the accurate one.  STDAN shrinks a target's speed
+#: toward its training mean: measured over the cut-out sweeps at a 2.4-2.8 s
+#: horizon it predicts 12.11 -> 11.02 m/s (-9.0 %), 11.02 -> 11.24 (+2.0 %) and
+#: 6.17 -> 7.04 (+14.1 %), which is v_pred = 2.641 + 0.730 v_true with a fixed
+#: point at 9.77 m/s.  It is a deliberate de-calibration, for the comparison
+#: only -- never for the baseline the paper reports.
+ANCHOR_TARGET = (0.0, 1.0)
+STDAN_LIKE_SHRINK = (2.641, 0.730)
 
 
 class LSTMVelACCAdapter(LSTMACCAdapter):
@@ -59,8 +73,9 @@ class LSTMVelACCAdapter(LSTMACCAdapter):
     -- and the predicted acceleration ratio are untouched.
     """
 
-    def __init__(self, ckpt_path: Optional[str] = None, **kwargs):
+    def __init__(self, ckpt_path: Optional[str] = None, anchor_target=None, **kwargs):
         super().__init__(ckpt_path=ckpt_path or str(DEFAULT_CKPT), **kwargs)
+        self.anchor_target = tuple(ANCHOR_TARGET if anchor_target is None else anchor_target)
 
     def _run_model(self, tensors) -> np.ndarray:
         velocity_ft_s = np.asarray(super()._run_model(tensors), dtype=np.float64)
@@ -79,6 +94,8 @@ class LSTMVelACCAdapter(LSTMACCAdapter):
         measured = self._measured_speed(track)
         if measured is None or measured <= 0.1:
             return 1.0
+        intercept, slope = self.anchor_target
+        measured = max(float(intercept) + float(slope) * measured, 0.1)
         steps = disp_ft.shape[0] if ANCHOR_STEPS is None else min(int(ANCHOR_STEPS), disp_ft.shape[0])
         predicted = float(np.linalg.norm(disp_ft[steps - 1])) * FT2M / (steps * self.dt)
         if predicted <= 0.1:

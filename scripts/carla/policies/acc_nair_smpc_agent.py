@@ -54,7 +54,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
 )
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 from predictor.lstm.acc_adapter import LSTMACCAdapter
-from predictor.lstm_vel.acc_adapter import LSTMVelACCAdapter
+from predictor.lstm_vel.acc_adapter import STDAN_LIKE_SHRINK, LSTMVelACCAdapter
 
 
 class ACCNairSMPCAgent(object):
@@ -167,6 +167,8 @@ class ACCNairSMPCAgent(object):
                     history=3.0,
                     future=5.0,
                     dt=0.1,
+                    anchor_target=(STDAN_LIKE_SHRINK if "stdanlike" in str(smpc_config)
+                                   else None),
                 )
             elif self.predictor_type == "lstm":
                 self.stdan_predictor = LSTMACCAdapter(

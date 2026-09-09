@@ -157,3 +157,47 @@ class TestLSTMPolicyString(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVelocityAnchorTarget(unittest.TestCase):
+    """The anchor may aim at a speed other than the measured one.
+
+    ``stdanlike`` reproduces STDAN's own shrink-to-the-training-mean bias so
+    the two predictors can be compared with the same calibration error.  It is
+    a de-calibration for the comparison, never the shipped baseline.
+    """
+
+    def _adapter(self, anchor_target):
+        from predictor.lstm_vel.acc_adapter import LSTMVelACCAdapter
+
+        class _NoModel(LSTMVelACCAdapter):
+            def __init__(self, target):
+                self.dt = 0.1
+                self.anchor_target = tuple(target or (0.0, 1.0))
+
+        return _NoModel(anchor_target)
+
+    @staticmethod
+    def _constant_speed(v):
+        track = np.array([[0.0, 0.0], [v * 0.1, 0.0], [2 * v * 0.1, 0.0],
+                          [3 * v * 0.1, 0.0]], dtype=float)
+        disp = np.array([[v * 0.1 * (k + 1) / 0.3048, 0.0] for k in range(50)])
+        return track, disp
+
+    def test_default_anchors_on_the_measured_speed(self):
+        adapter = self._adapter(None)
+        for v in (5.0, 11.0, 17.0):
+            gain = adapter._speed_anchor_gain(*self._constant_speed(v))
+            self.assertAlmostEqual(gain, 1.0, places=3, msg="v=%.1f" % v)
+
+    def test_stdanlike_reproduces_the_measured_stdan_bias(self):
+        from predictor.lstm_vel.acc_adapter import STDAN_LIKE_SHRINK
+        adapter = self._adapter(STDAN_LIKE_SHRINK)
+        # STDAN measured on the cut-out sweeps: +14.1 % at 6.17 m/s and
+        # -9.0 % at 12.11 m/s, i.e. shrink toward a 9.77 m/s fixed point.
+        slow = adapter._speed_anchor_gain(*self._constant_speed(6.2))
+        fast = adapter._speed_anchor_gain(*self._constant_speed(13.0))
+        self.assertGreater(slow, 1.10, "a slow lead is predicted too fast")
+        self.assertLess(fast, 0.95, "a fast lead is predicted too slow")
+        fixed = adapter._speed_anchor_gain(*self._constant_speed(9.77))
+        self.assertAlmostEqual(fixed, 1.0, places=2, msg="fixed point")
