@@ -431,6 +431,11 @@ def chance_cutin_clearance(
     return result
 
 
+#: Smallest standoff factor a departing in-lane lead keeps.  See
+#: ``chance_cutout_clearance``.
+CUTOUT_CLEARANCE_FLOOR = 0.35
+
+
 def chance_cutout_clearance(
     mode_predictions: Sequence[ACCModePrediction],
     relation_to_ego_lane: str,
@@ -453,15 +458,19 @@ def chance_cutout_clearance(
     to 0.11 of its standoff, 24.2 m of required gap down to 2.4 m -- never
     reaches this function.
 
-    The relaxation is close to inert as written.  A departure's probability is
-    already past ``reference_beta`` on the first tick its trajectory leaves
-    (0.654 at t = 10.00 s, 0.765 median over the 79 ticks that follow), so
-    ``min(p, beta_ref)`` saturates and the factor is 1.0 for the whole
-    departure, while the vehicle still has 3.6 s of lateral motion to do.
-    Confidence and lateral overlap are not the same quantity: this factor
-    answers how much the hypothesis is believed, the geometric taper answered
-    how much of the vehicle is still in the lane given that it is true, and the
-    second keeps falling long after the first has saturated.
+    The ``cutout`` mode takes ``beta_j = min(1 - p, beta_ref)`` -- the residual
+    belief that the vehicle *stays* -- floored at ``CUTOUT_CLEARANCE_FLOOR``.
+    Scaling it by its own probability (2026-09-08 to 2026-09-10) was inert: a
+    departure is already past ``reference_beta`` on the first tick its
+    trajectory leaves (0.654 at t = 10.00 s, 0.765 median over the 79 ticks
+    that follow), so ``min(p, beta_ref)`` saturated and the factor was exactly
+    1.0 for the whole departure, while the vehicle still had 3.6 s of lateral
+    motion to do.  It also read the wrong way round: believing a departure more
+    reserved *more* room for it.  ``1 - p`` is the probabilistic stand-in for
+    the geometric overlap taper removed on 2026-09-08 -- not the same quantity
+    (confidence answers how much the hypothesis is believed, overlap answered
+    how much of the car is still in the lane given that it is true) but it does
+    keep falling as the departure proceeds, which the saturated factor did not.
     ``vanish_threshold`` still only drops a negligible ``lk``: a cut-out
     hypothesis that is unlikely keeps its (already small) scale rather than
     disappearing, so the vehicle is never left unconstrained.  Adjacent-lane
@@ -481,15 +490,36 @@ def chance_cutout_clearance(
             continue
         beta = float("nan")
         if reference_quantile is not None:
-            beta = min(float(mode.probability), reference_beta)
+            if mode.mode_name == "cutout":
+                # The departing mode is scaled by the *residual* belief that the
+                # vehicle stays, not by the belief that it leaves.  Scaling it by
+                # its own probability read the formula literally -- believe a
+                # hypothesis more, reserve more room for it -- and that is
+                # backwards for a lead on its way out: a departure is already
+                # past beta_ref on the first tick it is called (0.65, then 0.99
+                # half a second later), so min(p, beta_ref) saturated and the
+                # factor sat at exactly 1.0 for the whole departure.  Measured
+                # 2026-09-10 on 05_cutout_no_sublv: chance_margin_min -0.03 for
+                # both STDAN and Proposed until t_out, i.e. the relaxation that
+                # is supposed to separate them did nothing at all.
+                beta = min(max(1.0 - float(mode.probability), 0.0), reference_beta)
+            else:
+                beta = min(float(mode.probability), reference_beta)
             # Standoff factor only: the sigma term would also tighten ordinary
             # following (p_lk >= beta_ref) against tonight's calibrated behaviour,
             # and an in-lane lead is already covered deterministically by the
             # cutout mode for the steps it is still predicted present.
+            scale = confidence_quantile(beta) / reference_quantile
+            if mode.mode_name == "cutout":
+                # The factor multiplies (vehicle_length + clearance) as a whole,
+                # so an unfloored 1 - p would let the ego drive into a car that
+                # is still physically in its lane once the departure is certain.
+                # 0.35 keeps 4.9 m at the slowest speed these scenarios reach
+                # (v = 5, L + d0 + tau*v = 14.0 m) and 8.5 m at cruise (v = 13):
+                # never below the 4.5 m footprint.
+                scale = max(scale, CUTOUT_CLEARANCE_FLOOR)
             mode.clearance_scale = np.minimum(
-                np.asarray(mode.clearance_scale, dtype=float),
-                confidence_quantile(beta) / reference_quantile,
-            )
+                np.asarray(mode.clearance_scale, dtype=float), scale)
         if mode.mode_name == "lk" and mode.probability < vanish_threshold:
             mode.active_mask[:] = False
         result[mode.mode_name] = {"confidence": beta, "scale": float(np.asarray(mode.clearance_scale).ravel()[0])}

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Imported as a module so its test cases are not collected a second time here.
 import test_stdan_3int_acc_integration as integration  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
+    CUTOUT_CLEARANCE_FLOOR,
     REL_EGO_LANE,
     REL_LEFT_ADJACENT,
     REL_RIGHT_ADJACENT,
@@ -67,17 +68,23 @@ def modes_by_name(processed):
     return {mode.mode_name: mode for mode in processed.mode_predictions}
 
 
-def assert_cutout_unscaled_in_lane(cutout):
-    """The cut-out mode holds its full standoff wherever it is active.
-
-    True whenever the chance constraint is off, and whenever the cut-out is at
-    least as probable as ``reference_beta`` -- the factor is capped at 1.0, so
-    a confident departure keeps the standoff it already had.
-    """
+def assert_cutout_scale(cutout, expected):
+    """The cut-out mode's standoff factor, wherever the mode is active."""
     scale = np.asarray(cutout.clearance_scale, dtype=float)
     if scale.ndim:
         scale = scale[np.asarray(cutout.active_mask, dtype=bool)]
-    np.testing.assert_array_equal(scale, 1.0)
+    np.testing.assert_allclose(scale, expected, rtol=0, atol=1e-9)
+
+
+def cutout_scale_for(p_cutout):
+    """What ``chance_cutout_clearance`` gives a departure believed ``p_cutout``.
+
+    ``beta_j = min(1 - p, beta_ref)`` -- the residual belief that the vehicle
+    stays -- floored so the footprint is always reserved.
+    """
+    beta = min(max(1.0 - p_cutout, 0.0), REF)
+    return max(confidence_quantile(beta) / confidence_quantile(REF),
+               CUTOUT_CLEARANCE_FLOOR)
 
 
 def scenario_index(prediction, name):
@@ -112,18 +119,26 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
             lk.clearance_scale, confidence_quantile(0.4) / confidence_quantile(REF), places=9)
         self.assertTrue(lk.active_mask.all())
         self.assertTrue(np.isnan(cutout.chance_confidence))
-        assert_cutout_unscaled_in_lane(cutout)
+        assert_cutout_scale(cutout, cutout_scale_for(0.6))
         np.testing.assert_array_equal(cutout.active_mask, [True, True, True, True, False, False, False])
 
-    def test_cutout_mode_is_scaled_by_its_own_probability(self):
-        """An uncertain departure keeps more of its standoff than a confident one."""
+    def test_cutout_mode_is_scaled_by_the_belief_that_it_stays(self):
+        """An uncertain departure keeps more of its standoff than a confident one.
+
+        The factor is ``q(min(1 - p, beta_ref)) / q(beta_ref)``.  Scaling by
+        ``p`` itself (until 2026-09-10) ran the other way and saturated at 1.0
+        on every real departure, so the relaxation never fired.
+        """
         by_name = modes_by_name(self._lead(
             0.7, 0.3, cutin_chance_ref=REF, cutin_probability_threshold=VANISH))
         cutout = by_name["cutout"]
-        self.assertAlmostEqual(
-            cutout.clearance_scale,
-            confidence_quantile(0.3) / confidence_quantile(REF), places=9)
-        self.assertLess(cutout.clearance_scale, 1.0)
+        self.assertAlmostEqual(cutout.clearance_scale, 1.0, places=9,
+                               msg="1 - 0.3 = 0.7 >= beta_ref, so nothing is given up")
+        confident = modes_by_name(self._lead(
+            0.3, 0.7, cutin_chance_ref=REF, cutin_probability_threshold=VANISH))["cutout"]
+        self.assertLess(confident.clearance_scale, cutout.clearance_scale)
+        self.assertAlmostEqual(confident.clearance_scale,
+                               confidence_quantile(0.3) / confidence_quantile(REF), places=9)
         self.assertTrue(np.isnan(cutout.chance_confidence), "no sigma term, factor only")
         self.assertTrue(cutout.active_mask[:4].any(),
                         "an unlikely cut-out is scaled, never vanished")
@@ -152,7 +167,7 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         self.assertTrue(np.isnan(by_name["lk"].chance_confidence))
         cutout = by_name["cutout"]
         self.assertTrue(np.isnan(cutout.chance_confidence))
-        assert_cutout_unscaled_in_lane(cutout)
+        assert_cutout_scale(cutout, CUTOUT_CLEARANCE_FLOOR)
         self.assertTrue(cutout.active_mask[:4].all(), "the vehicle itself keeps its standoff")
 
     def test_chance_off_leaves_ego_lane_modes_alone(self):
@@ -160,7 +175,7 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         for name in ("lk", "cutout"):
             self.assertTrue(np.isnan(by_name[name].chance_confidence), name)
         self.assertEqual(by_name["lk"].clearance_scale, 1.0)
-        assert_cutout_unscaled_in_lane(by_name["cutout"])
+        assert_cutout_scale(by_name["cutout"], 1.0)
         self.assertTrue(by_name["lk"].active_mask.all())
         self.assertTrue(by_name["cutout"].active_mask[:4].all())
 
@@ -170,7 +185,7 @@ class TestEgoLaneLaneKeepingChance(unittest.TestCase):
         for name in ("lk", "cutout"):
             self.assertTrue(np.isnan(by_name[name].chance_confidence), name)
         self.assertEqual(by_name["lk"].clearance_scale, 1.0)
-        assert_cutout_unscaled_in_lane(by_name["cutout"])
+        assert_cutout_scale(by_name["cutout"], 1.0)
         self.assertFalse(by_name["lk"].active_mask.any())
         self.assertTrue(by_name["cutout"].active_mask[:4].all())
         by_name = modes_by_name(self._lead(0.4, 0.6, cutin_probability_threshold=VANISH))
@@ -214,7 +229,7 @@ class TestVacatedLaneCells(unittest.TestCase):
         self.assertEqual(metadata[idx]["selected_vehicle_ids"], [1] * k + [2] * (self.HORIZON + 1 - k))
         self.assertTrue(prediction.active_mask[idx].all())
         self.assertTrue(np.all(np.isnan(prediction.chance_confidence[idx, :k])))
-        np.testing.assert_allclose(prediction.clearance_scale[idx, :k], 1.0)
+        np.testing.assert_allclose(prediction.clearance_scale[idx, :k], cutout_scale_for(0.7))
         self.assertTrue(np.all(np.isnan(prediction.chance_confidence[idx, k:])))
         np.testing.assert_allclose(prediction.clearance_scale[idx, k:], 1.0)
         self.assertEqual(metadata[idx]["vacated_lane_steps"], list(range(k, self.HORIZON + 1)))

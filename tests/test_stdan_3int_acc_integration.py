@@ -14,6 +14,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa:
     ACCModePrediction,
     REL_EGO_LANE,
     REL_RIGHT_ADJACENT as _REL_RIGHT_ADJACENT,
+    CUTOUT_CLEARANCE_FLOOR,
     chance_cutin_clearance,
     chance_tolerance,
     cutin_clearance_scale,
@@ -705,7 +706,7 @@ class TestCutInChanceConstraint(unittest.TestCase):
         self.assertIn("cutin", processed.branch_info["cutin_chance_confidences"])
 
     def test_ego_lane_cutout_mode_is_never_a_chance_cell(self):
-        """Only the lane-keeping hypothesis of an ego-lane vehicle is relaxed.
+        """Neither ego-lane mode carries a sigma term; both take a standoff factor.
 
         See ``chance_cutout_clearance`` and tests/test_chance_cutout_extension.py.
         """
@@ -727,7 +728,9 @@ class TestCutInChanceConstraint(unittest.TestCase):
         )
         by_name = {m.mode_name: m for m in processed.mode_predictions}
         self.assertTrue(np.isnan(by_name["cutout"].chance_confidence))
-        self.assertEqual(by_name["cutout"].clearance_scale, 1.0)
+        # p_cutout = 0.98 here, so 1 - p is far below beta_ref and the factor
+        # lands on its floor: a certain departure gives up all it may give up.
+        self.assertEqual(by_name["cutout"].clearance_scale, CUTOUT_CLEARANCE_FLOOR)
         self.assertTrue(np.isnan(by_name["lk"].chance_confidence), "standoff factor only")
         self.assertAlmostEqual(
             by_name["lk"].clearance_scale,
