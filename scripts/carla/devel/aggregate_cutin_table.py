@@ -219,12 +219,26 @@ LV 와의 간격이 얼마나 어긋나는가
     벌한다** — 정책을 가릴 때는 분해한 쪽을 보는 편이 낫다.
 
 이벤트 구간 표 (table_event_rows.tex / 마크다운 "이벤트 구간:")
-  창은 저크 지표와 같은 [t_trigger − 1 s, t_trigger + 9 s] (기동 + 회복).
-  트리거가 없는 그룹은 행이 나오지 않는다.
+  창은 [t_trigger − 5 s, t_trigger + 9 s] (선제 반응 + 기동 + 회복).
+  트리거가 없는 그룹(03/04)은 창 전체 값이 그대로 들어간다.
+  **2026-09-10 에 앞을 −1 s 에서 −5 s 로 넓혔다.** −1 s 는 예측 정책이 실제로
+  먼저 움직인 구간을 잘라냈다 — 컷인 Δt_ant 가 2.1 s, 컷아웃 제동 개시가 t_out
+  대비 −4.2 s 라 재려던 기동의 앞부분이 창 밖이었다. 대신 정속주행이 4 s 더
+  섞이므로 **평균 열(a_avg_ev / j_avg_cmd_ev / delta_avg_ev)은 낮아진다** —
+  −1 s 로 잰 이전 표와 직접 비교하지 말 것.
+  cut-out 의 gap_err_* 는 이 상수를 쓰지 않는다(GAP_ERR_PRE_S = −1 s). 거기를
+  넓히면 트리거 전 정속주행이 들어와 전 정책의 excess 가 함께 부풀어, 정책 차이가
+  아니라 시나리오 초기 간격을 재게 된다.
   a_avg_ev  = 그 창의 |accel_cmd| 평균,  a_min_ev = 최솟값(최대 제동).
   j_avg_cmd_ev_filt / j_max_cmd_ev_filt = 그 창의 0.2 s 대역 명령 저크
     평균/최대. 표의 j_*_cmd_filt 은 같은 식이되 **런 전체** 평균이라 기동이
     끝난 뒤 정상 추종 구간이 지배한다. 기동만 보려면 이 열을 쓴다.
+  delta_max_ev / delta_avg_ev / min_bumper_gap_ev / v_avg_ev / v_min_ev =
+    같은 창의 안전·속도 지표. delta_max 는 컷인 응답 안에서 나므로 창 전체판과
+    거의 같지만, delta_avg 는 창 전체판이 회복 후 0 인 스텝에 눌려 있어 다르다.
+    collisions_in_event / ego_collision_ev 는 같은 창의 충돌만 센다 — 컷인과
+    무관한 뒤쪽 경로주행 충돌이 빠진다.
+  T_rec 과 gap_err_* 는 이미 t_cross / t_out 기준이라 이벤트판이 따로 없다.
 
 subLV (kind cutout_sublv 만)
   min_bumper_gap_sublv = subLV 가 ego 차선에 있고 앞설 때의 최소 범퍼 간격.
@@ -269,8 +283,16 @@ CUTOUT_OUT_HOLD_STEPS = 2     # lane_id 한 샘플 튐 방지 (0.1 s)
 SETTLE_ACCEL = 0.15
 SETTLE_MIN_S = 1.0
 SETTLE_LOOKBACK_S = 3.0
-EVENT_PRE_S = -1.0    # 이벤트 구간 저크: 트리거 1 s 전부터
+EVENT_PRE_S = -5.0    # 이벤트 구간: 트리거 5 s 전부터 (2026-09-10, -1.0 에서 넓혔다).
+                      # -1 s 는 예측 정책의 선제 감속을 창 밖으로 잘라냈다 — 컷인
+                      # Δt_ant 가 2.1 s, 컷아웃 제동 개시가 t_out 대비 -4.2 s 라
+                      # 정작 재려던 기동의 앞부분이 빠졌다. 대신 정속주행 4 s 가
+                      # 섞여 들어와 평균 열(j_avg_ev / delta_avg_ev)은 낮아진다.
 EVENT_POST_S = 9.0    # 트리거 9 s 후까지 (기동 + 회복)
+GAP_ERR_PRE_S = -1.0  # cut-out gap_err 창의 시작. 이벤트 창과 같은 상수를 쓰다가
+                      # 2026-09-10 에 분리했다. 여기를 -5 로 넓히면 트리거 전
+                      # 정속주행이 들어와 전 정책의 excess 가 함께 부풀어, 정책 간
+                      # 비교가 아니라 시나리오 초기 간격을 재게 된다.
 
 CUTOUT_CONTACT_PRE_S = 0.5
 CUTOUT_CONTACT_POST_S = 2.0
@@ -287,9 +309,10 @@ TEX_METRICS = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "delta_max", "delta_
 TEX_METRICS_03 = ("v_avg", "a_min_filt", "passed", "t_pass")
 TEX_METRICS_CUTOUT = ("a_avg", "j_avg_cmd_filt", "j_max_cmd_filt", "dt_ant",
                       "gap_err_max", "v_avg")
-# 이벤트 구간 [t_trigger-1 s, t_trigger+9 s] 만 자른 표
+# 이벤트 구간 [t_trigger-5 s, t_trigger+9 s] 만 자른 표
 TEX_METRICS_EVENT = ("a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
-                     "j_avg_cmd_ev", "dt_ant")
+                     "j_avg_cmd_ev", "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev",
+                     "v_avg_ev", "v_min_ev", "dt_ant")
 # 표 값(명령 저크) 옆 괄호에 함께 보일 실측(0.2 s 대역) 값
 RAW_OF_FILT = {"j_avg_cmd_filt": "j_avg_filt", "j_max_cmd_filt": "j_max_filt"}
 AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
@@ -604,7 +627,7 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
     if lv_key in tracks and trig_abs is not None:
         s_lv, x_lv, lane_lv = tracks[lv_key]
         lead = ((lane_lv == ego_lane_id) & (np.abs(x_lv - ego_x) <= LANE_HALF_WIDTH)
-                & (s_lv > ego_s) & (t >= trig_abs + EVENT_PRE_S))
+                & (s_lv > ego_s) & (t >= trig_abs + GAP_ERR_PRE_S))
         if out_abs is not None:
             lead &= t <= out_abs
         if lead.any():
@@ -898,7 +921,7 @@ def collect_run(policy, group, run_dir, window_s=None):
     # 이벤트 구간 명령 저크: 창 전체 평균은 이벤트가 끝난 뒤의 정상 추종 구간(창의
     # 절반 이상)이 지배한다. 예측기를 쓰는 정책은 그 구간에서 틱마다 예측이 조금씩
     # 흔들려 ±0.2 m/s^2 의 미세 진동이 남고, 그것이 컷인 응답 자체의 매끄러움을 덮는다.
-    # [t_trigger-1 s, t_trigger+9 s] 로 잘라 기동 구간만 본다(트리거 없는 03/04 는 전 구간).
+    # [t_trigger-5 s, t_trigger+9 s] 로 잘라 기동 구간만 본다(트리거 없는 03/04 는 전 구간).
     row["j_avg_cmd_ev"] = row["j_avg_cmd"]
     row["j_max_cmd_ev"] = row["j_max_cmd"]
     # 이벤트 구간 + 대역 제한 (표 지표 j_*_cmd_filt 과 같은 식, 창만 자른 것).
@@ -930,6 +953,43 @@ def collect_run(policy, group, run_dir, window_s=None):
             if ev_j.any():
                 row["j_avg_cmd_ev_filt"] = float(np.mean(cmd_jf[ev_j]))
                 row["j_max_cmd_ev_filt"] = float(np.max(cmd_jf[ev_j]))
+
+    # 이벤트 구간 안전·속도. delta_max 는 컷인 응답 안에서 나므로 창을 잘라도 거의
+    # 같지만, delta_avg 와 v_avg 는 평균이라 이벤트 뒤의 조용한 정상주행이 값을
+    # 끌어내린다(창 전체 delta_avg 는 회복 후 0 인 스텝이 절반 이상이다).
+    # 충돌도 같은 창으로 세어 컷인과 무관한 뒤쪽 경로주행 충돌을 뺀다.
+    # T_rec 은 이미 t_cross 기준이고 gap_err_* 는 [t_trigger-1 s, t_out] 로 따로 좁아
+    # 이벤트판이 따로 없다.
+    row["delta_max_ev"] = row["delta_max"]
+    row["delta_avg_ev"] = row["delta_avg"]
+    row["min_bumper_gap_ev"] = row["min_bumper_gap"]
+    row["v_avg_ev"] = row["v_avg"]
+    row["v_min_ev"] = row["v_min"]
+    row["collisions_in_event"] = row["collisions_in_window"]
+    row["ego_collision_ev"] = row["ego_collision"]
+    if row.get("t_trigger") is not None:
+        lo = t0 + row["t_trigger"] + EVENT_PRE_S
+        hi = t0 + row["t_trigger"] + EVENT_POST_S
+        ev = (t >= lo) & (t <= hi)
+        if ev.any():
+            row["delta_max_ev"] = float(np.max(delta[ev]))
+            lead_ev = ev & has_lead
+            row["delta_avg_ev"] = (float(np.mean(delta[lead_ev])) if lead_ev.any() else None)
+            row["min_bumper_gap_ev"] = (float(np.nanmin(bumper[lead_ev]))
+                                        if lead_ev.any() else None)
+            row["v_avg_ev"] = float(np.mean(ego_v[ev]))
+            row["v_min_ev"] = float(np.min(ego_v[ev]))
+        pairs_ev, ego_hit_ev = set(), False
+        for e in data.get("_collision_log", []):
+            ts = float(e.get("time_s", 0.0))
+            if not lo - 1e-9 <= ts <= hi + 1e-9:
+                continue
+            roles = frozenset((str(e.get("actor_role") or e.get("actor_key")),
+                               str(e.get("other_actor_role") or e.get("other_actor_type"))))
+            pairs_ev.add(roles)
+            ego_hit_ev = ego_hit_ev or any("ego" in r for r in roles)
+        row["collisions_in_event"] = len(pairs_ev)
+        row["ego_collision_ev"] = ego_hit_ev
 
     for key in ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                 "j_avg", "j_avg_filt", "j_avg_cmd", "j_avg_cmd_ev", "j_avg_cmd_filt", "j_max",
@@ -1070,7 +1130,8 @@ def write_cutout_tex(path, agg):
 def write_event_tex(path, agg):
     lines = ["% aggregate_cutin_table.py 자동 생성 — 이벤트 구간만 자른 표",
              "% 창 = [t_trigger - 1 s, t_trigger + 9 s] (기동 + 회복)",
-             "% a_avg_ev, a_min_ev, j_avg, j_max (0.2 s 대역 명령 저크), j_avg 원시, dt_ant",
+             "% a_avg_ev, a_min_ev, j_avg, j_max (0.2 s 대역 명령 저크), j_avg 원시,\n"
+             "% delta_max_ev, delta_avg_ev, min_bumper_gap_ev, v_avg_ev, v_min_ev, dt_ant",
              "% 표의 j_*_cmd_filt 은 같은 식이되 런 전체 평균이라 정상 추종 구간이 지배한다."]
     groups = sorted({k[0] for k in agg if agg[k]["a_avg_ev"][0] is not None})
     for gi, group in enumerate(groups):
@@ -1089,10 +1150,11 @@ def write_event_tex(path, agg):
 
 
 def markdown_table_event(agg):
-    """이벤트 구간 [t_trigger-1 s, t_trigger+9 s] 만 자른 지표."""
+    """이벤트 구간 [t_trigger-5 s, t_trigger+9 s] 만 자른 지표."""
     head = ("| 시나리오 | 제어기 | n | a_avg | a_min | j_avg 대역 | j_max 대역 "
-            "| j_avg 원시 | Δt_ant |")
-    lines = [head, "|" + "---|" * 9]
+            "| j_avg 원시 | δ_max | δ_avg | 최소범퍼간격 | v_avg | v_min | Δt_ant "
+            "| ego충돌 |")
+    lines = [head, "|" + "---|" * 15]
     for (group, _policy), stats in agg.items():
         if stats["a_avg_ev"][0] is None:
             continue
@@ -1311,7 +1373,7 @@ def main():
         print("\ncut-out:")
         print(markdown_table_cutout(agg))
     if has_event:
-        print("\n이벤트 구간 [t_trigger-1 s, t_trigger+9 s]:")
+        print("\n이벤트 구간 [t_trigger-5 s, t_trigger+9 s]:")
         print(markdown_table_event(agg))
     bad = [r for r in rows if not r["valid"]]
     if bad:
