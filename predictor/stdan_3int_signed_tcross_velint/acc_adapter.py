@@ -49,6 +49,8 @@ class STDAN3IntACCAdapter:
         load_model: bool = True,
         pad_short_history: bool = True,
         min_history_samples: int = 3,
+        intention_lpf_s: float = 0.0,
+        call_dt: float = 0.05,
     ):
         self.args = dict(BASE_ARGS)
         self.dt = float(dt)
@@ -70,6 +72,11 @@ class STDAN3IntACCAdapter:
         self.mc_dropout = bool(mc_dropout)
         self.pad_short_history = bool(pad_short_history)
         self.min_history_samples = int(min_history_samples)
+        # 의도확률 1차 저역필터. 0 이면 끈다. call_dt 는 이 어댑터가 불리는 주기,
+        # 즉 ego 제어 주기(스윕은 전부 20 Hz)다 -- 모델의 self.dt(0.1 s) 가 아니다.
+        self.intention_lpf_s = float(intention_lpf_s)
+        self.call_dt = float(call_dt)
+        self._intention_lpf_state = {}
         self.ckpt_path = Path(ckpt_path) if ckpt_path is not None else DEFAULT_CKPT
         if not self.ckpt_path.is_absolute():
             root = Path(__file__).resolve().parents[2]
@@ -375,6 +382,7 @@ class STDAN3IntACCAdapter:
         covariance_moments = self._distribution_covariances_global(raw_vel_dist, target_state)
         probs = intent_prob.detach().cpu().numpy().reshape(-1)
         probs = probs / max(float(np.sum(probs)), 1.0e-12)
+        probs = self._filter_intention(int(target_id), probs)
         prediction = {
             "vehicle_id": int(target_id),
             "raw_traj_xy": raw_traj_xy,
@@ -392,6 +400,37 @@ class STDAN3IntACCAdapter:
             prediction["raw_velocity_cov_global"] = velocity_cov_global
             prediction["raw_position_cov_global"] = position_cov_global
         return prediction
+
+    def _filter_intention(self, target_id: int, probs: np.ndarray) -> np.ndarray:
+        """First-order lag on one vehicle's intention probabilities.
+
+        The probability is not only a standoff scale: the controller weights
+        each mode's reference-tracking cost by it, so a probability that moves
+        every tick moves the optimum every tick whatever the standoff does.
+        Measured on the aggressive cut-in cells (2026-09-10): |dp| > 0.05 on
+        5-9 % of ticks and those ticks carry 15-24 % of the command variation,
+        with |da| 2-3x the calm value.
+
+        It is the model's own belief that moves, not the input: cleaning the
+        target's speed ripple at the source left |dp| per tick unchanged
+        (0.0159/0.0189/0.0183 -> 0.0172/0.0188/0.0184 with the tracked lead
+        speed eight times smoother), so this is filtered where it is produced.
+
+        Symmetric on purpose, so one number explains the whole effect: the lag
+        also delays a rising cut-in probability, and that cost shows up
+        directly in ``dt_ant``.  Read the two together before picking a tau.
+        """
+        if self.intention_lpf_s <= 0.0:
+            return probs
+        alpha = self.call_dt / (self.intention_lpf_s + self.call_dt)
+        prev = self._intention_lpf_state.get(target_id)
+        if prev is None or np.shape(prev) != np.shape(probs):
+            filtered = np.asarray(probs, dtype=np.float64)
+        else:
+            filtered = prev + alpha * (np.asarray(probs, dtype=np.float64) - prev)
+        filtered = filtered / max(float(np.sum(filtered)), 1.0e-12)
+        self._intention_lpf_state[target_id] = filtered
+        return filtered
 
     def predict_raw(
         self,

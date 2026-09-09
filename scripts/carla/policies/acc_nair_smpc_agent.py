@@ -101,6 +101,7 @@ class ACCNairSMPCAgent(object):
         self.cutin_probability_threshold = threshold
         self.cutin_clearance_ramp_ref = self._parse_cutin_clearance_ramp_ref(smpc_config)
         self.cutin_chance_ref = self._parse_cutin_chance_ref(smpc_config)
+        self.intention_lpf_s = self._parse_intention_lpf_s(smpc_config)
         if self.cutin_chance_ref > 0.0 and self.cutin_clearance_ramp_ref > 0.0:
             raise ValueError(
                 "cutin_ramp and cutin_chance both set the cut-in standoff scale; use one")
@@ -196,6 +197,7 @@ class ACCNairSMPCAgent(object):
                     future=max(3.0, float(N) * float(dt)),
                     dt=0.1,
                     mc_dropout=False,
+                    intention_lpf_s=self.intention_lpf_s,
                 )
             self.stdan_history_secs = [
                 round(i * self.stdan_predictor.dt, 2)
@@ -541,6 +543,7 @@ class ACCNairSMPCAgent(object):
             "mode_names": ["lane_keeping", "cutin"],
             "mode_probabilities": list(self.mode_probabilities),
             "cutin_chance_ref": float(self.cutin_chance_ref),
+            "intention_lpf_s": float(self.intention_lpf_s),
             "cutin_probability_threshold": float(self.cutin_probability_threshold),
             "steps": self.policy_log,
         }
@@ -1237,6 +1240,18 @@ class ACCNairSMPCAgent(object):
         ``cutin_clearance_scale``.
         """
         match = re.search(r"cutin_ramp([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_intention_lpf_s(smpc_config):
+        """Read ``intent_lpf<seconds>`` from the config string (default: off).
+
+        Time constant of the first-order lag on the predictor's intention
+        probabilities.  The probability weights each mode's reference-tracking
+        cost as well as scaling its standoff, so filtering it is the one place
+        that reaches both.  See ``STDAN3IntACCAdapter._filter_intention``.
+        """
+        match = re.search(r"intent_lpf([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else 0.0
 
     @staticmethod

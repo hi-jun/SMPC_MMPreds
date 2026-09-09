@@ -639,6 +639,39 @@ class TestCutInClearanceRamp(unittest.TestCase):
             )
 
 
+class TestIntentionLowPass(unittest.TestCase):
+    """``intent_lpf<seconds>`` lags the intention probabilities per vehicle.
+
+    The probability weights each mode's reference-tracking cost as well as
+    scaling its standoff, so this is the one place that reaches both paths.
+    """
+
+    def test_off_by_default_and_per_vehicle_when_on(self):
+        from predictor.stdan_3int_signed_tcross_velint.acc_adapter import (
+            STDAN3IntACCAdapter)
+        raw = np.array([0.1, 0.9, 0.0])
+        off = STDAN3IntACCAdapter(load_model=False)
+        np.testing.assert_allclose(off._filter_intention(7, raw), raw)
+
+        on = STDAN3IntACCAdapter(load_model=False, intention_lpf_s=0.3)
+        alpha = on.call_dt / (0.3 + on.call_dt)
+        first = np.array([0.9, 0.1, 0.0])
+        np.testing.assert_allclose(on._filter_intention(7, first), first,
+                                   err_msg="the first sample seeds the filter")
+        second = on._filter_intention(7, raw)
+        np.testing.assert_allclose(second, first + alpha * (raw - first), atol=1e-12)
+        self.assertAlmostEqual(float(second.sum()), 1.0, places=12)
+        # A second vehicle has its own state, not this one's.
+        np.testing.assert_allclose(on._filter_intention(8, raw), raw)
+
+    def test_the_agent_reads_the_token(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent
+        parse = ACCNairSMPCAgent._parse_intention_lpf_s
+        self.assertEqual(parse("acc_nair_smpc_stdan_3int_modes8"), 0.0)
+        self.assertAlmostEqual(parse("..._cutin_chance0.6_intent_lpf0.3"), 0.3)
+        self.assertAlmostEqual(parse("..._intent_lpf0.15"), 0.15)
+
+
 class TestCutInChanceConstraint(unittest.TestCase):
     """Cut-in modes become Benciolini confidence chance constraints.
 
