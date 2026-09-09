@@ -118,6 +118,11 @@ class NairACCConfig:
     q_v: float = 8.0
     r_a: float = 0.5
     r_jerk: float = 1.0
+    #: 저크 벌점. step 0 의 저크는 명령 주기(0.05 s), 그 뒤는 MPC 주기(0.2 s)로 나눈다
+    #: -- 하드 제약이 처음부터 그렇게 하고 있었는데 비용만 전 스텝을 0.2 s 로 나눠
+    #: step 0 의 벌점이 (0.05/0.2)^2 = 1/16 로 깎여 있었다(2026-09-10 수정). 틱간 명령
+    #: 점프가 곧 step 0 의 저크이므로, 그 원인이 예측 확률이든 플랜트 외란이든
+    #: 무관하게 QP 가 직접 저항하게 된다.
     slack_weight: float = 5000.0
     solver_name: str = "gurobi"
     gurobi_output: bool = False
@@ -1576,7 +1581,8 @@ class NairACCSMPC:
             for step in range(horizon):
                 control = controls[step]
                 input_error = control - a_ref_param[mode, step]
-                jerk = (control - previous_input) / self.config.dt
+                jerk = (control - previous_input) / (
+                    command_dt_param if step == 0 else self.config.dt)
                 objective += sample_count * probability * (
                     self.config.r_a * input_error ** 2 + self.config.r_jerk * jerk ** 2
                 )
@@ -1977,7 +1983,8 @@ class NairACCSMPC:
                     if step < horizon:
                         control = inputs[step]
                         input_error = control - a_ref_param[mode, step]
-                        jerk = (control - previous_input) / self.config.dt
+                        jerk = (control - previous_input) / (
+                            command_dt_param if step == 0 else self.config.dt)
                         objective += probability_param[mode] * (
                             self.config.r_a * input_error ** 2 + self.config.r_jerk * jerk ** 2
                         )
@@ -2248,7 +2255,8 @@ class NairACCSMPC:
                             self.config.dt,
                         )
                     input_error = control - float(reference.a_ref[mode, step])
-                    jerk = (control - previous_input) / self.config.dt
+                    jerk = (control - previous_input) / (
+                        command_dt if step == 0 else self.config.dt)
                     objective += prediction.probabilities[mode] * (
                         self.config.r_a * input_error ** 2 + self.config.r_jerk * jerk ** 2
                     )
