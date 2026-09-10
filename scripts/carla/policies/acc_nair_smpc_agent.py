@@ -152,10 +152,6 @@ class ACCNairSMPCAgent(object):
         r_move = self._parse_r_move(smpc_config)
         if r_move is not None:
             self.controller_config.r_move = r_move
-        soft_band, soft_weight = self._parse_soft_margin(smpc_config)
-        if soft_band is not None:
-            self.controller_config.soft_margin_m = soft_band
-            self.controller_config.soft_margin_weight = soft_weight
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -1297,23 +1293,6 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"track_smooth([0-9]+)", str(smpc_config))
         return int(match.group(1)) if match else 0
-
-    @staticmethod
-    def _parse_soft_margin(smpc_config):
-        """Read ``softmargin<m>`` and optional ``softw<weight>`` (default 10).
-
-        The hard safety constraint gives the objective nothing until it is
-        violated and then ``slack_weight`` all at once, so every tick a plan
-        that brakes late is optimal and the braking keeps being deferred.  This
-        band prices *approaching* the constraint, so the deceleration is pulled
-        forward and the slack cliff is never reached.  Returns
-        ``(None, None)`` when the token is absent, which leaves the term off.
-        """
-        match = re.search(r"softmargin([0-9]*\.?[0-9]+)", str(smpc_config))
-        if not match:
-            return None, None
-        weight = re.search(r"softw([0-9]*\.?[0-9]+)", str(smpc_config))
-        return float(match.group(1)), float(weight.group(1)) if weight else 10.0
 
     @staticmethod
     def _parse_r_move(smpc_config):
