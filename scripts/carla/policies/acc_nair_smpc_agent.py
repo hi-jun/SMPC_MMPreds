@@ -146,6 +146,9 @@ class ACCNairSMPCAgent(object):
         )
         self.controller_config.risk_allocation_mode = self._parse_risk_allocation_mode(smpc_config)
         self.controller_config.optimize_k = self._parse_optimize_k(smpc_config)
+        r_jerk = self._parse_r_jerk(smpc_config)
+        if r_jerk is not None:
+            self.controller_config.r_jerk = r_jerk
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -1287,6 +1290,19 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"track_smooth([0-9]+)", str(smpc_config))
         return int(match.group(1)) if match else 0
+
+    @staticmethod
+    def _parse_r_jerk(smpc_config):
+        """Read ``rjerk<value>`` from the config string (None = keep the default).
+
+        Sweeping the jerk weight needs a knob because it is shared by all four
+        policies.  It became worth sweeping when 8ff4cf8 put step 0's jerk on
+        the command period: the same r_jerk now buys a 16x heavier penalty on
+        the tick-to-tick command jump than it did, which helps the cut-in cells
+        and costs the cut-out cells their anticipation.
+        """
+        match = re.search(r"rjerk([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):
