@@ -260,6 +260,15 @@ LV 와의 간격이 얼마나 어긋나는가
 
 subLV (kind cutout_sublv 만)
   min_bumper_gap_sublv = subLV 가 ego 차선에 있고 앞설 때의 최소 범퍼 간격.
+  gap_recover_avg = t_out 이후 subLV 를 상대로 남은 **초과 여유의 시간평균** [m]
+    = mean(max(범퍼간격 - d_safe, 0)).  gap_err_excess_max 는 [t_trigger-5 s,
+    t_out] 만 보고 최댓값 하나를 내므로 "얼마나 뒤처졌나"는 재도 "얼마나 빨리
+    되감았나"는 못 잰다.  이 열은 이탈 **이후**를 보고, 크기와 지속을 함께 세며,
+    수렴하지 못한 런도 검열 없이 값을 낸다.  낮을수록 빨리 회수했다.
+  t_gap_recover = 그 초과가 요구 안전거리의 10 % 이내로 들어와 **그 뒤로 계속
+    유지되는** 첫 시각 [t_out 이후 s].  창 끝까지 못 들면 None 이고
+    gap_recover_censored = True -- 정책 간 비교에 쓸 때는 검열된 런 수를 함께
+    적을 것.  gap_recover_span_s 는 그 창의 길이다.
   delta_max / delta_avg 는 cut-in 과 같은 "차선 내 최근접 선행차" 로직을 그대로
     쓴다 — LV 가 빠지면 자동으로 subLV 가 잡힌다(sublv_inlane_steps 로 확인).
   lv_sublv_contact = [t_trigger-0.5 s, t_out+2 s] 안의 target_cutout ↔
@@ -353,7 +362,8 @@ AGG_METRICS_CUTOUT = AGG_METRICS + (
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
     "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
     "settled_before_trigger", "t_pred_minus_trigger",
-    "gap_err_max", "gap_err_avg", "min_bumper_gap_sublv_ev")
+    "gap_err_max", "gap_err_avg", "min_bumper_gap_sublv_ev",
+    "gap_recover_avg", "t_gap_recover", "gap_recover_span_s")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
@@ -687,6 +697,29 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
         if inlane.any():
             row["min_bumper_gap_sublv"] = float(
                 np.min(s_sub[inlane] - ego_s[inlane]) - VEH_LEN)
+        # 갭 회수 속도. gap_err_excess_max 는 [t_trigger-5 s, t_out] 만 보고 최댓값
+        # 하나를 내므로 "얼마나 뒤처졌나"는 재도 "얼마나 빨리 되감았나"는 못 잰다.
+        # 이탈 이후 subLV 를 상대로 남은 초과 여유를 두 가지로 잰다.
+        if out_abs is not None:
+            after = inlane & (t >= out_abs - 1e-9)
+            if after.any():
+                excess = np.maximum(
+                    (s_sub[after] - ego_s[after] - VEH_LEN) - d_safe[after], 0.0)
+                span = float(t[after][-1] - t[after][0])
+                # 시간평균 초과 [m]: 낮을수록 빨리 되감았다. 검열이 없다.
+                row["gap_recover_avg"] = round(float(np.mean(excess)), 4)
+                # 요구 안전거리의 10 % 이내로 들어와 그 뒤로 유지되는 첫 시각
+                # [t_out 이후 s]. 창 끝까지 못 들면 None (검열) -- 그 런은
+                # gap_recover_censored 로 표시한다.
+                near = excess <= 0.10 * d_safe[after]
+                t_after = t[after]
+                settle = None
+                for k in range(near.size):
+                    if near[k] and bool(np.all(near[k:])):
+                        settle = float(t_after[k] - out_abs); break
+                row["t_gap_recover"] = None if settle is None else round(settle, 3)
+                row["gap_recover_censored"] = settle is None
+                row["gap_recover_span_s"] = round(span, 3)
     if trig_abs is not None:
         hi = (out_abs + CUTOUT_CONTACT_POST_S if out_abs is not None
               else trig_abs + 3.0)
