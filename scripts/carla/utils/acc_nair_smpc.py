@@ -118,11 +118,23 @@ class NairACCConfig:
     q_v: float = 8.0
     r_a: float = 0.5
     r_jerk: float = 1.0
-    #: 저크 벌점. step 0 의 저크는 명령 주기(0.05 s), 그 뒤는 MPC 주기(0.2 s)로 나눈다
-    #: -- 하드 제약이 처음부터 그렇게 하고 있었는데 비용만 전 스텝을 0.2 s 로 나눠
-    #: step 0 의 벌점이 (0.05/0.2)^2 = 1/16 로 깎여 있었다(2026-09-10 수정). 틱간 명령
-    #: 점프가 곧 step 0 의 저크이므로, 그 원인이 예측 확률이든 플랜트 외란이든
-    #: 무관하게 QP 가 직접 저항하게 된다.
+    #: 지평 프로파일의 저크 벌점. step 1..N-1 에만 걸리고 ``((u_k - u_{k-1})/dt)^2``
+    #: 를 잰다 -- 상태 전파가 매 스텝 dt 를 쓰므로 이 정의는 QP 내부 모델과 일관된다.
+    #: step 0 은 ``r_move`` 가 따로 맡는다.
+    r_move: Optional[float] = None
+    #: step 0 의 이동 억제(move suppression) 가중. ``(u_0 - u_prev)^2`` 에 곱한다.
+    #: ``None`` 이면 ``r_jerk / dt^2`` 로 채워져 예전 거동(전 스텝을 dt 로 나누던 것)과
+    #: 정확히 같아진다.
+    #:
+    #: 왜 분리했나 (2026-09-10). ego 는 20 Hz 로 다시 푸는데 QP 의 상태식은 ``u_0`` 도
+    #: 0.2 s 유지한다고 계산한다. 그래서 "u_prev -> u_0 전이가 몇 초짜리인가"에 답이
+    #: 둘이다 -- 계획대로면 0.2, 실제로는 0.05. 하드 제약은 실제로 겪는 저크를 묶는
+    #: 것이므로 0.05 를 써야 맞고 처음부터 그랬다. 비용은 물리가 아니라 설계 선택인데,
+    #: 8ff4cf8 이 비용도 0.05 로 바꾸면서 "지금 명령에서 뛰지 마라" 대 "계획을 매끄럽게"
+    #: 의 가중비가 (0.2/0.05)^2 = 16 대 1 로 **아무도 고르지 않은 값**이 됐다. r_jerk 를
+    #: 10 -> 2.5 로 낮추면 4 대 1 이 되고 실제로 거의 모든 열이 좋아졌지만, 그 개선이
+    #: step 0 을 올려서인지 지평을 낮춰서인지 구분되지 않았다. 두 축을 갈라 각각
+    #: 고르게 한다.
     slack_weight: float = 5000.0
     solver_name: str = "gurobi"
     gurobi_output: bool = False
@@ -139,6 +151,8 @@ class NairACCConfig:
             raise ValueError("horizon must be positive")
         if self.dt <= 0:
             raise ValueError("dt must be positive")
+        if self.r_move is None:
+            self.r_move = float(self.r_jerk) / float(self.dt) ** 2
         if self.num_modes < 1:
             raise ValueError("num_modes must be positive")
         if self.controller_variant not in (
@@ -1581,10 +1595,11 @@ class NairACCSMPC:
             for step in range(horizon):
                 control = controls[step]
                 input_error = control - a_ref_param[mode, step]
-                jerk = (control - previous_input) / (
-                    command_dt_param if step == 0 else self.config.dt)
+                move = control - previous_input
+                smooth = (self.config.r_move * move ** 2 if step == 0
+                          else self.config.r_jerk * (move / self.config.dt) ** 2)
                 objective += sample_count * probability * (
-                    self.config.r_a * input_error ** 2 + self.config.r_jerk * jerk ** 2
+                    self.config.r_a * input_error ** 2 + smooth
                 )
                 previous_input = control
 
@@ -1983,10 +1998,11 @@ class NairACCSMPC:
                     if step < horizon:
                         control = inputs[step]
                         input_error = control - a_ref_param[mode, step]
-                        jerk = (control - previous_input) / (
-                            command_dt_param if step == 0 else self.config.dt)
+                        move = control - previous_input
+                        smooth = (self.config.r_move * move ** 2 if step == 0
+                                  else self.config.r_jerk * (move / self.config.dt) ** 2)
                         objective += probability_param[mode] * (
-                            self.config.r_a * input_error ** 2 + self.config.r_jerk * jerk ** 2
+                            self.config.r_a * input_error ** 2 + smooth
                         )
                         previous_input = control
             mean_states_by_mode.append(sample_states[0])
@@ -2255,10 +2271,11 @@ class NairACCSMPC:
                             self.config.dt,
                         )
                     input_error = control - float(reference.a_ref[mode, step])
-                    jerk = (control - previous_input) / (
-                        command_dt if step == 0 else self.config.dt)
+                    move = control - previous_input
+                    smooth = (self.config.r_move * move ** 2 if step == 0
+                              else self.config.r_jerk * (move / self.config.dt) ** 2)
                     objective += prediction.probabilities[mode] * (
-                        self.config.r_a * input_error ** 2 + self.config.r_jerk * jerk ** 2
+                        self.config.r_a * input_error ** 2 + smooth
                     )
                     previous_input = control
 

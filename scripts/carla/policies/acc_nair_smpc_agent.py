@@ -149,6 +149,9 @@ class ACCNairSMPCAgent(object):
         r_jerk = self._parse_r_jerk(smpc_config)
         if r_jerk is not None:
             self.controller_config.r_jerk = r_jerk
+        r_move = self._parse_r_move(smpc_config)
+        if r_move is not None:
+            self.controller_config.r_move = r_move
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -1290,6 +1293,18 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"track_smooth([0-9]+)", str(smpc_config))
         return int(match.group(1)) if match else 0
+
+    @staticmethod
+    def _parse_r_move(smpc_config):
+        """Read ``rmove<value>`` from the config string (None = r_jerk / dt²).
+
+        Weight on ``(u_0 - u_prev)^2``, the only transition the vehicle
+        actually executes.  Separate from ``r_jerk`` so the ratio between
+        "do not jump from the command that is going out" and "keep the planned
+        profile smooth" is a chosen number rather than ``(dt / command_dt)^2``.
+        """
+        match = re.search(r"rmove([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_r_jerk(smpc_config):
