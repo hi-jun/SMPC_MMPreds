@@ -116,10 +116,32 @@ class LSTMACCAdapter:
 
         if not ckpt_path.exists():
             raise FileNotFoundError(f"LSTM checkpoint not found: {ckpt_path}")
+        state = torch.load(str(ckpt_path), map_location=self.device)
         args = dict(MODEL_ARGS, out_length=self.out_length)
+        args, state = self._fit_args_to_state(args, state)
         self.model = VanillaLSTM(args).to(self.device)
-        self.model.load_state_dict(torch.load(str(ckpt_path), map_location=self.device))
+        self.model.load_state_dict(state)
         self.model.eval()
+
+    @staticmethod
+    def _fit_args_to_state(args, state):
+        """체크포인트가 다른 크기·층 구성으로 학습됐으면 args 와 키를 맞춘다.
+
+        ``epoch_72.tar`` 는 임베딩 32 · hidden 64 로 학습됐고 인코더 Sequential 에
+        Dropout 이 없어 LSTM 이 인덱스 2 에 있다(현재 정의는 64 · 128 · 인덱스 3).
+        Dropout 은 eval 에서 항등이므로 층을 끼워 넣고 키만 3 으로 옮기면 그대로
+        읽힌다. 크기는 체크포인트가 진실이므로 args 를 거기에 맞춘다.
+        """
+        emb = state.get("encoder.0.weight")
+        if emb is not None:
+            args["traj_linear_hidden"] = int(emb.shape[0])
+        fc = state.get("decoder.fc.weight")
+        if fc is not None:
+            args["lstm_encoder_size"] = int(fc.shape[1])
+        if any(k.startswith("encoder.2.") for k in state):
+            state = {("encoder.3." + k[len("encoder.2."):] if k.startswith("encoder.2.") else k): v
+                     for k, v in state.items()}
+        return args, state
 
     def make_tensor(
         self,
