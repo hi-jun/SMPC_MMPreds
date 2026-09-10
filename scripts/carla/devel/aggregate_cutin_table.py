@@ -251,6 +251,15 @@ LV 와의 간격이 얼마나 어긋나는가
   j_avg_cmd_ev_filt / j_max_cmd_ev_filt = 그 창의 0.2 s 대역 명령 저크
     평균/최대. 표의 j_*_cmd_filt 은 같은 식이되 **런 전체** 평균이라 기동이
     끝난 뒤 정상 추종 구간이 지배한다. 기동만 보려면 이 열을 쓴다.
+  j_*_cmd_ev_filt_ok = 같은 창에서 **안전 제약이 만족된 구간만**의 대역 명령 저크.
+    ok_frac_ev 가 그 비율이다.  하드 제약은 위반 전에는 목적함수에 힘이 0 이고
+    위반 후엔 ``slack_weight`` (5000 x q_v) 라, 위반 구간의 명령은 slack 이
+    끌고 간 급복구이지 정책의 추종 품질이 아니다.  컷아웃 16 런에서 두 값이
+    갈린다: STDAN 0.99 대 0.68 (만족 57 %), Proposed 1.00 대 0.79 (65 %),
+    LSTM 0.81 대 0.73 (81 %), SCC 1.34 대 0.77 (92 %) -- 전체로는 LSTM 이
+    가장 부드럽지만 만족 구간만 보면 STDAN 이 가장 부드럽다.
+    **반사실이 아니라 부분집합 측정이다**: 위반이 없었다면 어땠을지가 아니라,
+    위반이 없던 틱만 골라 잰 값이다.  두 열을 ok_frac_ev 와 함께 읽을 것.
   delta_max_ev / delta_avg_ev / min_bumper_gap_ev / v_avg_ev / v_min_ev =
     같은 창의 안전·속도 지표. delta_max 는 컷인 응답 안에서 나므로 창 전체판과
     거의 같지만, delta_avg 는 창 전체판이 회복 후 0 인 스텝에 눌려 있어 다르다.
@@ -260,15 +269,16 @@ LV 와의 간격이 얼마나 어긋나는가
 
 subLV (kind cutout_sublv 만)
   min_bumper_gap_sublv = subLV 가 ego 차선에 있고 앞설 때의 최소 범퍼 간격.
-  gap_recover_avg = t_out 이후 subLV 를 상대로 남은 **초과 여유의 시간평균** [m]
-    = mean(max(범퍼간격 - d_safe, 0)).  gap_err_excess_max 는 [t_trigger-5 s,
-    t_out] 만 보고 최댓값 하나를 내므로 "얼마나 뒤처졌나"는 재도 "얼마나 빨리
-    되감았나"는 못 잰다.  이 열은 이탈 **이후**를 보고, 크기와 지속을 함께 세며,
-    수렴하지 못한 런도 검열 없이 값을 낸다.  낮을수록 빨리 회수했다.
-  t_gap_recover = 그 초과가 요구 안전거리의 10 % 이내로 들어와 **그 뒤로 계속
-    유지되는** 첫 시각 [t_out 이후 s].  창 끝까지 못 들면 None 이고
-    gap_recover_censored = True -- 정책 간 비교에 쓸 때는 검열된 런 수를 함께
-    적을 것.  gap_recover_span_s 는 그 창의 길이다.
+  gap_err_sub_* = 이탈 뒤 subLV 와의 간격 오차.  위의 gap_err_* 와 **같은 식**을
+    상대만 subLV 로, 창만 ``[t_out, 창 끝]`` 으로 바꾼 것이다:
+    ``signed = (범퍼간격 - d_safe) / d_safe * 100`` 에 대해 avg = mean|signed|,
+    max = max|signed|, signed_avg = mean(signed) (양수면 뒤처짐, 음수면 파고듦),
+    short_max / excess_max 는 부호별 최대, span_s 는 창의 길이.
+    LV 쪽 gap_err_* 가 이탈까지의 "선제 감속의 대가"를 재고 이쪽이 이탈 뒤
+    "새 앞차를 얼마나 맞게 따라가나"를 재므로, 둘을 합치면 컷아웃 전체가 덮인다.
+    임계값도 검열도 없다 -- 2026-09-10 에 잠깐 쓴 gap_recover_* / gap_hold_* 는
+    "요구 거리의 10 % 이내로 들어와 유지되는 시각"에 기대어 임계값이 임의적이었고,
+    수렴 못 한 런이 None 이 되어 평균이 잘 된 런 쪽으로 치우쳤다(SCC 8 런 중 2 런).
   delta_max / delta_avg 는 cut-in 과 같은 "차선 내 최근접 선행차" 로직을 그대로
     쓴다 — LV 가 빠지면 자동으로 subLV 가 잡힌다(sublv_inlane_steps 로 확인).
   lv_sublv_contact = [t_trigger-0.5 s, t_out+2 s] 안의 target_cutout ↔
@@ -363,7 +373,9 @@ AGG_METRICS_CUTOUT = AGG_METRICS + (
     "v_ego_at_trigger", "v_lv_at_trigger", "min_bumper_gap_sublv",
     "settled_before_trigger", "t_pred_minus_trigger",
     "gap_err_max", "gap_err_avg", "min_bumper_gap_sublv_ev",
-    "gap_recover_avg", "t_gap_recover", "gap_recover_span_s")
+    "gap_err_sub_avg", "gap_err_sub_max", "gap_err_sub_signed_avg",
+    "gap_err_sub_short_max", "gap_err_sub_excess_max", "gap_err_sub_span_s",
+    "j_avg_cmd_ev_filt_ok", "j_max_cmd_ev_filt_ok", "ok_frac_ev")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
@@ -697,29 +709,21 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
         if inlane.any():
             row["min_bumper_gap_sublv"] = float(
                 np.min(s_sub[inlane] - ego_s[inlane]) - VEH_LEN)
-        # 갭 회수 속도. gap_err_excess_max 는 [t_trigger-5 s, t_out] 만 보고 최댓값
-        # 하나를 내므로 "얼마나 뒤처졌나"는 재도 "얼마나 빨리 되감았나"는 못 잰다.
-        # 이탈 이후 subLV 를 상대로 남은 초과 여유를 두 가지로 잰다.
+        # 이탈 뒤 subLV 와의 간격 오차.  위의 gap_err_* 와 **같은 식**을 상대만
+        # subLV 로, 창만 [t_out, 창 끝] 으로 바꾼 것이다: LV 쪽은 이탈까지의
+        # "선제 감속의 대가"를 재고, 이쪽은 이탈 뒤 "새 앞차를 얼마나 맞게
+        # 따라가나"를 잰다.  둘을 합치면 컷아웃 전체가 덮인다.
         if out_abs is not None:
             after = inlane & (t >= out_abs - 1e-9)
             if after.any():
-                excess = np.maximum(
-                    (s_sub[after] - ego_s[after] - VEH_LEN) - d_safe[after], 0.0)
-                span = float(t[after][-1] - t[after][0])
-                # 시간평균 초과 [m]: 낮을수록 빨리 되감았다. 검열이 없다.
-                row["gap_recover_avg"] = round(float(np.mean(excess)), 4)
-                # 요구 안전거리의 10 % 이내로 들어와 그 뒤로 유지되는 첫 시각
-                # [t_out 이후 s]. 창 끝까지 못 들면 None (검열) -- 그 런은
-                # gap_recover_censored 로 표시한다.
-                near = excess <= 0.10 * d_safe[after]
-                t_after = t[after]
-                settle = None
-                for k in range(near.size):
-                    if near[k] and bool(np.all(near[k:])):
-                        settle = float(t_after[k] - out_abs); break
-                row["t_gap_recover"] = None if settle is None else round(settle, 3)
-                row["gap_recover_censored"] = settle is None
-                row["gap_recover_span_s"] = round(span, 3)
+                signed = (((s_sub[after] - ego_s[after] - VEH_LEN) - d_safe[after])
+                          / d_safe[after] * 100.0)
+                row["gap_err_sub_avg"] = round(float(np.mean(np.abs(signed))), 4)
+                row["gap_err_sub_max"] = round(float(np.max(np.abs(signed))), 4)
+                row["gap_err_sub_signed_avg"] = round(float(np.mean(signed)), 4)
+                row["gap_err_sub_short_max"] = round(float(np.max(np.maximum(-signed, 0.0))), 4)
+                row["gap_err_sub_excess_max"] = round(float(np.max(np.maximum(signed, 0.0))), 4)
+                row["gap_err_sub_span_s"] = round(float(t[after][-1] - t[after][0]), 3)
     if trig_abs is not None:
         hi = (out_abs + CUTOUT_CONTACT_POST_S if out_abs is not None
               else trig_abs + 3.0)
@@ -1043,6 +1047,18 @@ def collect_run(policy, group, run_dir, window_s=None, window_start_s=None):
             if ev_j.any():
                 row["j_avg_cmd_ev_filt"] = float(np.mean(cmd_jf[ev_j]))
                 row["j_max_cmd_ev_filt"] = float(np.max(cmd_jf[ev_j]))
+            # 안전 제약이 만족된 구간만. cmd_jf[k] 는 [t[k], t[k+2w]] 를 보므로
+            # 그 전 구간에서 chance_margin_min >= 0 이어야 "위반 없이 낸 저크"다.
+            margins = np.array([s.get("chance_margin_min") if s.get("chance_margin_min")
+                                is not None else 0.0 for s in steps], dtype=float)
+            if margins.size == t.size:
+                ok = np.array([bool(np.all(margins[k:min(k + 2 * width + 1, margins.size)] >= 0.0))
+                               for k in range(cmd_jf.size)])
+                row["ok_frac_ev"] = float(np.mean(ok[ev_j])) if ev_j.any() else None
+                sel_ok = ev_j & ok
+                if sel_ok.any():
+                    row["j_avg_cmd_ev_filt_ok"] = float(np.mean(cmd_jf[sel_ok]))
+                    row["j_max_cmd_ev_filt_ok"] = float(np.max(cmd_jf[sel_ok]))
 
     # 이벤트 구간 안전·속도. delta_max 는 컷인 응답 안에서 나므로 창을 잘라도 거의
     # 같지만, delta_avg 와 v_avg 는 평균이라 이벤트 뒤의 조용한 정상주행이 값을
