@@ -137,6 +137,19 @@ class NairACCConfig:
     #: 그렇게 하니 거의 모든 열이 좋아졌다(2026-09-10). 즉 축이 둘이다: step 0 대 지평의
     #: **비율**과 저크 블록의 **전체 크기**. 한 노브로는 둘을 따로 못 고른다.
     slack_weight: float = 5000.0
+    #: Soft approach band [m].  The hard safety constraint gives the objective
+    #: nothing until it is violated and then ``slack_weight`` (5000x ``q_v``)
+    #: all at once, so a plan that only has to brake near the end of the
+    #: horizon is optimal every tick and the braking keeps being deferred --
+    #: the margin decays monotonically while every plan is still feasible, and
+    #: when it finally crosses, slack recovers it in one step.  Measured on the
+    #: cut-out sweep: STDAN spends 43 % of its event ticks in violation and its
+    #: band jerk is 0.99, but on the satisfied ticks alone it is 0.68, below
+    #: the LSTM baseline's 0.73.  This term prices *approaching* the
+    #: constraint: ``soft_margin_weight * max(soft_margin_m - margin, 0)^2``,
+    #: probability-weighted like the tracking cost.  0 disables it.
+    soft_margin_m: float = 0.0
+    soft_margin_weight: float = 0.0
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -1667,6 +1680,8 @@ class NairACCSMPC:
             float(self.config.r_a),
             float(self.config.r_jerk),
             float(self.config.slack_weight),
+            float(self.config.soft_margin_m),
+            float(self.config.soft_margin_weight),
             float(self.config.feedback_bound),
             float(self.config.disturbance_feedback_bound),
             bool(self.config.optimize_k),
@@ -1886,6 +1901,9 @@ class NairACCSMPC:
             else []
         )
         slack_var = opti.variable(num_modes, horizon + 1)
+        soft_enabled = (self.config.soft_margin_m > 0.0
+                        and self.config.soft_margin_weight > 0.0)
+        soft_var = opti.variable(num_modes, horizon + 1) if soft_enabled else None
         eta_var = opti.variable(num_modes) if optimized_eta else None
         rho_var = opti.variable(num_modes) if optimized_eta else None
         x0_param = opti.parameter(NX)
@@ -2029,6 +2047,25 @@ class NairACCSMPC:
                     slack=slack_var[mode, step],
                     clearance_scale=clearance_scale_param[mode, step],
                 )
+                if soft_enabled:
+                    # Hinge on the *unslacked* margin, so the soft term prices
+                    # the approach and the slack still prices the violation.
+                    margin = self._symbolic_safety_margin(
+                        lead_s_param[mode, step],
+                        states_s[step],
+                        states_v[step],
+                        brake_slope=brake_slope_param[mode, step],
+                        brake_intercept=brake_intercept_param[mode, step],
+                        tightening=tightening,
+                        slack=0.0,
+                        clearance_scale=clearance_scale_param[mode, step],
+                    )
+                    opti.subject_to(soft_var[mode, step] >= 0.0)
+                    opti.subject_to(
+                        soft_var[mode, step] >= self.config.soft_margin_m - margin)
+                    objective += (self.config.soft_margin_weight
+                                  * probability_param[mode]
+                                  * soft_var[mode, step] ** 2)
 
         opti.minimize(objective)
         p_opts, s_opts = self._gurobi_options()
