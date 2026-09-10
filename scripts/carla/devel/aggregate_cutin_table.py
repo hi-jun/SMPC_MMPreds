@@ -11,7 +11,20 @@ resolved_config.json, metrics.json, summary.json}
 채점 구간(window) 과 시간 기준 t0
   t0 = ego policy_log.steps[0].time_s (= state_trajectory 첫 샘플 시각, 제어 시작),
   창 = [t0, t0 + sweep_params.max_sim_time_s (기본 25 s)] = 메인 루프 전체.
-  ``--window-s`` 로 더 짧게 자를 수 있다. **컷인 그룹은 17.5 (절대 시각 약 32 s)
+  ``--window-s`` 로 더 짧게 자를 수 있고, ``--window-start-s`` 로 창의 **앞**을
+  잘라낼 수 있다 (기본: 자르지 않음). 앞을 자르는 것은 **스폰 정렬 과도**를 빼기
+  위해서다 -- ego 는 요구 안전거리 안쪽에서 시작해 첫 9 틱 동안 accel_cmd 를
+  -1.00 에서 -3.00 까지 틱당 0.25 씩(= 0.25/0.05 = 5.0, ``jerk_limit`` 에 정확히
+  포화) 내린다. 네 정책이 완전히 같은 값이라, 자르지 않으면 **j_max 가 정책이
+  아니라 시나리오 초기 조건을 잰다** (컷아웃 64 런 중 42 런에서 창 전체 j_max 의
+  최대치가 첫 0.5 s 안에 나고 그중 32 건이 5.00 포화). ``--window-start-s 3``
+  이면 컷아웃 j_max 가 이벤트 구간 값과 소수 둘째 자리까지 같아진다
+  (SCC 1.34 / LSTM 0.83 / STDAN 0.99 / Proposed 1.00, 2026-09-10).
+  **평균 열에는 쓰지 말 것** -- j_avg 는 0.23 -> 0.15, a_avg 는 0.40 -> 0.29 로
+  이벤트 값(0.18~0.21 / 0.37~0.38)을 지나쳐 더 내려간다. 이벤트 창은 뒤도 자르는데
+  평균은 뒤쪽의 조용한 정상주행이 지배하기 때문이다. 앞을 잘라 이벤트 값을 재현할
+  수 있는 것은 **최대 열뿐**이다. 상대시각(t_trigger 등)의 기준 t0 는 잘라도
+  제어 시작 그대로다. **컷인 그룹은 17.5 (절대 시각 약 32 s)
   를 쓴다**: 컷인이 끝난 뒤 ego 가 CARLA 경로를 따라 계속 달리며 추적 리드가 옆
   차선 차량으로 넘어가고, 범퍼 간격이 단조 붕괴하는데 ``accel_cmd`` 는 0 근처에
   머문다 (01/cutin_0014, 절대 21.5 s 부터 간격 19.9 -> -6.3 m, delta 135 %).
@@ -322,14 +335,14 @@ EV_OF = {"a_avg": "a_avg_ev",
          "j_avg_cmd_filt": "j_avg_cmd_ev_filt", "j_max_cmd_filt": "j_max_cmd_ev_filt",
          "j_avg_filt": "j_avg_filt_ev", "j_max_filt": "j_max_filt_ev",
          "delta_max": "delta_max_ev", "delta_avg": "delta_avg_ev",
-         "T_rec": "T_rec_ev", "v_avg": "v_avg_ev",
+         "T_rec": "T_rec_ev", "v_avg": "v_avg_ev", "dt_ant": "dt_ant_ev",
          "min_bumper_gap_sublv": "min_bumper_gap_sublv_ev"}
 # 표 값(명령 저크) 옆 괄호에 함께 보일 실측(0.2 s 대역) 값
 RAW_OF_FILT = {"j_avg_cmd_filt": "j_avg_filt", "j_max_cmd_filt": "j_max_filt"}
 AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "j_avg", "j_avg_filt", "j_avg_cmd", "j_avg_cmd_ev", "j_avg_cmd_filt", "j_max",
                "j_max_filt", "j_max_cmd", "j_max_cmd_ev", "j_max_cmd_filt", "j_p99", "delta_max", "delta_avg", "delta_avg_window",
-               "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "dt_ant_ctrl", "T_rec",
+               "min_bumper_gap", "t_cross_minus_trigger", "dt_ant", "dt_ant_ev", "dt_ant_ctrl", "T_rec",
                "v_avg", "v_min", "passed", "t_pass",
                "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
                "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev",
@@ -690,7 +703,17 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
             row[key] = round(row[key], 4)
 
 
-def collect_run(policy, group, run_dir, window_s=None):
+#: 이벤트 구간 열. ``--window-start-s`` 로 창 앞을 잘라도 이 열들은 절단 전
+#: 창에서 잰 값을 쓴다 -- 이벤트 창은 t_trigger 기준으로 이미 제 구간을 자르고
+#: 있어서, 창을 또 자르면 같은 지표를 두 번 자르는 셈이 된다.
+EVENT_KEYS = ("j_avg_cmd_ev", "j_max_cmd_ev", "j_at_limit_ev", "j_avg_cmd_ev_filt",
+              "j_max_cmd_ev_filt", "a_avg_ev", "a_min_ev", "j_avg_filt_ev",
+              "j_max_filt_ev", "T_rec_ev", "min_bumper_gap_sublv_ev", "delta_max_ev",
+              "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev", "dt_ant_ev",
+              "collisions_in_event", "ego_collision_ev")
+
+
+def collect_run(policy, group, run_dir, window_s=None, window_start_s=None):
     row = collections.OrderedDict()
     row["policy"] = policy
     row["policy_label"] = policy_label(policy)
@@ -731,11 +754,19 @@ def collect_run(policy, group, run_dir, window_s=None):
     w1 = w0 + float(sweep.get("max_sim_time_s") or DEFAULT_WINDOW_S)
     if window_s is not None:
         w1 = min(w1, w0 + float(window_s))
-    keep = np.nonzero(all_t <= w1 + 1e-9)[0]
+    # 창 하한. ``window_start_s`` 는 제어 시작 직후를 잘라낸다. ego 는 요구
+    # 안전거리 안쪽에서 스폰해 첫 9 틱 동안 accel_cmd 를 -1.00 -> -3.00 으로
+    # 틱당 0.25 씩(= 0.25/0.05 = 5.0, jerk_limit 에 정확히 포화) 내리는데, 네
+    # 정책이 완전히 같은 값이라 자르지 않으면 j_max 가 정책이 아니라 시나리오
+    # 초기 조건을 잰다. **이벤트 구간 열(_ev)은 이 절단의 영향을 받지 않는다** --
+    # main 이 절단 없이 한 번 더 집계해 그 열만 되돌려 놓는다(EVENT_KEYS).
+    w_lo = w0 if window_start_s is None else w0 + float(window_start_s)
+    keep = np.nonzero((all_t >= w_lo - 1e-9) & (all_t <= w1 + 1e-9))[0]
     steps = [steps[i] for i in keep]
     t = all_t[keep]
     t0 = w0  # 제어 시작 = 시간 기준. 서버 경과 시계라 스폰 전 ~5 s 가 이미 지나 있다
     row["t0_sim"] = round(t0, 3)
+    row["window_start_s"] = None if window_start_s is None else round(float(window_start_s), 3)
     row["window_s"] = round(float(t[-1]) - t0, 3)
     row["n_steps"] = len(steps)
 
@@ -989,6 +1020,10 @@ def collect_run(policy, group, run_dir, window_s=None):
     row["j_avg_filt_ev"] = row["j_avg_filt"]
     row["j_max_filt_ev"] = row["j_max_filt"]
     row["T_rec_ev"] = row["T_rec"]
+    # Δt_ant 는 예측 시각 기준이라 이벤트판이 따로 없었는데, ``--window-start-s``
+    # 로 창 앞을 자르면 그 구간에 있던 예측을 못 보게 되어 값이 깎인다(컷인
+    # 2.10 -> 1.59). 이벤트 표는 절단의 영향을 받지 않아야 하므로 별도 열로 둔다.
+    row["dt_ant_ev"] = row.get("dt_ant")
     row["min_bumper_gap_sublv_ev"] = row.get("min_bumper_gap_sublv")
     row["delta_max_ev"] = row["delta_max"]
     row["delta_avg_ev"] = row["delta_avg"]
@@ -1370,6 +1405,10 @@ def main():
     ap.add_argument("root", nargs="?", default=".")
     ap.add_argument("--ego-speeds", default="", help="예: 14,17 (기본: 전부)")
     ap.add_argument("--groups", default="", help="예: 01_cutin_normal (기본: 전부)")
+    ap.add_argument("--window-start-s", type=float, default=None,
+                    help="채점 창의 앞을 제어 시작 이후 이 초수만큼 잘라낸다 "
+                         "(기본: 자르지 않음). 3.0 이면 스폰 정렬 과도가 빠져 최대 열"
+                         "(j_max)이 이벤트 구간 값과 일치한다. 평균 열은 수렴하지 않는다.")
     ap.add_argument("--window-s", type=float, default=None,
                     help="채점 창을 제어 시작 이후 이 초수로 자른다 (기본: 스윕 전체 25 s). "
                          "런마다 t0 가 14.4~14.6 s 라 17.5 는 절대 시각 약 32 s 에 해당한다.")
@@ -1385,7 +1424,12 @@ def main():
             continue  # _discarded_* 같은 보관 디렉터리는 건너뛴다
         if groups and rel[1] not in groups:
             continue
-        row = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s)
+        row = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s,
+                          window_start_s=args.window_start_s)
+        if args.window_start_s is not None:
+            base = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s)
+            for key in EVENT_KEYS:      # 이벤트 열은 절단 전 창에서 잰 값을 쓴다
+                row[key] = base.get(key)
         if speeds and row.get("ego_speed") not in speeds:
             continue
         rows.append(row)
@@ -1404,9 +1448,11 @@ def main():
     has_event = any(r.get("t_trigger") is not None for r in rows)
     if has_event:
         write_event_tex(root / "table_event_rows.tex", agg)
-    note = "aggregate_cutin_table.py %s%s%s" % (
+    note = "aggregate_cutin_table.py %s%s%s%s%s" % (
         root, " --ego-speeds " + args.ego_speeds if speeds else "",
-        " --groups " + args.groups if groups else "")
+        " --groups " + args.groups if groups else "",
+        " --window-s %g" % args.window_s if args.window_s is not None else "",
+        " --window-start-s %g" % args.window_start_s if args.window_start_s is not None else "")
     write_metrics_md(root / "METRICS.md", agg, rows, note)
     print("%d runs (%d valid) -> table_cutin_runs.csv, table_cutin_summary.csv, "
           "table_cutin_rows.tex, %sMETRICS.md in %s\n"
