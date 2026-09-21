@@ -230,6 +230,13 @@ LV 와의 간격이 얼마나 어긋나는가
     쪼개진다. **선제 감속은 excess 만 키우므로, 두 방향을 합쳐 재는
     gap_err_max 는 일찍 감속한 정책과 늦게 감속한 정책을 같은 방향으로
     벌한다** — 정책을 가릴 때는 분해한 쪽을 보는 편이 낫다.
+  gap_err_pre_signed_avg / gap_surplus_pre_m = **트리거 직전** [t_trigger − 3 s,
+    t_trigger) 의 부호 있는 LV 간격 오차 평균 [%] 과 같은 구간의 (범퍼간격 − d_safe)
+    평균 [m]. 기동 신호가 나오기 전이라 선제 감속이 섞이지 않는, 이벤트가 출발하는
+    추종 상태다. 양수 = 요구 거리보다 뒤처진 채 이벤트를 맞는다. 2026-09-17: 07
+    aggr 0001 의 SCC 는 +1.2 m 뒤에서 출발해(등속 예측이라 접근 중 제약이 한 번도
+    안 걸리고 앞차 속도 아래로 처졌다), t_out 이후의 gap_err_sub_* 도 그만큼
+    불리하게 시작한다. 정책 간 subLV 지표를 비교할 때 이 출발점을 같이 볼 것.
 
 이벤트 구간 표 (table_event_rows.tex / 마크다운 "이벤트 구간:")
   창은 [t_trigger − 5 s, t_trigger + 9 s] (선제 반응 + 기동 + 회복).
@@ -326,6 +333,7 @@ EVENT_PRE_S = -5.0    # 이벤트 구간: 트리거 5 s 전부터 (2026-09-10, -
                       # 정작 재려던 기동의 앞부분이 빠졌다. 대신 정속주행 4 s 가
                       # 섞여 들어와 평균 열(j_avg_ev / delta_avg_ev)은 낮아진다.
 EVENT_POST_S = 9.0    # 트리거 9 s 후까지 (기동 + 회복)
+GAP_PRE_TRIGGER_S = 3.0   # gap_err_pre_*: 트리거 직전 추종 상태를 재는 길이
 
 CUTOUT_CONTACT_PRE_S = 0.5
 CUTOUT_CONTACT_POST_S = 2.0
@@ -375,7 +383,8 @@ AGG_METRICS_CUTOUT = AGG_METRICS + (
     "gap_err_max", "gap_err_avg", "min_bumper_gap_sublv_ev",
     "gap_err_sub_avg", "gap_err_sub_max", "gap_err_sub_signed_avg",
     "gap_err_sub_short_max", "gap_err_sub_excess_max", "gap_err_sub_span_s",
-    "j_avg_cmd_ev_filt_ok", "j_max_cmd_ev_filt_ok", "ok_frac_ev")
+    "j_avg_cmd_ev_filt_ok", "j_max_cmd_ev_filt_ok", "ok_frac_ev",
+    "gap_err_pre_signed_avg", "gap_surplus_pre_m")
 SCENARIO_LABEL = {"01_cutin_normal": "Normal \\\\ Cut-in",
                   "02_cutin_aggressive": "Aggressive \\\\ Cut-in",
                   "03_no_cutin_decel": "No Cut-in \\\\ (adj. decel)",
@@ -691,6 +700,13 @@ def cutout_response(row, data, group, run_name, sweep, tracks, t, t0, dt,
             row["gap_err_signed_avg"] = round(float(np.mean(signed)), 4)
             row["gap_err_short_max"] = round(float(np.max(np.maximum(-signed, 0.0))), 4)
             row["gap_err_excess_max"] = round(float(np.max(np.maximum(signed, 0.0))), 4)
+        # 트리거 직전의 추종 상태: 이벤트가 어디서 출발했나 (선제 감속이 섞이기 전)
+        pre = ((lane_lv == ego_lane_id) & (np.abs(x_lv - ego_x) <= LANE_HALF_WIDTH)
+               & (s_lv > ego_s) & (t >= trig_abs - GAP_PRE_TRIGGER_S) & (t < trig_abs))
+        if pre.any():
+            surplus = s_lv[pre] - ego_s[pre] - VEH_LEN - d_safe[pre]
+            row["gap_err_pre_signed_avg"] = round(float(np.mean(surplus / d_safe[pre] * 100.0)), 4)
+            row["gap_surplus_pre_m"] = round(float(np.mean(surplus)), 4)
 
     # --- 속도 ---
     if trig_abs is not None:
