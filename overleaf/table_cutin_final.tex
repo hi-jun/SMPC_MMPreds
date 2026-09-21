@@ -1,0 +1,88 @@
+\documentclass[letterpaper, 10 pt, journal]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{float}
+
+\begin{document}
+
+% --- Table I: Cut-in Performance (final sweep cutin_final_20260910, window 17.5 s) ---
+\begin{table*}[t]
+\centering
+\caption{Performance comparison in cut-in scenarios ($n$ runs per controller: normal 18, aggressive 17).
+Ride comfort uses the 0.2\,s band-limited acceleration command. Best value per scenario in bold.}
+\label{tab:cutin_final}
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}llcccccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Scenario}}
+& \multirow{2}{*}{\textbf{Controller}}
+& \multicolumn{3}{c}{\textbf{Ride Comfort}}
+& \multicolumn{3}{c}{\textbf{Safety}}
+& \multicolumn{2}{c}{\textbf{Cut-in Response}} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(lr){9-10}
+ &
+ & $a_{\text{avg}}$ (m/s$^2$)
+ & $j_{\text{avg}}$ (m/s$^3$)
+ & $j_{\text{max}}$ (m/s$^3$)
+ & $\delta_{\text{max}}$ (\%)
+ & $\delta_{\text{avg}}$ (\%)
+ & Coll.
+ & $\Delta t_{\text{ant}}$ (s)
+ & $T_{\text{rec}}$ (s) \\
+\midrule
+\multirow{4}{*}{\shortstack[l]{Normal \\ cut-in}}
+ & SCC & 1.19 & 0.53 & 5.00 & 53.99 & 11.09 & 1/18 & - & 2.70 \\
+ & SCC + LSTM & 1.18 & 0.52 & 4.78 & 33.66 & 3.61 & 0/18 & 0.95 & 1.35 \\
+ & Multimodal SCC & \textbf{0.55} & \textbf{0.32} & \textbf{2.28} & \textbf{1.31} & \textbf{0.03} & 0/18 & \textbf{2.12} & \textbf{0.07} \\
+ & \textbf{Proposed} & 0.65 & 0.39 & 3.18 & 6.46 & 0.45 & 1/18 & 2.10 & 0.21 \\
+\midrule
+\multirow{4}{*}{\shortstack[l]{Aggressive \\ cut-in}}
+ & SCC & 1.47 & 0.57 & 5.00 & 82.01 & 26.28 & 2/17 & - & 2.93 \\
+ & SCC + LSTM & 1.62 & 0.57 & 5.00 & 75.50 & 12.65 & 3/18 & 0.61 & 2.56 \\
+ & Multimodal SCC & \textbf{0.99} & \textbf{0.51} & \textbf{3.93} & \textbf{18.43} & \textbf{1.13} & 0/18 & 1.87 & \textbf{0.54} \\
+ & \textbf{Proposed} & 1.12 & 0.56 & 4.11 & 25.05 & 2.34 & 0/18 & \textbf{2.07} & 0.75 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% --- Table II: False-positive (no cut-in) scenarios ---
+\begin{table*}[t]
+\centering
+\caption{Unnecessary braking when the adjacent vehicle decelerates but does not cut in
+(lead-deceleration and deceleration-onset variants pooled, $n$ = 14 runs per controller). No controller
+intrudes on the safety distance or collides here ($\delta_{\text{max}}=0$); the columns measure only the
+cost of reacting to a prediction that does not materialise. $a_{\text{min}}$ is the strongest braking
+command and $v_{\text{avg}}$ the mean ego speed over the run (cruise 15.5\,m/s). Best value in bold.}
+\label{tab:false_positive}
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{@{}llcccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Scenario}}
+& \multirow{2}{*}{\textbf{Controller}}
+& \multicolumn{3}{c}{\textbf{Ride Comfort}}
+& \textbf{Speed} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-6}
+ &
+ & $a_{\text{min}}$ (m/s$^2$)
+ & $j_{\text{avg}}$ (m/s$^3$)
+ & $j_{\text{max}}$ (m/s$^3$)
+ & $v_{\text{avg}}$ (m/s) \\
+\midrule
+\multirow{4}{*}{\shortstack[l]{No cut-in \\ (adjacent vehicle \\ decelerates)}}
+ & SCC & \textbf{0.00} & \textbf{0.01} & 0.04 & \textbf{15.47} \\
+ & SCC + LSTM & -0.01 & 0.01 & \textbf{0.04} & 15.46 \\
+ & Multimodal SCC & -1.35 & 0.27 & 2.06 & 13.86 \\
+ & \textbf{Proposed} & -0.93 & 0.16 & 1.11 & 14.98 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\end{document}
