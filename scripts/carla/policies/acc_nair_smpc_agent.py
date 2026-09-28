@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -55,6 +56,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 from predictor.lstm.acc_adapter import LSTMACCAdapter
 from predictor.lstm_vel.acc_adapter import STDAN_LIKE_SHRINK, LSTMVelACCAdapter
+from predictor.iaimm_kf.acc_adapter import IAIMMKFACCAdapter
 
 
 class ACCNairSMPCAgent(object):
@@ -97,7 +99,7 @@ class ACCNairSMPCAgent(object):
         threshold = self._parse_cutin_probability_threshold(smpc_config)
         if threshold is None:
             threshold = (self.CUTIN_CHANCE_VANISH_BELOW
-                         if self.predictor_type in ("stdan_3int", "stdan_vel") else 0.0)
+                         if self.predictor_type in ("stdan_3int", "stdan_vel", "iaimm_kf") else 0.0)
         self.cutin_probability_threshold = threshold
         self.cutin_clearance_ramp_ref = self._parse_cutin_clearance_ramp_ref(smpc_config)
         self.cutin_chance_ref = self._parse_cutin_chance_ref(smpc_config)
@@ -166,8 +168,19 @@ class ACCNairSMPCAgent(object):
         self.stdan_history_secs = None
         self.stdan_history_closeness_eps = None
         self.agent_history = None
-        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm", "lstm_vel"):
-            if self.predictor_type == "lstm_vel":
+        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm", "lstm_vel", "iaimm_kf"):
+            if self.predictor_type == "iaimm_kf":
+                # Tuning knobs as a JSON dict, e.g. '{"lat_speedup": 2, "proj_horizon_s": 8}';
+                # keys are IAIMMKFACCAdapter constructor arguments.
+                self.stdan_predictor = IAIMMKFACCAdapter(
+                    history=3.0,
+                    future=max(3.0, float(N) * float(dt)),
+                    dt=0.1,
+                    call_dt=float(dt),
+                    lane_width=2.0 * self.EGO_LANE_HALF_WIDTH_M,
+                    **json.loads(os.getenv("ACC_NAIR_IAIMM_CFG", "{}")),
+                )
+            elif self.predictor_type == "lstm_vel":
                 self.stdan_predictor = LSTMVelACCAdapter(
                     ckpt_path=os.getenv("ACC_NAIR_LSTM_VEL_CKPT",
                                         "predictor/lstm_vel/ckpt/best_model.pt"),
@@ -561,7 +574,7 @@ class ACCNairSMPCAgent(object):
     def _prediction_bundle(self, s_ego, speed):
         if self.predictor_type == "constant_velocity_lead":
             return self._constant_velocity_lead_prediction_bundle(s_ego, speed)
-        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm", "lstm_vel"):
+        if self.predictor_type in ("stdan_3int", "stdan_vel", "lstm", "lstm_vel", "iaimm_kf"):
             bundle = self._stdan_prediction_bundle(s_ego, speed)
             if bundle is not None:
                 return self._maybe_collapse_bundle_to_best_mode(bundle)
@@ -1174,6 +1187,8 @@ class ACCNairSMPCAgent(object):
         config = str(smpc_config)
         if "const_lead" in config or "constant_lead" in config:
             return "constant_velocity_lead"
+        if "iaimm" in config:
+            return "iaimm_kf"
         if "lstm_vel" in config:
             return "lstm_vel"
         if "lstm" in config:
