@@ -342,13 +342,17 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
     def _to_raw(self, tid, res, fh, model_yaw):
         n = self.out_length
         traj = np.asarray(fh.trajectory, dtype=float)
-        ds = float(traj[1, 0] - traj[0, 0])
         s = np.stack([tr[0, 1:] for tr in res["trajs"]])          # (3, n)
         d = np.stack([tr[3, 1:] for tr in res["trajs"]])
-        idx = np.clip(np.rint((s - traj[0, 0]) / ds).astype(int), 0, traj.shape[0] - 1)
-        psi = traj[idx, 3]
-        x = traj[idx, 1] - np.sin(psi) * d
-        y = traj[idx, 2] + np.cos(psi) * d
+        # interpolate the reference line at s (snapping to its 0.5 m grid put a +-0.25 m
+        # quantisation on every output point)
+        s_grid = traj[:, 0]
+        sq = np.clip(s, s_grid[0], s_grid[-1]).ravel()
+        xc = np.interp(sq, s_grid, traj[:, 1]).reshape(s.shape)
+        yc = np.interp(sq, s_grid, traj[:, 2]).reshape(s.shape)
+        psi = np.interp(sq, s_grid, np.unwrap(traj[:, 3])).reshape(s.shape)
+        x = xc - np.sin(psi) * d
+        y = yc + np.cos(psi) * d
         raw_traj_xy = np.stack((x, y), axis=-1)
         raw_vel = np.stack((np.stack([tr[1, 1:] for tr in res["trajs"]]), np.stack([tr[4, 1:] for tr in res["trajs"]])), axis=-1)
         cov = np.zeros((3, n, 2, 2))
