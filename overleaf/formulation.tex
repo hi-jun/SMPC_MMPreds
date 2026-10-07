@@ -1,0 +1,95 @@
+\documentclass[letterpaper, 10 pt, journal]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{float}
+
+\begin{document}
+
+\begin{subequations} \label{eq:mpc_problem}
+\begin{align}
+    \min_{\{u^j_k\}} \quad
+    & \sum_{j=1}^{M} P_j
+      \Bigg[
+        \sum_{k=0}^{N} q_v \big(v^j_k - v^j_{\mathrm{ref},k}\big)^2
+        + \sum_{k=0}^{N-1} \bigg(
+            r_a \big(u^j_k\big)^2
+            + r_j \bigg(\frac{u^j_k - u^j_{k-1}}{\Delta t}\bigg)^2
+          \bigg)
+      \Bigg]
+      \label{eq:cost} \\
+    \textrm{s.t.} \quad
+    & x^j_{k+1} = A\,x^j_k + B\,u^j_k,
+      \quad \forall k \in [0, N-1],\; \forall j
+      \label{eq:dynamics} \\
+    & \Pr\!\Big[\hat s^j_k - s^j_k \ge \alpha^j_k\, d_{\mathrm{safe}}(v^j_k)\Big]
+      \ge \frac{1+\beta^j_k}{2},
+      \quad \forall (j,k) \in \mathcal{A}
+      \label{eq:safety} \\
+    & u^j_k = u^{j'}_k,
+      \quad \forall k < k_b(j,j'), \;
+      \forall j \neq j'
+      \label{eq:branch_nac} \\
+    & v_{\min} \le v^j_k \le v_{\max},
+      \quad \forall k \in [1, N], \; \forall j
+      \label{eq:state_bound} \\
+    & a_{\min} \le u^j_k \le a_{\max},
+      \quad \forall k \in [0, N-1], \; \forall j
+      \label{eq:input_bound} \\
+    & j_{\min} \le \frac{u^j_k - u^j_{k-1}}{\Delta t} \le j_{\max},
+      \quad \forall k \in [0, N-1], \; \forall j
+      \label{eq:jerk_bound}
+\end{align}
+\end{subequations}
+where $x_k = [s_k, v_k]^\mathsf{T}$, $u_k = a_k$, $u_{-1}$ is the previously applied command,
+\begin{equation}
+    A = \begin{bmatrix} 1 & \Delta t \\ 0 & 1 \end{bmatrix}, \qquad
+    B = \begin{bmatrix} \tfrac{1}{2}\Delta t^2 \\ \Delta t \end{bmatrix},
+    \label{eq:ab}
+\end{equation}
+\begin{equation}
+    d_{\mathrm{safe}}(v) = L_{\mathrm{veh}} + d_0 + \tau\, v .
+    \label{eq:dsafe}
+\end{equation}
+With $\hat s^j_k \sim \mathcal{N}(\bar s^{\,j}_k, (\sigma^j_k)^2)$, \eqref{eq:safety} is enforced as
+\begin{equation}
+    \bar s^{\,j}_k - s^j_k \;\ge\; \alpha^j_k\, d_{\mathrm{safe}}(v^j_k) + q(\beta^j_k)\,\sigma^j_k,
+    \label{eq:safety_det}
+\end{equation}
+\begin{equation}
+    q(\beta) = \Phi^{-1}\!\Big(\tfrac{1+\beta}{2}\Big), \qquad
+    \alpha^j_k = \frac{q(\beta^j_k)}{q(\beta_{\mathrm{ref}})},
+    \label{eq:alpha}
+\end{equation}
+\begin{equation}
+    \beta^j_k =
+    \begin{cases}
+        \min(p_j,\; \beta_{\mathrm{ref}}) & \text{cut-in}, \\
+        \min(p_j,\; \beta_{\mathrm{ref}}) & \text{lane keeping}, \\
+        \min(1 - p_j,\; \beta_{\mathrm{ref}}) & \text{cut-out},
+    \end{cases}
+    \label{eq:beta}
+\end{equation}
+\begin{equation}
+    (\sigma^j_k)^2 = \Sigma^{j}_{k,ss} + \begin{bmatrix} 1 & \tau \end{bmatrix}
+    W \begin{bmatrix} 1 \\ \tau \end{bmatrix},
+    \label{eq:sigma}
+\end{equation}
+\begin{equation}
+    v^j_{\mathrm{ref},k} = \min\!\big(v_{\mathrm{free},k},\;
+    \lambda^j_k\, v_{\mathrm{free},k} + (1-\lambda^j_k)\, \hat v^j_k\big),
+    \label{eq:vref}
+\end{equation}
+\begin{equation}
+    \lambda^j_k = \operatorname{clip}\!\left(
+        \frac{\bar s^{\,j}_k - \alpha^j_k d_{\mathrm{safe}}(\tilde v_k) - q(\beta^j_k)\sigma^j_k - \tilde s_k}
+             {\bar s^{\,j}_k - \tilde s_k},\; 0,\; 1\right).
+    \label{eq:vref_blend}
+\end{equation}
+
+\end{document}
