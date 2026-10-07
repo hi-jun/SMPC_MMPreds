@@ -390,6 +390,12 @@ def ramp_cutin_clearance(
     return scales
 
 
+#: Largest confidence a chance cell's ``sigma`` term is asked for.  Only the
+#: divergence of the quantile as ``beta -> 1`` needs a cap (Benciolini et al.,
+#: Remark 4); ``q(0.99) = 2.58`` standard deviations.
+CHANCE_CONFIDENCE_CAP = 0.99
+
+
 def chance_cutin_clearance(
     mode_predictions: Sequence[ACCModePrediction],
     reference_beta: float,
@@ -401,15 +407,19 @@ def chance_cutin_clearance(
     confidence demanded of a candidate trajectory is the probability assigned to
     it.  The 1-D counterpart used here is
 
-        gap = q(beta_j) * sigma_s  +  [q(beta_j) / q(beta_ref)] * standoff,
+        gap = q(beta_j) * sigma_s  +  [q(min(beta_j, beta_ref)) / q(beta_ref)] * standoff,
 
     so the tuned standoff plays the role of ``l_o`` (it is what a mode at
     ``beta_ref`` keeps) and both terms vanish together as ``beta_j -> 0``
-    (Remark 5: the footprint sits inside the scaling).  ``beta_j`` is capped at
-    ``beta_ref`` (Remark 4: the quantile diverges as ``beta -> 1``), which keeps
-    the standoff factor at most 1.  This function records ``beta_j`` on the mode
-    and applies the standoff factor; the controller adds the ``sigma`` term from
-    the same ``beta_j`` in ``confidence_chance`` mode.  Unlike
+    (Remark 5: the footprint sits inside the scaling).  ``beta_ref`` normalises
+    the standoff factor and nothing else, which keeps the factor at most 1.  The
+    ``sigma`` term keeps the mode's own confidence, capped at
+    ``CHANCE_CONFIDENCE_CAP`` only (Remark 4: the quantile diverges as
+    ``beta -> 1``).  One ``beta`` capped at ``beta_ref`` used to feed both, so
+    ``beta_ref = 0.6`` also held the ``sigma`` term at ``q(0.6) = 0.84 sigma``
+    for a cut-in already believed at 0.95.  This function records ``beta_j`` on
+    the mode and applies the standoff factor; the controller adds the ``sigma``
+    term from ``beta_j`` in ``confidence_chance`` mode.  Unlike
     ``ramp_cutin_clearance`` the quantile is the 1-D ``Phi^-1((1 + beta) / 2)``,
     not the paper's 2-D ``sqrt(-2 ln(1 - beta))``.
 
@@ -424,10 +434,12 @@ def chance_cutin_clearance(
     for mode in mode_predictions:
         if mode.mode_name != "cutin":
             continue
-        beta = min(float(mode.probability), reference_beta)
-        mode.chance_confidence = beta
-        mode.clearance_scale = confidence_quantile(beta) / reference_quantile
-        result[mode.mode_name] = {"confidence": beta, "scale": mode.clearance_scale}
+        probability = float(mode.probability)
+        mode.chance_confidence = min(probability, CHANCE_CONFIDENCE_CAP)
+        mode.clearance_scale = (
+            confidence_quantile(min(probability, reference_beta)) / reference_quantile)
+        result[mode.mode_name] = {
+            "confidence": mode.chance_confidence, "scale": mode.clearance_scale}
     return result
 
 
@@ -826,7 +838,9 @@ def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshol
 
     The cell exists only if each of them really leaves, so it inherits their
     mode probability -- the second lead only matters if the first one goes:
-    the standoff factor of ``min(p, beta_ref)``, and nothing at all below
+    the standoff factor of ``min(p, beta_ref)``, a ``sigma``-term confidence of
+    at most ``p`` (``beta_ref`` normalises the factor only, as in
+    ``chance_cutin_clearance``), and nothing at all below
     ``vanish_threshold``.  ``cell`` is the selected
     lead's own ``(confidence, scale)``; returns ``None`` for a vanished cell.
     """
@@ -840,7 +854,7 @@ def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshol
         # Standoff factor only; a deterministic (NaN) lead stays without a
         # sigma term, as in ``chance_cutout_clearance``.
         if not np.isnan(confidence):
-            confidence = min(confidence, beta)
+            confidence = min(confidence, float(mode.probability))
         scale = min(scale, confidence_quantile(beta) / confidence_quantile(reference_beta))
     return confidence, scale
 

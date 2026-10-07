@@ -15,6 +15,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa:
     REL_EGO_LANE,
     REL_RIGHT_ADJACENT as _REL_RIGHT_ADJACENT,
     CUTOUT_CLEARANCE_FLOOR,
+    CHANCE_CONFIDENCE_CAP,
     chance_cutin_clearance,
     chance_tolerance,
     cutin_clearance_scale,
@@ -704,14 +705,17 @@ class TestCutInChanceConstraint(unittest.TestCase):
         self.assertTrue(all(a < b for a, b in zip(values, values[1:])), values)
 
     def test_confidence_is_capped_and_scale_vanishes(self):
-        modes = [self._fake_mode("cutin", p) for p in (0.99, 0.50, 0.02)]
+        modes = [self._fake_mode("cutin", p) for p in (0.999, 0.97, 0.50, 0.02)]
         chance_cutin_clearance(modes, self.REF)
-        self.assertEqual([m.chance_confidence for m in modes], [0.95, 0.50, 0.02])
+        # beta_ref (0.95) caps the standoff factor only; the sigma term keeps the
+        # mode's own confidence up to CHANCE_CONFIDENCE_CAP.
+        self.assertEqual([m.chance_confidence for m in modes], [0.99, 0.97, 0.50, 0.02])
         scales = [m.clearance_scale for m in modes]
         self.assertAlmostEqual(scales[0], 1.0, places=9)
-        self.assertAlmostEqual(scales[1], 0.3441, places=3)
-        self.assertAlmostEqual(scales[2], 0.0128, places=3)
-        self.assertTrue(all(a > b for a, b in zip(scales, scales[1:])), scales)
+        self.assertAlmostEqual(scales[1], 1.0, places=9)
+        self.assertAlmostEqual(scales[2], 0.3441, places=3)
+        self.assertAlmostEqual(scales[3], 0.0128, places=3)
+        self.assertTrue(all(a > b for a, b in zip(scales[1:], scales[2:])), scales)
 
     def test_reference_zero_is_a_no_op(self):
         mode = self._fake_mode("cutin", 0.3)
@@ -729,10 +733,11 @@ class TestCutInChanceConstraint(unittest.TestCase):
         self.assertTrue(np.isnan(by_name["lk"].chance_confidence))
         self.assertEqual(by_name["lk"].clearance_scale, 1.0)
         cutin = by_name["cutin"]
-        self.assertAlmostEqual(cutin.chance_confidence, min(cutin.probability, self.REF), places=9)
+        self.assertAlmostEqual(
+            cutin.chance_confidence, min(cutin.probability, CHANCE_CONFIDENCE_CAP), places=9)
         self.assertAlmostEqual(
             cutin.clearance_scale,
-            confidence_quantile(cutin.chance_confidence) / confidence_quantile(self.REF),
+            confidence_quantile(min(cutin.probability, self.REF)) / confidence_quantile(self.REF),
             places=9,
         )
         self.assertLess(cutin.clearance_scale, 1.0)

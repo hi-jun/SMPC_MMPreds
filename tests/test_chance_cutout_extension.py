@@ -316,7 +316,10 @@ class TestCutInRegression(unittest.TestCase):
     def test_adjacent_lane_modes_follow_the_existing_rules(self):
         tv, straight = self._processed()
         tv_modes, straight_modes = modes_by_name(tv), modes_by_name(straight)
-        self.assertAlmostEqual(tv_modes["cutin"].chance_confidence, REF, places=9)
+        self.assertGreater(tv_modes["cutin"].probability, REF)
+        # beta_ref caps the standoff factor, not the sigma term's confidence.
+        self.assertAlmostEqual(
+            tv_modes["cutin"].chance_confidence, tv_modes["cutin"].probability, places=9)
         self.assertEqual(tv_modes["cutin"].clearance_scale, 1.0)
         np.testing.assert_array_equal(
             tv_modes["cutin"].active_mask, [False, False, False, True, True, True, True])
@@ -344,7 +347,7 @@ class TestCutInRegression(unittest.TestCase):
         for name in ("10:cutin+11:lk", "10:cutin+11:cutin"):
             idx = scenario_index(extended, name)
             expected_active[idx, 3:] = True
-            expected_confidence[idx, 3:] = REF
+            expected_confidence[idx, 3:] = modes_by_name(tv)["cutin"].probability
         np.testing.assert_array_equal(extended.active_mask, expected_active)
         np.testing.assert_array_equal(extended.chance_confidence, expected_confidence)
         np.testing.assert_array_equal(extended.clearance_scale, np.ones((4, self.HORIZON + 1)))
