@@ -176,7 +176,7 @@ class ACCNairSMPCAgent(object):
                     history=3.0,
                     future=max(3.0, float(N) * float(dt)),
                     dt=0.1,
-                    call_dt=float(dt),
+                    call_dt=0.05,          # the 20 Hz control tick, not the MPC dt: sets the KF cadence
                     lane_width=2.0 * self.EGO_LANE_HALF_WIDTH_M,
                     **json.loads(os.getenv("ACC_NAIR_IAIMM_CFG", "{}")),
                 )
