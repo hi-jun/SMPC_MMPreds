@@ -137,6 +137,15 @@ class NairACCConfig:
     #: 그렇게 하니 거의 모든 열이 좋아졌다(2026-09-10). 즉 축이 둘이다: step 0 대 지평의
     #: **비율**과 저크 블록의 **전체 크기**. 한 노브로는 둘을 따로 못 고른다.
     slack_weight: float = 5000.0
+    #: ``dopt<w>``: the weight ``w`` of ``w * P_j * short_jk^2``.  On cut-in chance
+    #: cells (``standoff_shortfall_mask``) the optimizer picks the standoff
+    #: ``d_safe(v) - short`` with ``0 <= short <= tau * v``, anywhere between the
+    #: full ``L + d0 + tau * v`` and the ``L + d0`` floor, instead of having it
+    #: fixed at ``alpha_j * d_safe(v)``; ``slack`` stays the emergency relaxation.
+    #: Where vacating inheritance or gap recovery lowers a cell's factor below 1,
+    #: both ends scale with it.  ``None`` is off, and the QP then has no
+    #: shortfall variables at all.
+    standoff_shortfall_weight: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -186,6 +195,17 @@ class NairACCConfig:
                 self.risk_allocation_mode == RISK_OPTIMIZED_ETA
                 and self.safety_constraint_mode != SAFETY_SCALAR_CHANCE):
             raise ValueError("optimized_eta risk allocation requires scalar_chance safety constraints")
+        if self.standoff_shortfall_weight is not None:
+            if not self.standoff_shortfall_weight > 0.0:
+                raise ValueError("standoff_shortfall_weight (dopt<w>) must be positive")
+            if (
+                    self.safety_constraint_mode != SAFETY_CONFIDENCE_CHANCE
+                    or self.controller_variant == VARIANT_MULTIMODAL_OL
+                    or self.risk_allocation_mode != RISK_FIXED):
+                raise ValueError(
+                    "standoff_shortfall_weight (dopt<w>) is implemented only in the cached "
+                    "feedback confidence_chance QP: needs confidence_chance safety, fixed risk "
+                    "and a non-open-loop variant")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -591,6 +611,10 @@ class NairACCSolution:
     optimized_risk_max: float = 0.0
     solve_path: str = ""
     timing_breakdown: Optional[Dict[str, float]] = None
+    #: Largest emergency slack over the active cells.
+    slack_max: float = 0.0
+    #: ``dopt<w>`` only: the standoff the solve allowed per (mode, step), NaN off the dopt cells.
+    planned_standoff: Optional[np.ndarray] = None
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -678,6 +702,8 @@ class CachedFeedbackScalarChanceQP:
     objective: Any
     optimized_eta: bool
     optimize_k: bool
+    short_var: Any = None
+    shortfall_mask_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -694,6 +720,8 @@ class OldACCReferenceAdapter:
     def __init__(self, config):
         self.config = config
         self.previous_planned_speed = None
+        # dopt<w>: scenario name -> standoff the last solve allowed, per step
+        self.previous_planned_standoff = {}
 
     def generate(self, ego_state, lead_prediction):
         s_ego = float(ego_state[0])
@@ -734,6 +762,10 @@ class OldACCReferenceAdapter:
         for step in range(horizon):
             planned_s[step + 1] = planned_s[step] + planned_v[step] * dt
 
+        remembered_standoff = None
+        if self.config.standoff_shortfall_weight is not None:
+            remembered_standoff = self._remembered_standoff(lead_prediction)
+
         for mode in range(num_modes):
             for step in range(horizon + 1):
                 if not lead_prediction.active_mask[mode, step]:
@@ -747,6 +779,11 @@ class OldACCReferenceAdapter:
                 # cost demand the full standoff while the constraint allows a
                 # scaled one, so the ego brakes harder than the risk warrants.
                 safe_gap *= float(lead_prediction.clearance_scale[mode, step])
+                # On a dopt<w> cell the optimizer picks the standoff, so by the
+                # same rule ask for the one it picked last solve for this
+                # scenario and step; the full one above until there is one.
+                if remembered_standoff is not None and np.isfinite(remembered_standoff[mode, step]):
+                    safe_gap = float(remembered_standoff[mode, step])
                 # Same reasoning for the sigma term: the constraint below adds
                 # it, so the reference has to ask for it too.
                 if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
@@ -802,6 +839,22 @@ class OldACCReferenceAdapter:
     def remember_planned_speed(self, x_nominal):
         self.previous_planned_speed = np.asarray(x_nominal[0, :, 1], dtype=float)
 
+    def remember_planned_standoff(self, prediction, planned_standoff):
+        """Keep each scenario's solved dopt standoff by name, unshifted; absent names are dropped."""
+        self.previous_planned_standoff = {
+            name: np.asarray(row, dtype=float).copy()
+            for name, row in zip(_scenario_names(prediction), planned_standoff)
+        }
+
+    def _remembered_standoff(self, prediction):
+        """The remembered standoffs on this prediction's dopt cells, NaN elsewhere."""
+        standoff = np.full((prediction.num_modes, self.config.horizon + 1), np.nan)
+        for mode, name in enumerate(_scenario_names(prediction)):
+            if name in self.previous_planned_standoff:
+                standoff[mode] = self.previous_planned_standoff[name]
+        standoff[~standoff_shortfall_mask(prediction)] = np.nan
+        return standoff
+
     def _old_speed_ramp(self, v_ego):
         reach_time = 2.0
         reach_steps = max(1, int(reach_time / self.config.dt))
@@ -829,6 +882,7 @@ class NairACCSMPC:
         self._command_dt = float(self.config.dt)
         self._open_loop_fixed_qp_cache = {}
         self._feedback_scalar_chance_qp_cache = {}
+        self._standoff_shortfall = None  # dopt<w>: the cached QP's solved shortfall
 
     @property
     def A(self):
@@ -885,6 +939,8 @@ class NairACCSMPC:
 
         phase_start = time.perf_counter()
         self.reference_adapter.remember_planned_speed(solution.x_nominal)
+        if solution.planned_standoff is not None:
+            self.reference_adapter.remember_planned_standoff(prediction, solution.planned_standoff)
         timing_breakdown["remember_planned_speed_s"] = time.perf_counter() - phase_start
         timing_breakdown["controller_total_s"] = time.perf_counter() - solve_start
 
@@ -1069,6 +1125,13 @@ class NairACCSMPC:
         return self._solve_feedback(ego_state, prediction, reference, risks, policy0, open_loop=True)
 
     def _solve_feedback(self, ego_state, prediction, reference, risks, policy0, open_loop=False):
+        # Outside the try below: a dopt<w> solve must not fall through to a fallback.
+        if self.config.standoff_shortfall_weight is not None and not (
+                self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE
+                and self._can_use_cached_feedback_scalar_chance_qp(open_loop, prediction)):
+            raise ValueError(
+                "standoff_shortfall_weight (dopt<w>) is implemented only in the cached feedback "
+                "confidence_chance QP, and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1076,6 +1139,7 @@ class NairACCSMPC:
         layout = self._policy_variable_layout(prediction, open_loop=open_loop)
         timing_breakdown["policy_layout_s"] = time.perf_counter() - phase_start
         solve_path = "fallback"
+        self._standoff_shortfall = None
 
         try:
             if self._can_use_cached_open_loop_fixed_qp(open_loop, prediction):
@@ -1138,6 +1202,7 @@ class NairACCSMPC:
         optimized_risk_levels = None
         target_safe_probability = 0.0
         risk_diagnostics = risks
+        shortfall = self._standoff_shortfall
         if optimized_eta_data is not None:
             eta_levels = np.asarray(optimized_eta_data["eta_levels"], dtype=float).reshape(-1)
             safe_probability_levels = np.asarray(
@@ -1179,10 +1244,23 @@ class NairACCSMPC:
                     chance_margin_values[mode, step] = (
                         safety_values[mode, step] - tightening_values[mode, step]
                     )
+                    if shortfall is not None:
+                        # dopt<w>: measured against the standoff the QP allowed, as
+                        # every policy's margin is against its own requirement, so
+                        # a negative margin still means the emergency slack was used.
+                        chance_margin_values[mode, step] += shortfall[mode, step]
                 else:
                     safety_values[mode, step] = np.inf
                     tightening_values[mode, step] = 0.0
                     chance_margin_values[mode, step] = np.inf
+        planned_standoff = None
+        if self.config.standoff_shortfall_weight is not None:
+            standoff = prediction.clearance_scale * (
+                self.config.vehicle_length + self.config.d0
+                + self.config.time_headway * x_nominal[:, :, 1])
+            if shortfall is not None:  # None after a fallback, which plans no shortfall
+                standoff = standoff - shortfall
+            planned_standoff = np.where(standoff_shortfall_mask(prediction), standoff, np.nan)
         timing_breakdown["solution_postprocess_s"] = time.perf_counter() - phase_start
 
         first_accel = reference.prev_u[0, 0] + policy.h[0, 0, 0]
@@ -1244,6 +1322,11 @@ class NairACCSMPC:
             ),
             solve_path=solve_path,
             timing_breakdown=timing_breakdown,
+            slack_max=(
+                float(np.max(slack[prediction.active_mask]))
+                if np.any(prediction.active_mask) else 0.0
+            ),
+            planned_standoff=planned_standoff,
         )
 
     @staticmethod
@@ -1674,6 +1757,8 @@ class NairACCSMPC:
             self.config.solver_name,
             float(self.config.optimizer_ftol),
             None if self.config.gurobi_time_limit is None else float(self.config.gurobi_time_limit),
+            None if self.config.standoff_shortfall_weight is None
+            else float(self.config.standoff_shortfall_weight),
         )
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -1733,6 +1818,10 @@ class NairACCSMPC:
         for sample_idx in range(3):
             opti.set_value(problem.lead_dev_s_params[sample_idx], lead_dev_s[sample_idx])
             opti.set_value(problem.lead_dev_v_params[sample_idx], lead_dev_v[sample_idx])
+        shortfall_mask = None
+        if problem.short_var is not None:
+            shortfall_mask = standoff_shortfall_mask(prediction)
+            opti.set_value(problem.shortfall_mask_param, shortfall_mask.astype(float))
         k_slot_by_step = []
         if problem.optimize_k:
             for step in range(horizon):
@@ -1768,6 +1857,8 @@ class NairACCSMPC:
 
         opti.set_initial(problem.h_var, h_initial)
         opti.set_initial(problem.slack_var, np.zeros((num_modes, horizon + 1)))
+        if problem.short_var is not None:
+            opti.set_initial(problem.short_var, np.zeros((num_modes, horizon + 1)))
         if problem.optimize_k:
             for slot in range(problem.k_group_capacity):
                 for step in range(horizon):
@@ -1812,6 +1903,10 @@ class NairACCSMPC:
                     slot = k_slot_by_step[step][group_id]
                     k[mode, step] = np.asarray(sol.value(problem.k_var[slot][step]), dtype=float).reshape(NO)
         slack = np.asarray(sol.value(problem.slack_var), dtype=float).reshape((num_modes, horizon + 1))
+        shortfall = None
+        if problem.short_var is not None:
+            shortfall = np.asarray(sol.value(problem.short_var), dtype=float).reshape((num_modes, horizon + 1))
+            shortfall = np.where(shortfall_mask, shortfall, 0.0)
 
         opti.set_initial(problem.h_var, h_values)
         opti.set_initial(problem.slack_var, slack)
@@ -1861,6 +1956,7 @@ class NairACCSMPC:
             opti_solve_s,
             extract_solution_s,
         )
+        self._standoff_shortfall = shortfall
         return NairACCPolicy(h=h, M=m, K=k), slack, cost, "optimal", message, layout, optimized_eta_data
 
     def _get_feedback_scalar_chance_qp(self, num_modes):
@@ -1888,6 +1984,8 @@ class NairACCSMPC:
         slack_var = opti.variable(num_modes, horizon + 1)
         eta_var = opti.variable(num_modes) if optimized_eta else None
         rho_var = opti.variable(num_modes) if optimized_eta else None
+        shortfall_weight = self.config.standoff_shortfall_weight
+        short_var = opti.variable(num_modes, horizon + 1) if shortfall_weight is not None else None
         x0_param = opti.parameter(NX)
         prev_u_param = opti.parameter(num_modes, horizon)
         previous_accel_param = opti.parameter()
@@ -1907,9 +2005,13 @@ class NairACCSMPC:
         brake_v_max_param = opti.parameter(num_modes, horizon + 1)
         lead_dev_s_params = [opti.parameter(num_modes, horizon) for _ in range(3)]
         lead_dev_v_params = [opti.parameter(num_modes, horizon) for _ in range(3)]
+        shortfall_mask_param = (
+            opti.parameter(num_modes, horizon + 1) if shortfall_weight is not None else None)
         sharing_params = []
 
         opti.subject_to(ca.vec(slack_var) >= 0.0)
+        if short_var is not None:
+            opti.subject_to(ca.vec(short_var) >= 0.0)
         if optimize_k:
             for group_id in range(k_group_capacity):
                 for step in range(horizon):
@@ -2015,6 +2117,17 @@ class NairACCSMPC:
                     tightening = safety_std_param[mode, step] * eta_var[mode]
                 else:
                     tightening = tightening_param[mode, step]
+                slack = slack_var[mode, step]
+                if short_var is not None:
+                    # dopt<w>: the shortfall relaxes the row as slack does, but only
+                    # on masked cells and only by the time-gap part, so the standoff
+                    # stays at or above L + d0 (times the cell's scale); it is
+                    # priced by the scenario probability below.
+                    opti.subject_to(
+                        short_var[mode, step]
+                        <= shortfall_mask_param[mode, step] * clearance_scale_param[mode, step]
+                        * self.config.time_headway * states_v[step])
+                    slack = slack + short_var[mode, step]
                 self._add_symbolic_safety_constraints(
                     opti,
                     lead_s_param[mode, step],
@@ -2026,9 +2139,14 @@ class NairACCSMPC:
                     brake_v_max=brake_v_max_param[mode, step],
                     enforce_brake_speed_band=step > 0,
                     tightening=tightening,
-                    slack=slack_var[mode, step],
+                    slack=slack,
                     clearance_scale=clearance_scale_param[mode, step],
                 )
+
+        if short_var is not None:
+            for mode in range(num_modes):
+                for step in range(horizon + 1):
+                    objective += shortfall_weight * probability_param[mode] * short_var[mode, step] ** 2
 
         opti.minimize(objective)
         p_opts, s_opts = self._gurobi_options()
@@ -2066,6 +2184,8 @@ class NairACCSMPC:
             objective=objective,
             optimized_eta=optimized_eta,
             optimize_k=optimize_k,
+            short_var=short_var,
+            shortfall_mask_param=shortfall_mask_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
@@ -2401,6 +2521,9 @@ class NairACCSMPC:
                 self.config.safety_constraint_mode == SAFETY_SCALAR_CHANCE
                 and self.config.risk_allocation_mode == RISK_OPTIMIZED_ETA):
             risk_variable_count = 2 * num_joint_modes
+        # dopt<w>: one standoff shortfall per (mode, step), feedback QP only
+        shortfall_variable_count = (
+            num_modes * (horizon + 1) if self.config.standoff_shortfall_weight is not None else 0)
 
         if open_loop:
             baseline_decision_variables = (
@@ -2420,6 +2543,7 @@ class NairACCSMPC:
                 + num_modes * horizon * horizon * NX
                 + num_modes * (horizon + 1)
                 + risk_variable_count
+                + shortfall_variable_count
             )
             num_decision_variables = (
                 len(group_steps) * NU
@@ -2427,6 +2551,7 @@ class NairACCSMPC:
                 + sum(step * NX for step in group_steps)
                 + num_modes * (horizon + 1)
                 + risk_variable_count
+                + shortfall_variable_count
             )
         return PolicyVariableLayout(
             group_map=group_map,
@@ -2787,6 +2912,20 @@ def confidence_tightening(lead_covariance, beta, config):
     if not np.isfinite(beta):
         return 0.0
     return float(confidence_quantile(beta) * safety_std(lead_covariance, config))
+
+
+def standoff_shortfall_mask(prediction):
+    """Cells whose standoff the optimizer picks under ``dopt<w>``.
+
+    The active cells with a finite chance confidence, which ``cutin_chance``
+    gives to cut-in leads only.  The QP's shortfall bound and the reference
+    generator both read it, so the two cannot disagree on which cells they are.
+    """
+    return np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
+
+
+def _scenario_names(prediction):
+    return prediction.mode_names or [f"mode_{idx}" for idx in range(prediction.num_modes)]
 
 
 def cdf_lower_bound_lines(config):

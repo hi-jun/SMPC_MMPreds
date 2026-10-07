@@ -27,6 +27,7 @@ from utils.acc_nair_smpc import (  # noqa: E402
     SAFETY_CONFIDENCE_CHANCE,
     SAFETY_NOMINAL_SAFE_DISTANCE,
     SAFETY_SCALAR_CHANCE,
+    VARIANT_FIXED_RISK,
     VARIANT_MULTIMODAL_OL,
     allocate_risk,
     cdf_lower_bound_lines,
@@ -35,6 +36,7 @@ from utils.acc_nair_smpc import (  # noqa: E402
     confidence_tightening,
     exact_brake_distance,
     optimized_eta_target_probability,
+    original_nair_acc_config,
     safety_function,
     safety_std,
     scalar_chance_margin,
@@ -776,6 +778,170 @@ class TestConfidenceChanceConstraint(unittest.TestCase):
         )
         # Mode 0 is deterministic either way.
         np.testing.assert_allclose(with_sigma.s_ref[0], without.s_ref[0])
+
+
+class TestOptimizedStandoff(unittest.TestCase):
+    """``dopt<w>``: the optimizer picks the standoff on cut-in chance cells.
+
+    Such a cell keeps the full d_safe(v) = L + d0 + tau*v (factor 1); a shortfall
+    0 <= short <= tau*v priced w * P_j * short^2 may relax it, never below the
+    L + d0 = 7.5 m floor.  The last scenario below is the cut-in, a lead in the
+    ego lane at every step; the other one, if any, is lane keeping with no lead.
+    The ego drives at 14 m/s, so d_safe = 25.7 m.
+    """
+
+    HORIZON = 15
+    EGO = np.array([0.0, 14.0])
+    COVARIANCE = np.diag([0.25, 0.09])
+    CONFIDENCE = 0.3
+
+    def _config(self, weight, **overrides):
+        config = original_nair_acc_config(
+            horizon=self.HORIZON, dt=0.2, desired_speed=14.0, num_modes=2,
+            controller_variant=VARIANT_FIXED_RISK)
+        config.safety_constraint_mode = SAFETY_CONFIDENCE_CHANCE
+        config.r_move = 1000.0  # rmove1000, as in every paper policy
+        config.standoff_shortfall_weight = weight
+        for name, value in overrides.items():
+            setattr(config, name, value)
+        config.__post_init__()
+        return config
+
+    def _prediction(self, gap0, lead_v, probabilities):
+        num_modes, steps = len(probabilities), self.HORIZON + 1
+        means = np.zeros((num_modes, steps, 2))
+        means[:, :, 0] = gap0 + lead_v * 0.2 * np.arange(steps)
+        means[:, :, 1] = lead_v
+        active = np.zeros((num_modes, steps), dtype=bool)
+        active[-1] = True
+        chance_confidence = np.full((num_modes, steps), np.nan)
+        chance_confidence[-1] = self.CONFIDENCE
+        return MultimodalLeadPrediction(
+            means=means,
+            probabilities=np.asarray(probabilities, dtype=float),
+            covariances=np.tile(self.COVARIANCE, (num_modes, steps, 1, 1)),
+            active_mask=active,
+            chance_confidence=chance_confidence,
+            mode_names=["10:lk", "10:cutin"][-num_modes:],
+        )
+
+    def _solve(self, weight, prediction):
+        controller = NairACCSMPC(self._config(weight))
+        return controller, controller.solve(
+            self.EGO, prediction, previous_accel_cmd=0.0, command_dt=0.05)
+
+    @staticmethod
+    def _shortfall(solution, mode):
+        """What the solve took off the cell's full standoff, from the logged plan."""
+        return 7.5 + 1.3 * solution.x_nominal[mode, :, 1] - solution.planned_standoff[mode]
+
+    def _sigma_term(self, config):
+        return confidence_quantile(self.CONFIDENCE) * safety_std(self.COVARIANCE, config)
+
+    def test_unlikely_cutin_takes_a_shortfall_where_the_full_standoff_brakes(self):
+        # 15 m behind a cut-in at the ego's speed: inside d_safe + q*sigma (25.9 m),
+        # outside the floor L + d0 + q*sigma (7.7 m).
+        prediction = self._prediction(15.0, 14.0, (0.8, 0.2))
+        _, plain = self._solve(None, prediction)
+        _, dopt = self._solve(3.0, prediction)
+        # Without the shortfall only the emergency slack meets step 0, and the
+        # ego brakes at the jerk limit (5 m/s^3 over 0.05 s).
+        self.assertGreater(plain.slack_max, 10.0)
+        self.assertLess(plain.action, -0.2)
+        self.assertEqual(dopt.solve_path, "cached_feedback_confidence_chance_qp")
+        self.assertGreater(self._shortfall(dopt, 1)[0], 10.0)
+        self.assertTrue(np.all(dopt.planned_standoff[1] >= 7.5 - 1.0e-3))
+        self.assertTrue(np.all(np.isnan(dopt.planned_standoff[0])))
+        self.assertGreater(dopt.action, plain.action + 0.15)
+        # The margin is against the standoff the QP allowed, so the priced
+        # shortfall is no violation; only the emergency slack would be.
+        self.assertLess(dopt.slack_max, 0.01)
+        self.assertGreater(dopt.chance_margin_min, -0.01)
+        self.assertTrue(dopt.feasible)
+
+    def test_certain_cutin_and_heavy_weight_keep_the_full_standoff(self):
+        # 28 m behind a lead 2 m/s slower: braking alone keeps the full standoff.
+        prediction = self._prediction(28.0, 12.0, (1.0,))
+        _, plain = self._solve(None, prediction)
+        _, light = self._solve(0.1, prediction)
+        _, heavy = self._solve(1000.0, prediction)
+        self.assertGreater(np.max(self._shortfall(light, 0)), 0.5)
+        self.assertLess(np.max(self._shortfall(heavy, 0)), 0.05)
+        np.testing.assert_allclose(heavy.u_nominal, plain.u_nominal, atol=0.02)
+
+    def test_the_standoff_never_drops_below_the_footprint_floor(self):
+        # 5 m behind, inside L + d0: even a nearly free shortfall stops at the
+        # floor, and the emergency slack covers the rest.
+        prediction = self._prediction(5.0, 14.0, (0.8, 0.2))
+        controller, solution = self._solve(0.01, prediction)
+        standoff = solution.planned_standoff[1]
+        self.assertTrue(np.all(standoff >= 7.5 - 1.0e-3))
+        self.assertAlmostEqual(standoff[0], 7.5, places=3)
+        self.assertTrue(np.all(self._shortfall(solution, 1) <= 1.3 * solution.x_nominal[1, :, 1] + 1.0e-3))
+        self.assertAlmostEqual(
+            solution.slack_max, 7.5 + self._sigma_term(controller.config) - 5.0, places=3)
+
+    def test_the_qp_has_shortfall_variables_only_with_dopt(self):
+        prediction = self._prediction(15.0, 14.0, (0.8, 0.2))
+        off, plain = self._solve(None, prediction)
+        on, dopt = self._solve(3.0, prediction)
+        qp_off, qp_on = off._get_feedback_scalar_chance_qp(2), on._get_feedback_scalar_chance_qp(2)
+        self.assertIsNone(qp_off.short_var)
+        self.assertIsNone(qp_off.shortfall_mask_param)
+        cells = 2 * (self.HORIZON + 1)
+        self.assertEqual(qp_on.opti.nx - qp_off.opti.nx, cells)
+        self.assertEqual(qp_on.opti.ng - qp_off.opti.ng, 2 * cells)
+        self.assertEqual(qp_on.opti.np - qp_off.opti.np, cells)
+        self.assertEqual(dopt.num_decision_variables - plain.num_decision_variables, cells)
+        self.assertIsNone(plain.planned_standoff)
+        self.assertNotEqual(
+            off._feedback_scalar_chance_qp_key(2), on._feedback_scalar_chance_qp_key(2))
+
+    def test_reference_asks_for_the_standoff_the_last_solve_allowed(self):
+        config = self._config(3.0)
+        prediction = self._prediction(15.0, 14.0, (0.8, 0.2))
+        lead_s = prediction.means[1, :, 0]
+        sigma_term = self._sigma_term(config)
+        adapter = OldACCReferenceAdapter(config)
+        # Nothing remembered yet: the full standoff (planned speed = ego speed).
+        full = adapter.generate(self.EGO, prediction)
+        np.testing.assert_allclose(full.s_ref[1], lead_s - (7.5 + 1.3 * 14.0) - sigma_term)
+        remembered = np.full((2, self.HORIZON + 1), np.nan)
+        remembered[1] = 20.0  # more than the 15 m gap, so it binds the reference
+        adapter.remember_planned_standoff(prediction, remembered)
+        np.testing.assert_allclose(
+            adapter.generate(self.EGO, prediction).s_ref[1], lead_s - 20.0 - sigma_term)
+        renamed = self._prediction(15.0, 14.0, (0.8, 0.2))
+        renamed.mode_names = ["11:lk", "11:cutin"]
+        np.testing.assert_allclose(adapter.generate(self.EGO, renamed).s_ref[1], full.s_ref[1])
+        adapter.remember_planned_standoff(renamed, remembered)
+        self.assertEqual(sorted(adapter.previous_planned_standoff), ["11:cutin", "11:lk"])
+        # A solve remembers its own plan under each scenario's name, unshifted.
+        controller, solution = self._solve(3.0, prediction)
+        np.testing.assert_array_equal(
+            controller.reference_adapter.previous_planned_standoff["10:cutin"],
+            solution.planned_standoff[1])
+
+    def test_dopt_outside_the_cached_feedback_confidence_chance_qp_raises(self):
+        for overrides in (
+                {"safety_constraint_mode": SAFETY_NOMINAL_SAFE_DISTANCE},
+                {"safety_constraint_mode": SAFETY_BRAKE_DISTANCE},
+                {"safety_constraint_mode": SAFETY_SCALAR_CHANCE},
+                {"controller_variant": VARIANT_MULTIMODAL_OL},
+                {"risk_allocation_mode": RISK_PROBABILITY_WEIGHTED}):
+            with self.assertRaises(ValueError, msg=str(overrides)):
+                self._config(3.0, **overrides)
+        with self.assertRaises(ValueError):
+            self._config(0.0)
+        # A config changed after the controller was built fails at the solve
+        # instead of turning into a fallback step.
+        prediction = self._prediction(15.0, 14.0, (0.8, 0.2))
+        for name, value in (("risk_allocation_mode", RISK_PROBABILITY_WEIGHTED),
+                            ("controller_variant", VARIANT_MULTIMODAL_OL)):
+            controller = NairACCSMPC(self._config(3.0))
+            setattr(controller.config, name, value)
+            with self.assertRaisesRegex(ValueError, "dopt", msg=name):
+                controller.solve(self.EGO, prediction)
 
 
 if __name__ == "__main__":

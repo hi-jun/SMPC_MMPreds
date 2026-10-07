@@ -108,6 +108,12 @@ class ACCNairSMPCAgent(object):
         if self.cutin_chance_ref > 0.0 and self.cutin_clearance_ramp_ref > 0.0:
             raise ValueError(
                 "cutin_ramp and cutin_chance both set the cut-in standoff scale; use one")
+        self.chance_sigma_cap = self._parse_chance_sigma_cap(smpc_config)
+        self.standoff_shortfall_weight = self._parse_standoff_shortfall_weight(smpc_config)
+        if self.cutin_chance_ref <= 0.0 and (
+                self.chance_sigma_cap is not None or self.standoff_shortfall_weight is not None):
+            raise ValueError(
+                "sigmacap and dopt modify the cutin_chance constraint; add cutin_chance<beta_ref>")
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -154,6 +160,7 @@ class ACCNairSMPCAgent(object):
         r_move = self._parse_r_move(smpc_config)
         if r_move is not None:
             self.controller_config.r_move = r_move
+        self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -533,6 +540,7 @@ class ACCNairSMPCAgent(object):
                     else int(solution.first_policy_split_step)
                 ),
                 "chance_margin_min": float(solution.chance_margin_min),
+                "slack_max": float(solution.slack_max),
                 "tightening_max": float(solution.tightening_max),
                 "clearance_scale_now": self._clearance_scale_now(prediction_bundle["prediction"]),
                 "predictor_time": prediction_bundle.get("debug", {}).get("predictor_time"),
@@ -545,6 +553,12 @@ class ACCNairSMPCAgent(object):
                 ),
                 "acc_reference": self._acc_reference_debug(solution),
             })
+            if solution.planned_standoff is not None:
+                # dopt<w>: the standoff the solve allowed per (mode, step), None off the dopt cells
+                self.policy_log[-1]["planned_standoff"] = [
+                    [None if np.isnan(value) else value for value in row]
+                    for row in np.asarray(solution.planned_standoff, dtype=float).round(4).tolist()
+                ]
             self._log_wandb(self.policy_log[-1], solution, prediction_bundle)
 
         self._remember_accel_cmd(time_s, action)
@@ -751,6 +765,8 @@ class ACCNairSMPCAgent(object):
                 cutin_probability_threshold=self.cutin_probability_threshold,
                 cutin_clearance_ramp_ref=self.cutin_clearance_ramp_ref,
                 cutin_chance_ref=self.cutin_chance_ref,
+                cutin_chance_sigma_cap=self.chance_sigma_cap,
+                cutin_chance_optimized_standoff=self.standoff_shortfall_weight is not None,
                 cutin_clearance_tlc_ref=self.cutin_clearance_tlc_ref,
                 gap_recovery_elapsed=gap_recovery_elapsed,
                 gap_recovery_s=self.gap_recovery_s,
@@ -1358,6 +1374,29 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"cutin_chance([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_chance_sigma_cap(smpc_config):
+        """Read ``sigmacap<value>`` from the config string (None: ``beta_ref`` caps it).
+
+        The chance constraint's sigma term is then asked for confidence
+        ``min(p, value)`` while the standoff factor keeps ``min(p, beta_ref)``.
+        Needs ``cutin_chance<beta_ref>``.  See ``chance_cutin_clearance``.
+        """
+        match = re.search(r"sigmacap([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_standoff_shortfall_weight(smpc_config):
+        """Read ``dopt<w>`` from the config string (None = off).
+
+        Cut-in chance cells drop the ``alpha_j`` standoff factor; the optimizer
+        picks their standoff between ``L + d0`` and the full ``d_safe(v)`` at a
+        cost ``w * P_j * shortfall^2``.  Needs ``cutin_chance<beta_ref>``.  See
+        ``NairACCConfig.standoff_shortfall_weight``.
+        """
+        match = re.search(r"dopt([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_cutin_clearance_tlc_ref(smpc_config):

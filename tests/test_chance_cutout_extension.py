@@ -316,10 +316,7 @@ class TestCutInRegression(unittest.TestCase):
     def test_adjacent_lane_modes_follow_the_existing_rules(self):
         tv, straight = self._processed()
         tv_modes, straight_modes = modes_by_name(tv), modes_by_name(straight)
-        self.assertGreater(tv_modes["cutin"].probability, REF)
-        # beta_ref caps the standoff factor, not the sigma term's confidence.
-        self.assertAlmostEqual(
-            tv_modes["cutin"].chance_confidence, tv_modes["cutin"].probability, places=9)
+        self.assertAlmostEqual(tv_modes["cutin"].chance_confidence, REF, places=9)
         self.assertEqual(tv_modes["cutin"].clearance_scale, 1.0)
         np.testing.assert_array_equal(
             tv_modes["cutin"].active_mask, [False, False, False, True, True, True, True])
@@ -347,7 +344,7 @@ class TestCutInRegression(unittest.TestCase):
         for name in ("10:cutin+11:lk", "10:cutin+11:cutin"):
             idx = scenario_index(extended, name)
             expected_active[idx, 3:] = True
-            expected_confidence[idx, 3:] = modes_by_name(tv)["cutin"].probability
+            expected_confidence[idx, 3:] = REF
         np.testing.assert_array_equal(extended.active_mask, expected_active)
         np.testing.assert_array_equal(extended.chance_confidence, expected_confidence)
         np.testing.assert_array_equal(extended.clearance_scale, np.ones((4, self.HORIZON + 1)))
@@ -361,6 +358,50 @@ class TestCutInRegression(unittest.TestCase):
             [meta["effective_lead_keys"] for meta in extended_meta],
             [meta["effective_lead_keys"] for meta in plain_meta])
         self.assertTrue(all(meta["vacated_lane_steps"] == [] for meta in extended_meta))
+
+
+class TestSigmaCapOnVacatedCells(unittest.TestCase):
+    """``sigmacap<c>`` reaches a cut-in cell seen past a vacating ego-lane lead.
+
+    Scenario ``1:cutout+10:cutin``: the lead (cut-out 0.8) is out of the lane
+    from step 4, and from there the TV (cut-in 0.95, in the ego lane from step
+    3) is the lead and inherits the departure's probability.  Without the cap
+    both terms take min(p, beta_ref) = 0.6; with it the sigma term takes
+    min(0.95, 0.8, c) = 0.8 while the standoff factor stays q(0.6) / q(0.6) = 1.
+    """
+
+    HORIZON = 6
+
+    def _build(self, sigma_cap):
+        kwargs = {"cutin_chance_ref": REF, "cutin_probability_threshold": VANISH,
+                  "cutin_chance_sigma_cap": sigma_cap}
+        lv = process(ego_lane_raw(1, 20.0, 10.0, 0.2, 0.8, self.HORIZON, leave_step=4),
+                     REL_EGO_LANE, 20.0, 0.0, 10.0, self.HORIZON, **kwargs)
+        tv = process(TestCutInRegression._adjacent_raw(10, 40.0, 3.5, [0.05, 0.0, 0.95], 2, 3),
+                     REL_LEFT_ADJACENT, 40.0, 3.5, 10.0, self.HORIZON, **kwargs)
+        prediction, metadata = build_multitarget_lead_prediction(
+            [lv, tv],
+            ego_state=np.array([0.0, 10.0]),
+            horizon=self.HORIZON,
+            desired_speed=15.0,
+            num_modes=4,
+            reference_beta=REF,
+            vanish_threshold=VANISH,
+            sigma_cap=sigma_cap,
+        )
+        idx = scenario_index(prediction, "1:cutout+10:cutin")
+        return prediction, metadata[idx], idx
+
+    def test_the_cap_reaches_the_inherited_sigma_confidence(self):
+        default, meta, idx = self._build(None)
+        capped, _, _ = self._build(0.99)
+        self.assertEqual(meta["selected_vehicle_ids"], [1, 1, 1, 1, 10, 10, 10])
+        self.assertEqual(meta["vacated_lane_steps"], [4, 5, 6])
+        np.testing.assert_allclose(default.chance_confidence[idx, 4:], REF)
+        np.testing.assert_allclose(capped.chance_confidence[idx, 4:], 0.8)
+        np.testing.assert_allclose(default.clearance_scale[idx, 4:], 1.0)
+        np.testing.assert_array_equal(capped.clearance_scale, default.clearance_scale)
+        np.testing.assert_array_equal(capped.active_mask, default.active_mask)
 
 
 if __name__ == "__main__":

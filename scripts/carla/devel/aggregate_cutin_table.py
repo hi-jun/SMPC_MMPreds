@@ -491,7 +491,12 @@ def policy_label(policy):
         return "SCC + LSTM"
     if "cutin_chance" in policy:
         m = re.search(r"cutin_chance([0-9.]+)", policy)
-        return "Proposed (chance $\\beta_{ref}$=%s)" % (m.group(1) if m else "?")
+        label = "Proposed (chance $\\beta_{ref}$=%s)" % (m.group(1) if m else "?")
+        for token, name in (("dopt", "D-opt w"), ("sigmacap", "sigma cap")):
+            m = re.search(token + r"([0-9]*\.?[0-9]+)", policy)
+            if m:
+                label += " + %s=%s" % (name, m.group(1))
+        return label
     if "stdan_3int" in policy:
         return "STDAN ACC (no chance)"
     return policy

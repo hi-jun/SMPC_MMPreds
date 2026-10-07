@@ -15,7 +15,6 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa:
     REL_EGO_LANE,
     REL_RIGHT_ADJACENT as _REL_RIGHT_ADJACENT,
     CUTOUT_CLEARANCE_FLOOR,
-    CHANCE_CONFIDENCE_CAP,
     chance_cutin_clearance,
     chance_tolerance,
     cutin_clearance_scale,
@@ -33,6 +32,9 @@ from utils.acc_nair_smpc import (  # noqa: E402
     NairACCConfig,
     NairACCSMPC,
     OldACCReferenceAdapter,
+    RISK_FIXED,
+    SAFETY_CONFIDENCE_CHANCE,
+    VARIANT_FIXED_RISK,
     confidence_quantile,
     required_standoff,
     safety_function,
@@ -705,17 +707,14 @@ class TestCutInChanceConstraint(unittest.TestCase):
         self.assertTrue(all(a < b for a, b in zip(values, values[1:])), values)
 
     def test_confidence_is_capped_and_scale_vanishes(self):
-        modes = [self._fake_mode("cutin", p) for p in (0.999, 0.97, 0.50, 0.02)]
+        modes = [self._fake_mode("cutin", p) for p in (0.99, 0.50, 0.02)]
         chance_cutin_clearance(modes, self.REF)
-        # beta_ref (0.95) caps the standoff factor only; the sigma term keeps the
-        # mode's own confidence up to CHANCE_CONFIDENCE_CAP.
-        self.assertEqual([m.chance_confidence for m in modes], [0.99, 0.97, 0.50, 0.02])
+        self.assertEqual([m.chance_confidence for m in modes], [0.95, 0.50, 0.02])
         scales = [m.clearance_scale for m in modes]
         self.assertAlmostEqual(scales[0], 1.0, places=9)
-        self.assertAlmostEqual(scales[1], 1.0, places=9)
-        self.assertAlmostEqual(scales[2], 0.3441, places=3)
-        self.assertAlmostEqual(scales[3], 0.0128, places=3)
-        self.assertTrue(all(a > b for a, b in zip(scales[1:], scales[2:])), scales)
+        self.assertAlmostEqual(scales[1], 0.3441, places=3)
+        self.assertAlmostEqual(scales[2], 0.0128, places=3)
+        self.assertTrue(all(a > b for a, b in zip(scales, scales[1:])), scales)
 
     def test_reference_zero_is_a_no_op(self):
         mode = self._fake_mode("cutin", 0.3)
@@ -733,11 +732,10 @@ class TestCutInChanceConstraint(unittest.TestCase):
         self.assertTrue(np.isnan(by_name["lk"].chance_confidence))
         self.assertEqual(by_name["lk"].clearance_scale, 1.0)
         cutin = by_name["cutin"]
-        self.assertAlmostEqual(
-            cutin.chance_confidence, min(cutin.probability, CHANCE_CONFIDENCE_CAP), places=9)
+        self.assertAlmostEqual(cutin.chance_confidence, min(cutin.probability, self.REF), places=9)
         self.assertAlmostEqual(
             cutin.clearance_scale,
-            confidence_quantile(min(cutin.probability, self.REF)) / confidence_quantile(self.REF),
+            confidence_quantile(cutin.chance_confidence) / confidence_quantile(self.REF),
             places=9,
         )
         self.assertLess(cutin.clearance_scale, 1.0)
@@ -839,6 +837,94 @@ class TestLaneSideConvention(unittest.TestCase):
         self.assertEqual(relation_from_frenet_offset(3.34), REL_LEFT_ADJACENT)
         self.assertEqual(relation_from_frenet_offset(-3.34), _REL_RIGHT_ADJACENT)
         self.assertEqual(relation_from_frenet_offset(0.0), REL_EGO_LANE)
+
+
+class TestChanceSigmaCapAndOptimizedStandoff(unittest.TestCase):
+    """``sigmacap<c>`` and ``dopt<w>`` in ``chance_cutin_clearance``.
+
+    Without them one beta = min(p, beta_ref) feeds the sigma term and the
+    standoff factor (``TestCutInChanceConstraint``).  ``sigma_cap`` gives the
+    sigma term min(p, c) and leaves the factor alone; ``optimized_standoff``
+    sets the factor to 1 and leaves the confidence alone.
+    """
+
+    _fake_mode = staticmethod(TestCutInChanceConstraint._fake_mode)
+
+    def test_sigma_cap_decouples_the_sigma_term_from_beta_ref(self):
+        modes = [self._fake_mode("cutin", p) for p in (0.999, 0.97, 0.50, 0.02)]
+        chance_cutin_clearance(modes, 0.95, sigma_cap=0.99)
+        self.assertEqual([m.chance_confidence for m in modes], [0.99, 0.97, 0.50, 0.02])
+        scales = [m.clearance_scale for m in modes]
+        self.assertAlmostEqual(scales[0], 1.0, places=9)
+        self.assertAlmostEqual(scales[1], 1.0, places=9)
+        self.assertAlmostEqual(scales[2], 0.3441, places=3)
+        self.assertAlmostEqual(scales[3], 0.0128, places=3)
+
+    def test_proposed_reference_with_and_without_the_cap(self):
+        default, capped = self._fake_mode("cutin", 0.95), self._fake_mode("cutin", 0.95)
+        self.assertEqual(
+            chance_cutin_clearance([default], 0.6), {"cutin": {"confidence": 0.6, "scale": 1.0}})
+        chance_cutin_clearance([capped], 0.6, sigma_cap=0.99)
+        self.assertEqual(default.chance_confidence, 0.6)
+        self.assertEqual(capped.chance_confidence, 0.95)
+        self.assertEqual(capped.clearance_scale, default.clearance_scale)
+
+    def test_optimized_standoff_keeps_the_full_factor(self):
+        modes = [self._fake_mode("cutin", p) for p in (0.95, 0.30, 0.12)]
+        chance_cutin_clearance(modes, 0.6, optimized_standoff=True)
+        self.assertEqual([m.clearance_scale for m in modes], [1.0, 1.0, 1.0])
+        self.assertEqual([m.chance_confidence for m in modes], [0.6, 0.30, 0.12])
+
+    def test_process_vehicle_prediction_threads_both(self):
+        gate = TestCutInProbabilityGate()
+        raw = gate._raw([0.60, 0.30, 0.10], [3.5, 0.0, 0.0])  # cut-in 0.3
+        capped = gate._mode(gate._process(
+            raw, cutin_chance_ref=0.2, cutin_chance_sigma_cap=0.99), "cutin")
+        self.assertAlmostEqual(capped.chance_confidence, capped.probability, places=9)
+        self.assertAlmostEqual(capped.probability, 0.3, places=9)
+        relaxed = gate._mode(gate._process(raw, cutin_chance_ref=0.6), "cutin")
+        full = gate._mode(gate._process(
+            raw, cutin_chance_ref=0.6, cutin_chance_optimized_standoff=True), "cutin")
+        self.assertLess(relaxed.clearance_scale, 0.5)
+        self.assertEqual(full.clearance_scale, 1.0)
+        self.assertEqual(full.chance_confidence, relaxed.chance_confidence)
+
+
+class TestChanceTokens(unittest.TestCase):
+    """The agent reads ``dopt<w>`` and ``sigmacap<c>``; both need ``cutin_chance``."""
+
+    PROPOSED = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_rmove1000"
+
+    def test_the_agent_reads_the_dopt_policy_string(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent
+        self.assertIsNone(agent._parse_standoff_shortfall_weight(self.PROPOSED))
+        self.assertIsNone(agent._parse_chance_sigma_cap(self.PROPOSED))
+        for weight in (1, 3, 10, 30):
+            policy = ("acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8"
+                      "_cutin_chance0.6_dopt%d_rmove1000" % weight)
+            self.assertEqual(agent._parse_standoff_shortfall_weight(policy), float(weight))
+            self.assertIsNone(agent._parse_chance_sigma_cap(policy))
+            self.assertEqual(agent._parse_cutin_chance_ref(policy), 0.6)
+            self.assertEqual(agent._parse_predictor_type(policy), "stdan_3int")
+            self.assertEqual(agent._parse_safety_constraint_mode(policy), SAFETY_CONFIDENCE_CHANCE)
+            self.assertEqual(agent._parse_variant(policy), VARIANT_FIXED_RISK)
+            self.assertEqual(agent._parse_risk_allocation_mode(policy), RISK_FIXED)
+            self.assertEqual(agent._parse_controller_num_modes(policy, 2), 8)
+            self.assertEqual(agent._parse_r_move(policy), 1000.0)
+            self.assertFalse(agent._parse_optimize_k(policy))
+        self.assertEqual(agent._parse_chance_sigma_cap(self.PROPOSED + "_sigmacap0.99"), 0.99)
+
+    def test_dopt_and_sigmacap_need_cutin_chance(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent
+
+        class _Vehicle:  # the check runs before anything else touches the vehicle
+            def get_world(self):
+                return None
+
+        no_chance = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_rmove1000"
+        for token in ("_dopt3", "_sigmacap0.99"):
+            with self.assertRaisesRegex(ValueError, "cutin_chance", msg=token):
+                ACCNairSMPCAgent(_Vehicle(), None, smpc_config=no_chance + token)
 
 
 if __name__ == "__main__":

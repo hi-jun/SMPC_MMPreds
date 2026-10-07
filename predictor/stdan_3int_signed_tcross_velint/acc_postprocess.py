@@ -390,15 +390,11 @@ def ramp_cutin_clearance(
     return scales
 
 
-#: Largest confidence a chance cell's ``sigma`` term is asked for.  Only the
-#: divergence of the quantile as ``beta -> 1`` needs a cap (Benciolini et al.,
-#: Remark 4); ``q(0.99) = 2.58`` standard deviations.
-CHANCE_CONFIDENCE_CAP = 0.99
-
-
 def chance_cutin_clearance(
     mode_predictions: Sequence[ACCModePrediction],
     reference_beta: float,
+    sigma_cap: Optional[float] = None,
+    optimized_standoff: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     """Turn each cut-in mode into a Benciolini confidence chance constraint.
 
@@ -407,21 +403,26 @@ def chance_cutin_clearance(
     confidence demanded of a candidate trajectory is the probability assigned to
     it.  The 1-D counterpart used here is
 
-        gap = q(beta_j) * sigma_s  +  [q(min(beta_j, beta_ref)) / q(beta_ref)] * standoff,
+        gap = q(beta_j) * sigma_s  +  [q(beta_j) / q(beta_ref)] * standoff,
 
     so the tuned standoff plays the role of ``l_o`` (it is what a mode at
     ``beta_ref`` keeps) and both terms vanish together as ``beta_j -> 0``
-    (Remark 5: the footprint sits inside the scaling).  ``beta_ref`` normalises
-    the standoff factor and nothing else, which keeps the factor at most 1.  The
-    ``sigma`` term keeps the mode's own confidence, capped at
-    ``CHANCE_CONFIDENCE_CAP`` only (Remark 4: the quantile diverges as
-    ``beta -> 1``).  One ``beta`` capped at ``beta_ref`` used to feed both, so
-    ``beta_ref = 0.6`` also held the ``sigma`` term at ``q(0.6) = 0.84 sigma``
-    for a cut-in already believed at 0.95.  This function records ``beta_j`` on
-    the mode and applies the standoff factor; the controller adds the ``sigma``
-    term from ``beta_j`` in ``confidence_chance`` mode.  Unlike
+    (Remark 5: the footprint sits inside the scaling).  ``beta_j`` is capped at
+    ``beta_ref`` (Remark 4: the quantile diverges as ``beta -> 1``), which keeps
+    the standoff factor at most 1.  This function records ``beta_j`` on the mode
+    and applies the standoff factor; the controller adds the ``sigma`` term from
+    the same ``beta_j`` in ``confidence_chance`` mode.  Unlike
     ``ramp_cutin_clearance`` the quantile is the 1-D ``Phi^-1((1 + beta) / 2)``,
     not the paper's 2-D ``sqrt(-2 ln(1 - beta))``.
+
+    The one capped ``beta_j`` couples the two terms: ``beta_ref`` also caps the
+    ``sigma`` term, at ``q(0.6) = 0.84`` standard deviations for ``beta_ref =
+    0.6`` however certain the cut-in is.  ``sigma_cap`` (token ``sigmacap<c>``)
+    decouples them: the ``sigma`` term takes ``min(p, sigma_cap)`` and the
+    standoff factor keeps ``min(p, beta_ref)``.  ``optimized_standoff`` (token
+    ``dopt<w>``) sets the factor to 1 and leaves the standoff to the controller,
+    which prices any shortfall by the scenario probability (see
+    ``NairACCConfig.standoff_shortfall_weight``).
 
     Scoped to ``cutin`` modes, so adjacent-lane vehicles only; the ego-lane
     counterpart is ``chance_cutout_clearance``.
@@ -434,12 +435,12 @@ def chance_cutin_clearance(
     for mode in mode_predictions:
         if mode.mode_name != "cutin":
             continue
-        probability = float(mode.probability)
-        mode.chance_confidence = min(probability, CHANCE_CONFIDENCE_CAP)
+        beta = min(float(mode.probability), reference_beta)
+        mode.chance_confidence = (
+            beta if sigma_cap is None else min(float(mode.probability), float(sigma_cap)))
         mode.clearance_scale = (
-            confidence_quantile(min(probability, reference_beta)) / reference_quantile)
-        result[mode.mode_name] = {
-            "confidence": mode.chance_confidence, "scale": mode.clearance_scale}
+            1.0 if optimized_standoff else confidence_quantile(beta) / reference_quantile)
+        result[mode.mode_name] = {"confidence": mode.chance_confidence, "scale": mode.clearance_scale}
     return result
 
 
@@ -668,6 +669,8 @@ def process_vehicle_prediction(
     cutin_probability_threshold: float = 0.0,
     cutin_clearance_ramp_ref: float = 0.0,
     cutin_chance_ref: float = 0.0,
+    cutin_chance_sigma_cap: Optional[float] = None,
+    cutin_chance_optimized_standoff: bool = False,
     cutin_clearance_tlc_ref: float = 0.0,
     gap_recovery_elapsed_s: Optional[float] = None,
     gap_recovery_s: float = 0.0,
@@ -769,7 +772,8 @@ def process_vehicle_prediction(
         mode_predictions, cutin_clearance_ramp_ref
     )
     cutin_chance_confidences = chance_cutin_clearance(
-        mode_predictions, cutin_chance_ref
+        mode_predictions, cutin_chance_ref,
+        sigma_cap=cutin_chance_sigma_cap, optimized_standoff=cutin_chance_optimized_standoff,
     )
     cutin_chance_confidences.update(chance_cutout_clearance(
         mode_predictions, relation_to_ego_lane, cutin_chance_ref, cutin_probability_threshold
@@ -833,15 +837,15 @@ def _vacating_modes(selected, step, combo, targets, ego_s):
     return vacating
 
 
-def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshold):
+def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshold, sigma_cap=None):
     """Condition a lead cell on the vacating vehicles it looks past.
 
     The cell exists only if each of them really leaves, so it inherits their
     mode probability -- the second lead only matters if the first one goes:
-    the standoff factor of ``min(p, beta_ref)``, a ``sigma``-term confidence of
-    at most ``p`` (``beta_ref`` normalises the factor only, as in
-    ``chance_cutin_clearance``), and nothing at all below
-    ``vanish_threshold``.  ``cell`` is the selected
+    the standoff factor of ``min(p, beta_ref)``, and nothing at all below
+    ``vanish_threshold``.  A finite ``sigma``-term confidence is capped at
+    ``min(p, beta_ref)`` too, or at ``min(p, sigma_cap)`` with ``sigma_cap``
+    (see ``chance_cutin_clearance``).  ``cell`` is the selected
     lead's own ``(confidence, scale)``; returns ``None`` for a vanished cell.
     """
     confidence, scale = cell
@@ -854,7 +858,8 @@ def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshol
         # Standoff factor only; a deterministic (NaN) lead stays without a
         # sigma term, as in ``chance_cutout_clearance``.
         if not np.isnan(confidence):
-            confidence = min(confidence, float(mode.probability))
+            confidence = min(confidence, beta if sigma_cap is None
+                             else min(float(mode.probability), float(sigma_cap)))
         scale = min(scale, confidence_quantile(beta) / confidence_quantile(reference_beta))
     return confidence, scale
 
@@ -869,12 +874,14 @@ def build_multitarget_lead_prediction(
     nonblocking_speed: Optional[float] = None,
     reference_beta: float = 0.0,
     vanish_threshold: float = 0.0,
+    sigma_cap: Optional[float] = None,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
 
     With ``reference_beta`` > 0 (the confidence chance constraint) a cell whose
     lead is seen past a vacating ego-lane vehicle inherits that vehicle's
-    cut-out probability, see ``_inherit_vacating_confidence``.
+    cut-out probability, see ``_inherit_vacating_confidence``; ``sigma_cap`` is
+    ``chance_cutin_clearance``'s.
     """
     targets = [pred for pred in processed_predictions if pred.mode_predictions]
     horizon = int(horizon)
@@ -946,7 +953,7 @@ def build_multitarget_lead_prediction(
                     if vacating:
                         vacated_lane_steps.append(step)
                     cell = _inherit_vacating_confidence(
-                        cell, vacating, reference_beta, vanish_threshold)
+                        cell, vacating, reference_beta, vanish_threshold, sigma_cap)
             if cell is None:
                 selected_ids.append(None)
                 selected_modes.append(None)
