@@ -107,9 +107,23 @@ cut-in 응답
            RESULT.md 표의 1.85~2.50 s 와 그만큼 어긋난다. Δt_ant 에는 보수적이다.
   t_trigger = TV policy_log.trigger_time_s (차선변경 트리거; 03 그룹은 None).
   t_onset = 창 안에서 accel_cmd <= -0.3 m/s^2 가 2스텝 연속인 첫 시각.
-  (2026-09-08 부터 cut-in 의 Δt_ant 도 cut-out 과 같은 **예측 선제성**이다:
-   TV 의 모드 중 지평선 끝 3 스텝이 ego 차선 안인 것들의 확률합이 0.5 이상인
-   상태가 1.0 s 이상 이어지는 첫 시점 t_pred 부터 실제 진입 t_cross 까지.
+  onset_by / onset_candidates (진단용, 2026-10-08) = t_onset 틱에 ego 앞을 막을 수
+           있던 차량, 확률 내림차순 "actor:모드=p". ego 차선의 앞차는 lk 확률, 옆 차선
+           차량은 관문(0.1)을 통과한 cut-in 모드의 확률로 세고(LSTM 은 궤적이 ego 차선에
+           들어오면 1), onset_by 는 그 첫째다. 없으면 "none". 그 틱의 제약이 실제로
+           어느 차량에 묶였는지는 로그에 없어 **확률로 고른 근사**다 — 확률과 무관하게
+           전체 안전거리를 거는 정책(Multimodal SCC)에서는 두 번째 후보가 원인일 수도
+           있으니 후보 목록을 같이 볼 것.
+  (2026-09-08 부터 cut-in 의 Δt_ant 도 cut-out 과 같은 **예측 선제성**이고,
+   2026-10-08 부터 판정을 바꿨다: t_pred = TV 의 cut-in 이 **가장 큰 모드**인 상태가
+   진입 직전(TV 가 아직 옆 차선 차량으로 잡힌 마지막 틱)까지 끊기지 않고 이어진
+   마지막 구간의 시작, Δt_ant = t_cross - t_pred. 다중 모드는 ACC 모드 확률
+   (acc_mode_prob)에서 cutin 이 다른 모드 이상인지, cut-in 라벨이 없는 단일 모드
+   LSTM 은 그 궤적이 지평선 끝 3 스텝 ego 차선 안인지로 본다. 진입 직전에 cut-in 이
+   가장 큰 모드가 아니면 None. 진입이 없는 런(무컷인)도 None.
+   옛 판정 — 지평선 끝 3 스텝이 ego 차선 안인 모드들의 확률합이 0.5 이상인 상태가
+   1.0 s 이상 이어지는 **첫** 시점 — 은 t_pred_call / dt_ant_call 로 남긴다. 옛 판정은
+   일찍 잠깐 올랐다 떨어진 구간도 잡았다. cut-out 의 t_pred 는 바꾸지 않았다.
    아래 제어 개시 기준은 dt_ant_ctrl 열로 남는다.)
   dt_ant_ctrl = t_cross - t_onset  (t_onset < t_cross 일 때만; 아니면 None.
            차가 이미 들어온 뒤에야 반응한 제어기는 선제성이 없다).
@@ -442,24 +456,129 @@ def _target_call(steps, s_target, predicate):
     """
     out = np.full(len(steps), np.nan)
     for i, step in enumerate(steps):
-        targets = (step.get("stdan_debug") or {}).get("processed_targets")
-        if not targets or not np.isfinite(s_target[i]):
-            continue
-        best, best_err = None, np.inf
-        for target in targets:
-            frenet = target.get("pred_traj_frenet") or {}
-            if not frenet:
-                continue
-            s0 = float(np.asarray(next(iter(frenet.values())), dtype=float)[0][0])
-            err = abs(s0 - s_target[i])
-            if err < best_err:
-                best, best_err = target, err
-        if best is None or best_err > CUTOUT_PRED_MATCH_M:
+        best = _nearest_target(step, s_target[i])
+        if best is None:
             continue
         call = _call_probability(best, predicate)
         if call is not None:
             out[i] = call
     return out
+
+
+def _target_sd0(target):
+    """processed_target 의 현재 (s, d) (예측 궤적 첫 점). 궤적이 없으면 None.
+
+    d 는 ego 차선 중심 기준 횡위치로, 집계기의 actor 횡오프셋 x - ego_x 와 같은
+    방향·크기다(옆 차선 ±3.5 m; s 는 1~2 m 어긋난다).
+    """
+    frenet = target.get("pred_traj_frenet") or {}
+    if not frenet:
+        return None
+    first = np.asarray(next(iter(frenet.values())), dtype=float)[0]
+    return float(first[0]), float(first[1])
+
+
+def _nearest_target(step, s_value, d_value=None):
+    """그 틱에 그 차량으로 볼 processed_target (CUTOUT_PRED_MATCH_M 이내).
+
+    d_value 가 없으면 s 만 비교한다(_target_call 의 옛 방식). 있으면 (s, d) 거리를
+    쓴다 — s 만 보면 다른 차선의 비슷한 s 차량을 집을 수 있다.
+    """
+    targets = (step.get("stdan_debug") or {}).get("processed_targets")
+    if not targets or not np.isfinite(s_value):
+        return None
+    best, best_err = None, np.inf
+    for target in targets:
+        sd0 = _target_sd0(target)
+        if sd0 is None:
+            continue
+        err = (abs(sd0[0] - s_value) if d_value is None
+               else float(np.hypot(sd0[0] - s_value, sd0[1] - d_value)))
+        if err < best_err:
+            best, best_err = target, err
+    return best if best_err <= CUTOUT_PRED_MATCH_M else None
+
+
+def _target_cutin_max(steps, s_target, d_target):
+    """틱마다 그 차량이 아직 옆 차선 차량인가, 그리고 cut-in 이 그 차량의 가장 큰 모드인가.
+
+    다중 모드(STDAN, IAIMM-KF)는 ACC 모드 확률(acc_mode_prob)에서 cutin 이 다른 모드
+    이상인지 본다. 단일 모드(LSTM, 키 'lstm')는 cut-in 라벨이 없으므로 그 하나뿐인
+    궤적이 지평선 끝에 ego 차선 안인지(_predicts_lane_entry)로 대신한다. 차량은 그 틱의
+    실제 (s, 횡오프셋 d_target) 에 가장 가까운 processed_target 이다. 예측기가 없으면
+    (SCC) 둘 다 전부 False.
+    """
+    adjacent = np.zeros(len(steps), dtype=bool)
+    is_max = np.zeros(len(steps), dtype=bool)
+    for i, step in enumerate(steps):
+        target = _nearest_target(step, s_target[i], d_target[i])
+        if target is None or target.get("relation_to_ego_lane") == "ego_lane":
+            continue
+        adjacent[i] = True
+        probs = target.get("acc_mode_prob") or {}
+        if "cutin" in probs:
+            is_max[i] = probs["cutin"] >= max(probs.values())
+        elif len(probs) == 1:
+            membership = target.get("mode_lane_membership") or {}
+            is_max[i] = (len(membership) == 1
+                         and _predicts_lane_entry(next(iter(membership.values()))))
+    return adjacent, is_max
+
+
+def _held_until_entry(t, adjacent, is_max, t_cross):
+    """cut-in 이 가장 큰 모드인 상태가 진입 직전까지 끊기지 않은 마지막 구간의 시작 (절대 시각).
+
+    진입 직전은 t_cross 전에 그 차량이 아직 옆 차선 차량으로 잡힌 마지막 틱이다
+    (에이전트는 보통 t_cross 0.05~0.1 s 전에 ego 차선 차량으로 바꿔 분류한다). 그
+    틱에 cut-in 이 가장 큰 모드가 아니면(진입 전에 예측을 놓쳤으면) None.
+    """
+    pre = np.nonzero(adjacent & (t < t_cross))[0]
+    if not pre.size or not is_max[pre[-1]]:
+        return None
+    i = int(pre[-1])
+    while i > 0 and adjacent[i - 1] and is_max[i - 1]:
+        i -= 1
+    return float(t[i])
+
+
+def _onset_candidates(step, tracks, i, ego_s_i, ego_x_i):
+    """그 틱에 ego 앞을 막을 수 있던 차량과 그 확률, 확률 내림차순 [(이름:모드, p)].
+
+    ego 차선의 앞차는 lk 확률(LSTM 은 1), 옆 차선 차량은 관문(gated_cutin_modes)을
+    통과한 cut-in 모드의 확률(LSTM 은 궤적이 ego 차선으로 들어오면 1)로 센다. 이름은
+    그 틱의 (s, 횡오프셋) 이 가장 가까운 actor(CUTOUT_PRED_MATCH_M 이내)이고, 없으면
+    CARLA id 다.
+    """
+    out = []
+    for target in (step.get("stdan_debug") or {}).get("processed_targets") or []:
+        sd0 = _target_sd0(target)
+        if sd0 is None:
+            continue
+        s0, d0 = sd0
+        probs = target.get("acc_mode_prob") or {}
+        if target.get("relation_to_ego_lane") == "ego_lane":
+            if s0 <= ego_s_i:
+                continue
+            mode, p = "lk", float(probs.get("lk", 1.0 if len(probs) == 1 else 0.0))
+        elif "cutin" in probs:
+            if "cutin" in (target.get("gated_cutin_modes") or []):
+                continue
+            mode, p = "cutin", float(probs["cutin"])
+        else:
+            membership = target.get("mode_lane_membership") or {}
+            if not (len(membership) == 1
+                    and _predicts_lane_entry(next(iter(membership.values())))):
+                continue
+            mode, p = "cutin", 1.0
+        if p <= 0.0:
+            continue
+        near = [(float(np.hypot(s[i] - s0, (x[i] - ego_x_i) - d0)), key)
+                for key, (s, x, _lane) in tracks.items() if np.isfinite(s[i])]
+        err, name = min(near) if near else (np.inf, None)
+        if err > CUTOUT_PRED_MATCH_M:
+            name = "id%s" % target.get("vehicle_id")
+        out.append(("%s:%s" % (name, mode), p))
+    return sorted(out, key=lambda c: -c[1])
 
 
 def _prediction_onset(t, call, t_from, dt):
@@ -994,21 +1113,38 @@ def collect_run(policy, group, run_dir, window_s=None, window_start_s=None):
     row["dt_ant_ctrl"] = (round(t_cross - t_onset, 3)
                           if t_cross is not None and t_onset is not None and t_onset < t_cross
                           else None)
+    # 감속 개시의 원인 후보 (진단용): 개시 틱에 ego 앞을 막을 수 있던 차량, 확률 순.
+    row["onset_by"] = None
+    row["onset_candidates"] = None
+    if tv_key is not None and i_on is not None and len(steps) == t.size:
+        cands = _onset_candidates(steps[i_on], tracks, i_on, float(ego_s[i_on]),
+                                  float(ego_x[i_on]))
+        row["onset_by"] = cands[0][0] if cands else "none"
+        row["onset_candidates"] = ";".join("%s=%.2f" % c for c in cands)
 
-    # Δt_ant: cut-out 과 같은 예측 선제성. TV 의 모드 중 지평선 끝이 ego 차선
-    # **안**인 것들의 확률합이 임계를 1.0 s 이상 넘는 첫 시점부터 실제 진입까지.
+    # Δt_ant: 예측 선제성. TV 의 cut-in 이 가장 큰 모드인 상태가 진입 직전까지 끊기지
+    # 않고 이어진 마지막 구간의 시작부터 실제 진입까지 (2026-10-08 부터). 옛 정의는
+    # t_pred_call / dt_ant_call 로 남긴다.
     row["dt_ant"] = None
     row["t_pred"] = None
+    row["dt_ant_call"] = None
+    row["t_pred_call"] = None
     row["cutin_call_max"] = None
     if tv_key in tracks and len(steps) == t.size:
         s_tv, _x, _lane = tracks[tv_key]
         call = _target_call(steps, s_tv, _predicts_lane_entry)
         finite = call[np.isfinite(call)]
         row["cutin_call_max"] = round(float(np.max(finite)), 4) if finite.size else None
-        pred_abs = _prediction_onset(t, call, float(t[0]), dt)
-        row["t_pred"] = None if pred_abs is None else round(pred_abs - t0, 3)
-        if pred_abs is not None and t_cross is not None:
-            row["dt_ant"] = max(0.0, round(t_cross - pred_abs, 3))
+        call_abs = _prediction_onset(t, call, float(t[0]), dt)
+        row["t_pred_call"] = None if call_abs is None else round(call_abs - t0, 3)
+        if call_abs is not None and t_cross is not None:
+            row["dt_ant_call"] = max(0.0, round(t_cross - call_abs, 3))
+        if t_cross is not None:
+            adjacent, is_max = _target_cutin_max(steps, s_tv, _x - ego_x)
+            pred_abs = _held_until_entry(t, adjacent, is_max, t_cross)
+            row["t_pred"] = None if pred_abs is None else round(pred_abs - t0, 3)
+            if pred_abs is not None:
+                row["dt_ant"] = max(0.0, round(t_cross - pred_abs, 3))
 
     row["T_rec"] = None
     row["T_rec_censored"] = None
@@ -1423,6 +1559,18 @@ def write_metrics_md(path, agg, rows, argv_note):
                          % (r["policy_label"], r["group"], r["run"],
                             r.get("ego_speed"), r.get("target_speed")))
     else:
+        parts.append("없음.")
+    off = [r for r in rows if r["valid"] and r.get("onset_by")
+           and not str(r["onset_by"]).startswith("target_cutin")]
+    parts += ["", "### 감속 개시 원인이 cut-in 차량이 아닌 런 (onset_by, 진단용, %d런)" % len(off),
+              "", "onset_by 는 감속 개시 틱에 ego 앞을 막을 수 있던 차량 중 확률이 가장 큰 것이다"
+              "(정의는 docstring, 확률로 고른 근사). 전체 후보는 table_cutin_runs.csv 의 "
+              "onset_candidates. 이런 런의 dt_ant_ctrl 은 cut-in 차량에 대한 반응이 아니다.", ""]
+    for r in off:
+        parts.append("- %s/%s/%s: %s (t_onset %s s, 후보 %s)"
+                     % (r["policy_label"], r["group"], r["run"], r["onset_by"],
+                        r.get("t_onset"), r.get("onset_candidates")))
+    if not off:
         parts.append("없음.")
     if any(is_cutout_group(k[0]) for k in agg):
         cutout_rows = [r for r in rows if is_cutout_group(r["group"])]
