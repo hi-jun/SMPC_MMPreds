@@ -766,7 +766,6 @@ class ACCNairSMPCAgent(object):
                 cutin_clearance_ramp_ref=self.cutin_clearance_ramp_ref,
                 cutin_chance_ref=self.cutin_chance_ref,
                 cutin_chance_sigma_cap=self.chance_sigma_cap,
-                cutin_chance_optimized_standoff=self.standoff_shortfall_weight is not None,
                 cutin_clearance_tlc_ref=self.cutin_clearance_tlc_ref,
                 gap_recovery_elapsed=gap_recovery_elapsed,
                 gap_recovery_s=self.gap_recovery_s,
@@ -1390,8 +1389,8 @@ class ACCNairSMPCAgent(object):
     def _parse_standoff_shortfall_weight(smpc_config):
         """Read ``dopt<w>`` from the config string (None = off).
 
-        Cut-in chance cells drop the ``alpha_j`` standoff factor; the optimizer
-        picks their standoff between ``L + d0`` and the full ``d_safe(v)`` at a
+        On cut-in chance cells ``alpha_j`` scales the footprint ``L + d0`` only and
+        the optimizer picks how much of the time gap ``tau * v`` to keep, at a
         cost ``w * P_j * shortfall^2``.  Needs ``cutin_chance<beta_ref>``.  See
         ``NairACCConfig.standoff_shortfall_weight``.
         """

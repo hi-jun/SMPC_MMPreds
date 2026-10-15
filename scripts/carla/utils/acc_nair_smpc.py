@@ -138,12 +138,15 @@ class NairACCConfig:
     #: **비율**과 저크 블록의 **전체 크기**. 한 노브로는 둘을 따로 못 고른다.
     slack_weight: float = 5000.0
     #: ``dopt<w>``: the weight ``w`` of ``w * P_j * short_jk^2``.  On cut-in chance
-    #: cells (``standoff_shortfall_mask``) the optimizer picks the standoff
-    #: ``d_safe(v) - short`` with ``0 <= short <= tau * v``, anywhere between the
-    #: full ``L + d0 + tau * v`` and the ``L + d0`` floor, instead of having it
-    #: fixed at ``alpha_j * d_safe(v)``; ``slack`` stays the emergency relaxation.
-    #: Where vacating inheritance or gap recovery lowers a cell's factor below 1,
-    #: both ends scale with it.  ``None`` is off, and the QP then has no
+    #: cells (``standoff_shortfall_mask``) the cell's probability factor
+    #: (``clearance_scale``, ``alpha_j``) scales the footprint ``L + d0`` only, as
+    #: Proposed scales it, and the optimizer picks how much of the time gap
+    #: ``tau * v`` to keep: the standoff is ``optimized_standoff - short`` with
+    #: ``0 <= short <= tau * v``.  A likely cut-in keeps the whole footprint; an
+    #: unlikely one fades with ``alpha_j`` (Benciolini et al., Remark 5).  Until
+    #: 2026-10-15 the floor was a fixed ``L + d0``, which did not fade and kept
+    #: the ego from passing a car whose cut-in hypothesis was live.  ``slack``
+    #: stays the emergency relaxation.  ``None`` is off, and the QP then has no
     #: shortfall variables at all.
     standoff_shortfall_weight: Optional[float] = None
     solver_name: str = "gurobi"
@@ -762,9 +765,10 @@ class OldACCReferenceAdapter:
         for step in range(horizon):
             planned_s[step + 1] = planned_s[step] + planned_v[step] * dt
 
-        remembered_standoff = None
+        remembered_standoff = dopt_cells = None
         if self.config.standoff_shortfall_weight is not None:
             remembered_standoff = self._remembered_standoff(lead_prediction)
+            dopt_cells = standoff_shortfall_mask(lead_prediction)
 
         for mode in range(num_modes):
             for step in range(horizon + 1):
@@ -781,9 +785,11 @@ class OldACCReferenceAdapter:
                 safe_gap *= float(lead_prediction.clearance_scale[mode, step])
                 # On a dopt<w> cell the optimizer picks the standoff, so by the
                 # same rule ask for the one it picked last solve for this
-                # scenario and step; the full one above until there is one.
-                if remembered_standoff is not None and np.isfinite(remembered_standoff[mode, step]):
-                    safe_gap = float(remembered_standoff[mode, step])
+                # scenario and step; until there is one, the most it may ask for.
+                if dopt_cells is not None and dopt_cells[mode, step]:
+                    remembered = remembered_standoff[mode, step]
+                    safe_gap = (float(remembered) if np.isfinite(remembered) else optimized_standoff(
+                        float(lead_prediction.clearance_scale[mode, step]), planned_v[step], self.config))
                 # Same reasoning for the sigma term: the constraint below adds
                 # it, so the reference has to ask for it too.
                 if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
@@ -1203,6 +1209,7 @@ class NairACCSMPC:
         target_safe_probability = 0.0
         risk_diagnostics = risks
         shortfall = self._standoff_shortfall
+        dopt_cells = standoff_shortfall_mask(prediction) if shortfall is not None else None
         if optimized_eta_data is not None:
             eta_levels = np.asarray(optimized_eta_data["eta_levels"], dtype=float).reshape(-1)
             safe_probability_levels = np.asarray(
@@ -1244,20 +1251,23 @@ class NairACCSMPC:
                     chance_margin_values[mode, step] = (
                         safety_values[mode, step] - tightening_values[mode, step]
                     )
-                    if shortfall is not None:
+                    if dopt_cells is not None and dopt_cells[mode, step]:
                         # dopt<w>: measured against the standoff the QP allowed, as
                         # every policy's margin is against its own requirement, so
                         # a negative margin still means the emergency slack was used.
-                        chance_margin_values[mode, step] += shortfall[mode, step]
+                        # safety_function scaled the whole standoff; the time gap
+                        # is asked in full on these cells (optimized_standoff).
+                        scale = float(prediction.clearance_scale[mode, step])
+                        chance_margin_values[mode, step] += (
+                            shortfall[mode, step]
+                            - (1.0 - scale) * self.config.time_headway * x_nominal[mode, step, 1])
                 else:
                     safety_values[mode, step] = np.inf
                     tightening_values[mode, step] = 0.0
                     chance_margin_values[mode, step] = np.inf
         planned_standoff = None
         if self.config.standoff_shortfall_weight is not None:
-            standoff = prediction.clearance_scale * (
-                self.config.vehicle_length + self.config.d0
-                + self.config.time_headway * x_nominal[:, :, 1])
+            standoff = optimized_standoff(prediction.clearance_scale, x_nominal[:, :, 1], self.config)
             if shortfall is not None:  # None after a fallback, which plans no shortfall
                 standoff = standoff - shortfall
             planned_standoff = np.where(standoff_shortfall_mask(prediction), standoff, np.nan)
@@ -2119,15 +2129,16 @@ class NairACCSMPC:
                     tightening = tightening_param[mode, step]
                 slack = slack_var[mode, step]
                 if short_var is not None:
-                    # dopt<w>: the shortfall relaxes the row as slack does, but only
-                    # on masked cells and only by the time-gap part, so the standoff
-                    # stays at or above L + d0 (times the cell's scale); it is
+                    # dopt<w>: on masked cells the row asks for optimized_standoff
+                    # - short -- the cell's factor on L + d0 only, the time gap in
+                    # full -- so the row's scaled time gap is added back, and the
+                    # shortfall may then give up at most that time gap; it is
                     # priced by the scenario probability below.
-                    opti.subject_to(
-                        short_var[mode, step]
-                        <= shortfall_mask_param[mode, step] * clearance_scale_param[mode, step]
-                        * self.config.time_headway * states_v[step])
-                    slack = slack + short_var[mode, step]
+                    timegap = self.config.time_headway * states_v[step]
+                    opti.subject_to(short_var[mode, step] <= shortfall_mask_param[mode, step] * timegap)
+                    slack = (slack + short_var[mode, step]
+                             - shortfall_mask_param[mode, step]
+                             * (1.0 - clearance_scale_param[mode, step]) * timegap)
                 self._add_symbolic_safety_constraints(
                     opti,
                     lead_s_param[mode, step],
@@ -2922,6 +2933,16 @@ def standoff_shortfall_mask(prediction):
     generator both read it, so the two cannot disagree on which cells they are.
     """
     return np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
+
+
+def optimized_standoff(clearance_scale, speed, config):
+    """``dopt<w>``: the most a cut-in chance cell asks for, before any shortfall.
+
+    The probability factor on the footprint ``L + d0`` and the time gap
+    ``tau * v`` in full; the optimizer may give up the time gap at a price.
+    """
+    return (clearance_scale * (config.vehicle_length + config.d0)
+            + config.time_headway * speed)
 
 
 def _scenario_names(prediction):

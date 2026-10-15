@@ -394,7 +394,6 @@ def chance_cutin_clearance(
     mode_predictions: Sequence[ACCModePrediction],
     reference_beta: float,
     sigma_cap: Optional[float] = None,
-    optimized_standoff: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     """Turn each cut-in mode into a Benciolini confidence chance constraint.
 
@@ -419,10 +418,9 @@ def chance_cutin_clearance(
     ``sigma`` term, at ``q(0.6) = 0.84`` standard deviations for ``beta_ref =
     0.6`` however certain the cut-in is.  ``sigma_cap`` (token ``sigmacap<c>``)
     decouples them: the ``sigma`` term takes ``min(p, sigma_cap)`` and the
-    standoff factor keeps ``min(p, beta_ref)``.  ``optimized_standoff`` (token
-    ``dopt<w>``) sets the factor to 1 and leaves the standoff to the controller,
-    which prices any shortfall by the scenario probability (see
-    ``NairACCConfig.standoff_shortfall_weight``).
+    standoff factor keeps ``min(p, beta_ref)``.  ``dopt<w>`` keeps this factor
+    too; the controller applies it to the footprint only and prices the time gap
+    (see ``NairACCConfig.standoff_shortfall_weight``).
 
     Scoped to ``cutin`` modes, so adjacent-lane vehicles only; the ego-lane
     counterpart is ``chance_cutout_clearance``.
@@ -438,8 +436,7 @@ def chance_cutin_clearance(
         beta = min(float(mode.probability), reference_beta)
         mode.chance_confidence = (
             beta if sigma_cap is None else min(float(mode.probability), float(sigma_cap)))
-        mode.clearance_scale = (
-            1.0 if optimized_standoff else confidence_quantile(beta) / reference_quantile)
+        mode.clearance_scale = confidence_quantile(beta) / reference_quantile
         result[mode.mode_name] = {"confidence": mode.chance_confidence, "scale": mode.clearance_scale}
     return result
 
@@ -670,7 +667,6 @@ def process_vehicle_prediction(
     cutin_clearance_ramp_ref: float = 0.0,
     cutin_chance_ref: float = 0.0,
     cutin_chance_sigma_cap: Optional[float] = None,
-    cutin_chance_optimized_standoff: bool = False,
     cutin_clearance_tlc_ref: float = 0.0,
     gap_recovery_elapsed_s: Optional[float] = None,
     gap_recovery_s: float = 0.0,
@@ -773,7 +769,7 @@ def process_vehicle_prediction(
     )
     cutin_chance_confidences = chance_cutin_clearance(
         mode_predictions, cutin_chance_ref,
-        sigma_cap=cutin_chance_sigma_cap, optimized_standoff=cutin_chance_optimized_standoff,
+        sigma_cap=cutin_chance_sigma_cap,
     )
     cutin_chance_confidences.update(chance_cutout_clearance(
         mode_predictions, relation_to_ego_lane, cutin_chance_ref, cutin_probability_threshold

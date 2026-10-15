@@ -112,7 +112,7 @@ Sweeps pass `--ego-policy <string>`. The `_parse_*` methods of `ACCNairSMPCAgent
 | `cutin_chance<β_ref>` | **Proposed** confidence chance constraint, e.g. `cutin_chance0.6` |
 | `cutin_gate<p>` | Probability below which a cut-in mode stops acting as a lead (default 0.1 for STDAN and IAIMM-KF) |
 | `sigmacap<c>` | With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_ref); the standoff factor keeps β_ref (added 2026-10-07, not in the paper) |
-| `dopt<w>` | With `cutin_chance` only: on cut-in cells the standoff factor is 1 and the optimizer picks the standoff in [L + d0, d_safe(v)], paying w·P_j·shortfall² (`NairACCConfig.standoff_shortfall_weight`). Cached feedback QP only (added 2026-10-07, not in the paper) |
+| `dopt<w>` | With `cutin_chance` only: on cut-in cells the probability factor α_j scales the footprint L + d0 only, and the optimizer picks how much of the time gap τv to keep, paying w·P_j·shortfall² (`NairACCConfig.standoff_shortfall_weight`); the standoff lies in [α_j(L + d0), α_j(L + d0) + τv]. Cut-out cells keep Proposed's factor. Cached feedback QP only (added 2026-10-07 with a fixed L + d0 floor, which 2026-10-15 replaced by α_j(L + d0); not in the paper) |
 | `rmove<w>`, `rjerk<w>` | Weight on the step-0 command change; jerk weight |
 | `open_loop`, `multimodal_ol`, any `_ol` | Open-loop variant: one input sequence shared by all scenarios, and one scalar slack |
 | `no_k`, `with_k` | Disable or enable K-feedback optimisation (off by default) |

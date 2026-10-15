@@ -844,8 +844,8 @@ class TestChanceSigmaCapAndOptimizedStandoff(unittest.TestCase):
 
     Without them one beta = min(p, beta_ref) feeds the sigma term and the
     standoff factor (``TestCutInChanceConstraint``).  ``sigma_cap`` gives the
-    sigma term min(p, c) and leaves the factor alone; ``optimized_standoff``
-    sets the factor to 1 and leaves the confidence alone.
+    sigma term min(p, c) and leaves the factor alone.  ``dopt<w>`` changes
+    nothing here: the controller reuses the factor (see test_acc_nair_smpc_port).
     """
 
     _fake_mode = staticmethod(TestCutInChanceConstraint._fake_mode)
@@ -869,25 +869,13 @@ class TestChanceSigmaCapAndOptimizedStandoff(unittest.TestCase):
         self.assertEqual(capped.chance_confidence, 0.95)
         self.assertEqual(capped.clearance_scale, default.clearance_scale)
 
-    def test_optimized_standoff_keeps_the_full_factor(self):
-        modes = [self._fake_mode("cutin", p) for p in (0.95, 0.30, 0.12)]
-        chance_cutin_clearance(modes, 0.6, optimized_standoff=True)
-        self.assertEqual([m.clearance_scale for m in modes], [1.0, 1.0, 1.0])
-        self.assertEqual([m.chance_confidence for m in modes], [0.6, 0.30, 0.12])
-
-    def test_process_vehicle_prediction_threads_both(self):
+    def test_process_vehicle_prediction_threads_the_cap(self):
         gate = TestCutInProbabilityGate()
         raw = gate._raw([0.60, 0.30, 0.10], [3.5, 0.0, 0.0])  # cut-in 0.3
         capped = gate._mode(gate._process(
             raw, cutin_chance_ref=0.2, cutin_chance_sigma_cap=0.99), "cutin")
         self.assertAlmostEqual(capped.chance_confidence, capped.probability, places=9)
         self.assertAlmostEqual(capped.probability, 0.3, places=9)
-        relaxed = gate._mode(gate._process(raw, cutin_chance_ref=0.6), "cutin")
-        full = gate._mode(gate._process(
-            raw, cutin_chance_ref=0.6, cutin_chance_optimized_standoff=True), "cutin")
-        self.assertLess(relaxed.clearance_scale, 0.5)
-        self.assertEqual(full.clearance_scale, 1.0)
-        self.assertEqual(full.chance_confidence, relaxed.chance_confidence)
 
 
 class TestChanceTokens(unittest.TestCase):

@@ -783,9 +783,10 @@ class TestConfidenceChanceConstraint(unittest.TestCase):
 class TestOptimizedStandoff(unittest.TestCase):
     """``dopt<w>``: the optimizer picks the standoff on cut-in chance cells.
 
-    Such a cell keeps the full d_safe(v) = L + d0 + tau*v (factor 1); a shortfall
-    0 <= short <= tau*v priced w * P_j * short^2 may relax it, never below the
-    L + d0 = 7.5 m floor.  The last scenario below is the cut-in, a lead in the
+    Such a cell asks for scale * (L + d0) + tau*v -- its probability factor on
+    the footprint only -- and a shortfall 0 <= short <= tau*v priced
+    w * P_j * short^2 may relax it, never below the scale * (L + d0) floor
+    (7.5 m at the default factor 1).  The last scenario below is the cut-in, a lead in the
     ego lane at every step; the other one, if any, is lane keeping with no lead.
     The ego drives at 14 m/s, so d_safe = 25.7 m.
     """
@@ -807,7 +808,7 @@ class TestOptimizedStandoff(unittest.TestCase):
         config.__post_init__()
         return config
 
-    def _prediction(self, gap0, lead_v, probabilities):
+    def _prediction(self, gap0, lead_v, probabilities, scale=1.0):
         num_modes, steps = len(probabilities), self.HORIZON + 1
         means = np.zeros((num_modes, steps, 2))
         means[:, :, 0] = gap0 + lead_v * 0.2 * np.arange(steps)
@@ -822,6 +823,7 @@ class TestOptimizedStandoff(unittest.TestCase):
             covariances=np.tile(self.COVARIANCE, (num_modes, steps, 1, 1)),
             active_mask=active,
             chance_confidence=chance_confidence,
+            clearance_scale=np.full((num_modes, steps), float(scale)),
             mode_names=["10:lk", "10:cutin"][-num_modes:],
         )
 
@@ -880,6 +882,26 @@ class TestOptimizedStandoff(unittest.TestCase):
         self.assertTrue(np.all(self._shortfall(solution, 1) <= 1.3 * solution.x_nominal[1, :, 1] + 1.0e-3))
         self.assertAlmostEqual(
             solution.slack_max, 7.5 + self._sigma_term(controller.config) - 5.0, places=3)
+
+    def test_an_unlikely_cutin_floor_fades_with_its_factor(self):
+        # Same 5 m as above, but the factor of a p ~ 0.1 cut-in (alpha = 0.15):
+        # the footprint floor is 0.15 * 7.5 = 1.1 m, so no emergency slack is
+        # needed, and the most the cell asks for is 1.1 m + tau*v, not d_safe.
+        prediction = self._prediction(5.0, 14.0, (0.8, 0.2), scale=0.15)
+        controller, solution = self._solve(0.01, prediction)
+        standoff = solution.planned_standoff[1]
+        top = 0.15 * 7.5 + 1.3 * solution.x_nominal[1, :, 1]
+        self.assertTrue(np.all(standoff >= 0.15 * 7.5 - 1.0e-3))
+        self.assertTrue(np.all(standoff <= top + 1.0e-3))
+        self.assertLess(solution.slack_max, 0.01)
+        self.assertTrue(solution.feasible)
+        # The factor scales the footprint only: with room and a heavy weight the
+        # cell keeps the whole time gap, far above alpha * d_safe (3.9 m).
+        roomy = self._prediction(30.0, 14.0, (0.8, 0.2), scale=0.15)
+        _, heavy = self._solve(1000.0, roomy)
+        top = 0.15 * 7.5 + 1.3 * heavy.x_nominal[1, :, 1]
+        np.testing.assert_allclose(heavy.planned_standoff[1], top, atol=0.05)
+        self.assertTrue(np.all(heavy.planned_standoff[1] > 15.0))
 
     def test_the_qp_has_shortfall_variables_only_with_dopt(self):
         prediction = self._prediction(15.0, 14.0, (0.8, 0.2))
