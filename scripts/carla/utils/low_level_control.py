@@ -94,6 +94,13 @@ class IdealLongitudinalActuator:
         self._v_set_prev = None
         self._eaten_prev = 0.0
         self._dt = None
+        # The scenario runner points this at its per-tick command list and
+        # applies that list with one apply_batch_sync before each tick.  Left
+        # at None, the velocity goes out through set_target_velocity, which is
+        # asynchronous: sent right before the tick, the server can run the
+        # tick first and apply the command a tick late (1.4-1.8 % of the ego's
+        # ticks in the serial sweeps, measured 2026-10-15).
+        self.command_batch = None
 
     def _longitudinal_state(self):
         if self._dt is None:
@@ -113,7 +120,11 @@ class IdealLongitudinalActuator:
         self._eaten_prev = eaten
         v_next = max(0.0, v_lon + float(a_des) * dt + compensation)
         target = v_next * heading + v_lat
-        self.vehicle.set_target_velocity(carla.Vector3D(x=float(target[0]), y=float(target[1]), z=0.0))
+        velocity = carla.Vector3D(x=float(target[0]), y=float(target[1]), z=0.0)
+        if self.command_batch is None:
+            self.vehicle.set_target_velocity(velocity)
+        else:
+            self.command_batch.append(carla.command.ApplyTargetVelocity(self.vehicle.id, velocity))
         self._v_set_prev = v_next
         return v_next
 

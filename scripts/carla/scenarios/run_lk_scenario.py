@@ -395,6 +395,23 @@ class RunLKScenario:
             (120, 255, 80),
         ]
 
+    def _apply_tick_commands(self):
+        """Apply the vehicle commands queued for the coming tick in one synchronous batch.
+
+        set_target_velocity and apply_control are asynchronous RPCs.  Sent right
+        before world.tick(), the server can process the tick first and apply the
+        command one tick late: in the serial sweeps this hit 1.4-1.8 % of the
+        ego's ticks, seen as a one-tick -0.2 m/s dip of the measured speed
+        (2026-10-15).  apply_batch_sync returns only after the game thread has
+        applied the batch, so the tick that follows always sees these commands.
+        """
+        if not self.tick_commands:
+            return
+        for response in self.client.apply_batch_sync(self.tick_commands, False):
+            if response.has_error():
+                raise RuntimeError(f"vehicle command failed: {response.error}")
+        self.tick_commands.clear()
+
     def _tick_vehicles_stationary(self, sync_mode, duration_s, realtime):
         delay_ticks = int(np.ceil(float(duration_s) * self.carla_fps))
         zero_vel = carla.Vector3D(x=0.0, y=0.0, z=0.0)
@@ -406,8 +423,9 @@ class RunLKScenario:
         for _ in range(delay_ticks):
             tick_start = time.monotonic()
             for veh_actor in self.vehicle_actors:
-                veh_actor.set_target_velocity(zero_vel)
-                veh_actor.apply_control(hold_control)
+                self.tick_commands.append(carla.command.ApplyTargetVelocity(veh_actor.id, zero_vel))
+                self.tick_commands.append(carla.command.ApplyVehicleControl(veh_actor.id, hold_control))
+            self._apply_tick_commands()
             sync_data = sync_mode.tick(timeout=self.timeout)
             snap = sync_data[0]
             elapsed_seconds = getattr(snap, "elapsed_seconds", snap.timestamp.elapsed_seconds)
@@ -419,8 +437,9 @@ class RunLKScenario:
 
         release_control = carla.VehicleControl(throttle=0.0, brake=0.0, hand_brake=False)
         for veh_actor in self.vehicle_actors:
-            veh_actor.set_target_velocity(zero_vel)
-            veh_actor.apply_control(release_control)
+            self.tick_commands.append(carla.command.ApplyTargetVelocity(veh_actor.id, zero_vel))
+            self.tick_commands.append(carla.command.ApplyVehicleControl(veh_actor.id, release_control))
+        self._apply_tick_commands()
         return {
             "requested_s": float(duration_s),
             "ticks": int(delay_ticks),
@@ -448,10 +467,10 @@ class RunLKScenario:
             # immediately because no throttle is being commanded yet.
             for veh_actor, init_speed in zip(self.vehicle_actors, self.vehicle_init_speeds):
                 yaw_carla = veh_actor.get_transform().rotation.yaw
-                veh_actor.set_target_velocity(carla.Vector3D(
+                self.tick_commands.append(carla.command.ApplyTargetVelocity(veh_actor.id, carla.Vector3D(
                     x=init_speed*np.cos(np.radians(yaw_carla)),
                     y=init_speed*np.sin(np.radians(yaw_carla)),
-                    z=0.))
+                    z=0.)))
             # Drive the low-level controllers too. They low-pass the throttle
             # against a control_prev that starts at zero, so handing over from
             # set_target_velocity with a cold filter drops the car ~6 m/s before
@@ -465,8 +484,9 @@ class RunLKScenario:
                     continue
                 velocity = vehicle_actor.get_velocity()
                 speed = float(np.sqrt(velocity.x ** 2 + velocity.y ** 2))
-                vehicle_actor.apply_control(
-                    low_level.update(speed, 0.0, float(nominal), 0.0))
+                self.tick_commands.append(carla.command.ApplyVehicleControl(
+                    vehicle_actor.id, low_level.update(speed, 0.0, float(nominal), 0.0)))
+            self._apply_tick_commands()
             sync_data = sync_mode.tick(timeout=self.timeout)
             snap = sync_data[0]
             elapsed_seconds = getattr(snap, "elapsed_seconds", snap.timestamp.elapsed_seconds)
@@ -531,8 +551,9 @@ class RunLKScenario:
                     carla_vel = carla.Vector3D(x=init_speed*np.cos(np.radians(yaw_carla)) ,
                                                y=init_speed*np.sin(np.radians(yaw_carla)) ,
                                                z=0.)
-                    veh_actor.set_target_velocity(carla_vel)
+                    self.tick_commands.append(carla.command.ApplyTargetVelocity(veh_actor.id, carla_vel))
 
+                self._apply_tick_commands()
                 for _ in range(1):
                     sync_mode.tick(timeout=self.timeout)
 
@@ -546,6 +567,7 @@ class RunLKScenario:
 
                 # Loop until all vehicles have reached their goal or we've exceeded self.max_iters.
                 for _ in range(self.max_iters):
+                    self._apply_tick_commands()
                     sync_data = sync_mode.tick(timeout=self.timeout)
                     snap = sync_data[0]
                     img = sync_data[1] if self.drone is not None else None
@@ -592,7 +614,7 @@ class RunLKScenario:
                         if idx_act != self.ego_vehicle_idx and policy.done():
                             self._retire_done_actor(idx_act, t_elapsed, "policy_done")
                             continue
-                        act.apply_control(control)
+                        self.tick_commands.append(carla.command.ApplyVehicleControl(act.id, control))
 
                         if idx_act == self.ego_vehicle_idx:
                             # Keep track of ego's information for rendering.
@@ -940,6 +962,7 @@ class RunLKScenario:
     def _setup_carla_world(self, carla_params):
         client = carla.Client(carla_params.ip_addr, carla_params.port)
         client.set_timeout(carla_params.timeout_period)
+        self.client = client
         reuse_loaded_world = _env_flag("ACC_REUSE_CARLA_WORLD")
         world_key = (carla_params.ip_addr, int(carla_params.port), carla_params.map_str)
         if reuse_loaded_world:
@@ -995,6 +1018,7 @@ class RunLKScenario:
 
         self.vehicle_actors   = []
         self.vehicle_policies = []
+        self.tick_commands    = []   # applied by _apply_tick_commands before each tick
         self.vehicle_colors   = []
         self.vehicle_init_speeds = []
         self.vehicle_actor_keys = []
@@ -1035,6 +1059,9 @@ class RunLKScenario:
 
             self.vehicle_actors.append(veh_actor)
             self.vehicle_policies.append(veh_policy)
+            actuator = getattr(veh_policy, "_ideal_actuator", None)
+            if actuator is not None:
+                actuator.command_batch = self.tick_commands
             self.vehicle_init_speeds.append(vp.init_speed)
             self.vehicle_actor_keys.append(f"{vp.role}_{idx}")
             self.vehicle_active.append(True)

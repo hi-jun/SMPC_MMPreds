@@ -38,7 +38,7 @@ It describes the state on 2026-10-07, branch `feat/probability-gated-cutin`. Whe
 | `scripts/carla/policies/lead_speed_cap.py` | `LeadSpeedCapMixin`, which the cut-in and cut-out agents mix in |
 | `scripts/carla/scenarios/run_lk_scenario.py` | The scenario runner: spawns actors, steps CARLA, records results |
 | `scripts/carla/devel/sweep_acc_scenarios.py` | Grid sweeps. `--kind` selects the scenario family (the kinds are built in `acc_scenario_factory.py`) |
-| `scripts/carla/devel/watch_acc_sweep.py` | Watchdog that restarts a sweep after a CARLA crash or stall |
+| `scripts/carla/devel/watch_acc_sweep.py` | Watchdog that restarts a sweep after a CARLA crash or stall. It counts and cleans up only the CARLA servers in its own sweep's port range (`--carla-port-span`), so several sweeps can share the machine (§6) |
 | `scripts/carla/devel/aggregate_cutin_table.py` | Metrics and tables. **Its docstring is the definition of record for every metric** |
 | `scripts/carla/devel/animate_acc_stdan_scenario.py` | Renders one run: scene, predicted intentions, mode probabilities, control panel |
 | `predictor/stdan_3int_signed_tcross_velint/` | The STDAN used in the paper: model, training (`preprocessing/`), checkpoints. `acc_adapter.py` turns CARLA history into model tensors and Frenet modes. `acc_postprocess.py` maps intentions to ACC modes and applies the confidence scaling |
@@ -212,6 +212,8 @@ What happens in each scenario:
 - **`cutout_no_sublv`.** The ego-lane lead leaves its lane at a fixed time.
 - **`cutout_sublv`.** A second lead drives 89 m ahead of the ego-lane lead, 6 m/s slower than it. The ego-lane lead leaves when its gap to that second lead reaches `--trigger-distances`.
 
+**Several sweeps at once.** Give each line its own `--port`, 200 apart (2030, 2230, 2430, …), and its own output root. The watchdog counts and cleans up only the CARLA servers in `[--port, --port + 200)` (`--carla-port-span`), so lines never kill each other's servers; before 2026-10-15 it killed every CarlaUE4 on the machine, and lines that shared `--port 2030` crashed each other's servers. Set `OMP_NUM_THREADS=6` per line so the predictors do not oversubscribe the CPU. Measured on 2026-10-15 with four lines: a run takes 69 s instead of 59 s, so throughput is about 3.5×, and the results match serial runs (§8.11).
+
 Metrics, tables and figures:
 
 ```bash
@@ -282,6 +284,9 @@ Inside it:
    - The reruns are in `results/acc_scenario_sweep/iaimm_cutin_final_20260930/reference_reruns/`.
    - **δ and Proposed.** The intrusion metric δ is scored against the unscaled safe distance for every controller, so Proposed's α-relaxed standoff counts as intrusion.
 10. **Markdown is ignored by git.** `.gitignore` contains `*.md`, with an exception only for `README.md`. Add new docs with `git add -f`.
+11. **Runs made before 2026-10-15 carry a command/tick race.** `set_target_velocity` and `apply_control` are asynchronous RPCs. The runner used to send the ego's command right before `world.tick()`, and on 1.4–1.8 % of the ego's ticks the server processed the tick first: the command landed one tick late and the measured speed dipped by about 0.2 m/s for one tick.
+    - Since 2026-10-15 the runner queues every vehicle command and applies the batch with `client.apply_batch_sync` before each tick (`_apply_tick_commands`), which returns only after the server applied it. The dips are gone (0 in 11,400 ego ticks, serial and parallel alike).
+    - Measured-speed metrics (raw `j_max` and `a_min`, `j_max_filt`) and some δ values differ systematically between runs made before and after the fix; the command-based metrics (`j_max_cmd_filt`, `a_min_cmd`), Δt_ant and collisions do not. The paper sweeps (`*_final_20260910`) predate the fix. Do not mix the two in one table.
 
 ## 9. Working conventions
 
@@ -294,11 +299,11 @@ Inside it:
 - **Claims.** Report only improvements that were measured. Before comparing with an older sweep, re-aggregate both with the current script, because metric definitions have changed over time.
 - **Changes.** Keep them surgical: touch only what the task needs, and match the existing style.
 
-## 10. Open items (2026-10-07)
+## 10. Open items (2026-10-15)
 
 - **`_fallback_policy` sign.** It commands `a_ref − 0.25·min(0, gap)`. `safety_function` is negative when the gap is violated, so this accelerates toward a lead that is too close. No run in the final sweeps used the fallback (§8.1).
 - **Step-0 jerk cost.** All three QP builders price the step-0 command change with `config.dt` (0.2 s) instead of `command_dt` (0.05 s), which makes it 16× too cheap. The hard jerk constraint already uses `command_dt`.
-- **Unfiltered x₀.** The MPC takes the raw measured ego speed as x₀. The ideal actuator runs with zero throttle, so CARLA's tyres slip from tick to tick. That slip adds speed noise and inflates command jerk.
+- **Unfiltered x₀.** The MPC takes the raw measured ego speed as x₀. Most of the tick-to-tick speed noise that was attributed to tyre slip under zero throttle was the command/tick race (§8.11), fixed on 2026-10-15. Whether any slip noise remains has not been re-measured since.
 - **σ-term cap.** The confidence chance constraint uses one capped β = min(p, β_ref) for both the standoff scale and the σ term, so the σ term never exceeds q(0.6)·σ ≈ 0.84σ. `sigmacap<c>` decouples them; `cutin_chance0.6` itself is unchanged so that the paper's sweeps reproduce. Whether the paper policy should switch is undecided.
 - **`slack_steps` misses slack use in chance policies.** It counts `feasible == False`, and in chance modes `feasible` already adds the slack, so a solve that leans on the 5000-weighted slack still counts as feasible. The raw per-step `slack_max` (logged since 2026-10-07) shows it.
 - **STDAN grid edges.** The CARLA adapter puts its grid edges at ±6.5 cells of 4.6 m (±29.9 m). Training kept neighbours with |dy| < 90 ft (27.43 m), which cuts at the outer cells' centres. Most of the 2.5 m difference comes from this edge convention, not from the cell size.
