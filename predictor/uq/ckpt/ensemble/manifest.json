@@ -1,0 +1,91 @@
+{
+ "method": "deep ensemble, bootstrap-resampled rows + random init (Shao et al. T-ITS 2025 CUAP, M=5)",
+ "trainer": "stdan/training/train5f_vel.py --seed S --bootstrap --epochs 60 --patience 15",
+ "data": "/home/core-dev/HJ/dataset/NGsim/0113_ratio211/{Train,Val}Set.mat (Val fixed, not bootstrapped)",
+ "env": "hmg (torch 2.7.0+cu118), WANDB_MODE=offline; loads in racp (torch 2.4.1) - verified",
+ "trained": "2026-08-29 17:22-20:48 (3.5 h, 2-concurrent waves)",
+ "members": {
+  "member1": {
+   "seed": 10,
+   "path": "stdan/ckpt/ensemble/member1/best_model.pt",
+   "md5": "375602a1ef43e57bf7150fc63ab50f5e",
+   "best_val_loss": 88.951989,
+   "last_epoch": 50,
+   "boot_idx": "stdan/ckpt/ensemble/member1/boot_idx.npz"
+  },
+  "member2": {
+   "seed": 20,
+   "path": "stdan/ckpt/ensemble/member2/best_model.pt",
+   "md5": "c0f40943a4dbec43b0b711d54704ee9b",
+   "best_val_loss": 92.193367,
+   "last_epoch": 36,
+   "boot_idx": "stdan/ckpt/ensemble/member2/boot_idx.npz"
+  },
+  "member3": {
+   "seed": 30,
+   "path": "stdan/ckpt/ensemble/member3/best_model.pt",
+   "md5": "be15c5eb281f1906c52f546ff806c332",
+   "best_val_loss": 92.714544,
+   "last_epoch": 29,
+   "boot_idx": "stdan/ckpt/ensemble/member3/boot_idx.npz"
+  },
+  "member4": {
+   "seed": 60,
+   "path": "stdan/ckpt/ensemble/member4/best_model.pt",
+   "md5": "2578c486a7c90f80ef593e8256f2b938",
+   "best_val_loss": 90.183988,
+   "last_epoch": 38,
+   "boot_idx": "stdan/ckpt/ensemble/member4/boot_idx.npz"
+  },
+  "member5": {
+   "seed": 90,
+   "path": "stdan/ckpt/ensemble/member5/best_model.pt",
+   "md5": "add3aeb52be7739f424a80f56fc26d31",
+   "best_val_loss": 90.239804,
+   "last_epoch": 32,
+   "boot_idx": "stdan/ckpt/ensemble/member5/boot_idx.npz"
+  }
+ },
+ "member0": {
+  "path": "stdan/ckpt/augmented/best_model.pt",
+  "seed": 72,
+  "bootstrap": false,
+  "note": "deployed model; drives belief/targets/geometry in ALL arms, NOT part of the arm-C risk ensemble"
+ },
+ "acceptance": {
+  "mse": {
+   "member0": 49.340518188476565,
+   "member1": 53.82475112915039,
+   "member2": 51.32969940185547,
+   "member3": 51.644050445556644,
+   "member4": 49.79587249755859,
+   "member5": 53.21202606201172
+  },
+  "md5": {
+   "member0": "d52c2339b0a7e60882c6d5b86d790d5b",
+   "member1": "375602a1ef43e57bf7150fc63ab50f5e",
+   "member2": "c0f40943a4dbec43b0b711d54704ee9b",
+   "member3": "be15c5eb281f1906c52f546ff806c332",
+   "member4": "2578c486a7c90f80ef593e8256f2b938",
+   "member5": "add3aeb52be7739f424a80f56fc26d31"
+  },
+  "pairwise_ade_m": {
+   "member0|member1": 0.635972875694275,
+   "member0|member2": 0.6304396785507203,
+   "member0|member3": 0.6531312673187257,
+   "member0|member4": 0.5956432210922241,
+   "member0|member5": 0.6609869942092895,
+   "member1|member2": 0.629013846977234,
+   "member1|member3": 0.6494717755737305,
+   "member1|member4": 0.6387174494476319,
+   "member1|member5": 0.6552531407089234,
+   "member2|member3": 0.6184868994140624,
+   "member2|member4": 0.5913231475753784,
+   "member2|member5": 0.57060771144104,
+   "member3|member4": 0.6009496820755006,
+   "member3|member5": 0.6096810299377441,
+   "member4|member5": 0.6042811357040405
+  },
+  "accept": true
+ }
+}

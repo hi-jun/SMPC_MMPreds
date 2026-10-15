@@ -46,6 +46,7 @@ It describes the state on 2026-10-07, branch `feat/probability-gated-cutin`. Whe
 | `predictor/iaimm_kf/` | IAIMM-KF port (policy token `iaimm`) |
 | `predictor/stdan/` | The original 9-mode STDAN. The other adapters still import `FT2M` and `transform_points` from it |
 | `predictor/stdan_vel/` | A 9-mode STDAN with velocity output |
+| `predictor/uq/` | Conformal novelty detector and a 5-member deep ensemble for the `stdan_vel` checkpoint, ported from the maintainer's thesis repository (added 2026-10-13). Not wired into the controller, and not valid for `stdan_3int`. Read `predictor/uq/AGENTS.md` first |
 | `overleaf/` | Paper tables, the final formulation, and the figure and table generators (`overleaf/figs/scripts/`) |
 | `tests/` | 7 unit-test modules (124 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration |
 | `results/` | Sweep outputs. `results/*/` is gitignored, so sweep data and launch scripts exist only on the maintainer's machine |

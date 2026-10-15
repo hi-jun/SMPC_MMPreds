@@ -1,0 +1,79 @@
+{
+ "n_ref": 19508,
+ "n_cal": 76602,
+ "delta": 0.05,
+ "method": "monte_carlo",
+ "b1": 7.821245190053894e-05,
+ "seq_coverage": 0.95225,
+ "scores": {
+  "maha_agent": {
+   "cal_score_median": 22.892598152160645,
+   "cal_score_p90": 95.55281295776376,
+   "max_abs_diff_vs_oodeel": 9.078179659654057e-06,
+   "d": 64
+  },
+  "knn_agent": {
+   "cal_score_median": 0.048498690128326416,
+   "cal_score_p90": 0.16843876838684085,
+   "max_abs_diff_vs_oodeel": 0.0002384185791015625,
+   "k": 50
+  },
+  "maha_social": {
+   "cal_score_median": 15.911487102508545,
+   "cal_score_p90": 107.49377975463872,
+   "max_abs_diff_vs_oodeel": 8.354322961673499e-06,
+   "d": 64
+  },
+  "knn_social": {
+   "cal_score_median": 0.21146875619888306,
+   "cal_score_p90": 0.37675182819366465,
+   "max_abs_diff_vs_oodeel": 0.0002384185791015625,
+   "k": 50
+  },
+  "maha_concat": {
+   "cal_score_median": 40.83938026428223,
+   "cal_score_p90": 229.55058746337903,
+   "max_abs_diff_vs_oodeel": 5.579262547438875e-06,
+   "d": 128
+  },
+  "knn_concat": {
+   "cal_score_median": 0.08924418687820435,
+   "cal_score_p90": 0.2352390408515934,
+   "max_abs_diff_vs_oodeel": 2.142050048999395e-05,
+   "k": 50
+  },
+  "maha_values_last": {
+   "cal_score_median": 24.784988403320312,
+   "cal_score_p90": 56.744990158081094,
+   "max_abs_diff_vs_oodeel": 1.1880022995729569e-06,
+   "d": 64
+  },
+  "knn_values_last": {
+   "cal_score_median": 0.2556825280189514,
+   "cal_score_p90": 0.4610212445259094,
+   "max_abs_diff_vs_oodeel": 6.189162467062051e-06,
+   "k": 50
+  },
+  "maha_pre_logit": {
+   "cal_score_median": 25.76138210296631,
+   "cal_score_p90": 54.15404052734378,
+   "max_abs_diff_vs_oodeel": 7.774725874201623e-06,
+   "d": 64
+  },
+  "knn_pre_logit": {
+   "cal_score_median": 0.15491920709609985,
+   "cal_score_p90": 0.2849671483039856,
+   "max_abs_diff_vs_oodeel": 7.781934627858158e-06,
+   "k": 50
+  },
+  "mls": {
+   "cal_score_median": -3.3418291807174683
+  },
+  "msp": {
+   "cal_score_median": -0.9897100836152153
+  },
+  "energy": {
+   "cal_score_median": -3.3608809038197434
+  }
+ }
+}
