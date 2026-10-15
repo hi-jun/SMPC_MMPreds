@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SMPC_ROOT = SCRIPT_DIR.parents[2]
+CARLA_PORT_RE = re.compile(r"-carla-rpc-port=(\d+)")
 CRASH_PATTERNS = (
     "Segmentation fault",
     "Signal 11",
@@ -122,7 +124,24 @@ def _timeout_log_since(root: Path, since_epoch_s: float) -> Path | None:
     return None
 
 
-def _carla_pids() -> list[int]:
+def _infer_carla_port_range(command: list[str], span: int) -> tuple[int, int] | None:
+    """RPC ports [base, base + span) that a sweep started with ``--port base`` may use.
+
+    Scoping the CARLA bookkeeping to this range lets several watchdogs share one
+    machine: each only counts and cleans up the servers of its own sweep.
+    """
+    for idx, item in enumerate(command):
+        if item == "--port" and idx + 1 < len(command):
+            base = int(command[idx + 1])
+        elif item.startswith("--port="):
+            base = int(item.split("=", 1)[1])
+        else:
+            continue
+        return base, base + int(span)
+    return None
+
+
+def _carla_pids(port_range: tuple[int, int] | None = None) -> list[int]:
     proc = subprocess.run(
         ["ps", "-eo", "pid=,cmd="],
         stdout=subprocess.PIPE,
@@ -138,6 +157,10 @@ def _carla_pids() -> list[int]:
         pid_text, _, cmd = line.partition(" ")
         if "CarlaUE4" not in cmd:
             continue
+        if port_range is not None:
+            match = CARLA_PORT_RE.search(cmd)
+            if match is None or not (port_range[0] <= int(match.group(1)) < port_range[1]):
+                continue
         try:
             pids.append(int(pid_text))
         except ValueError:
@@ -145,8 +168,8 @@ def _carla_pids() -> list[int]:
     return pids
 
 
-def _cleanup_carla(grace_s: float, log_file) -> list[int]:
-    pids = _carla_pids()
+def _cleanup_carla(grace_s: float, log_file, port_range: tuple[int, int] | None = None) -> list[int]:
+    pids = _carla_pids(port_range)
     if pids:
         _log(f"cleaning CARLA processes: {pids}", log_file)
     for pid in pids:
@@ -156,7 +179,7 @@ def _cleanup_carla(grace_s: float, log_file) -> list[int]:
             pass
     if pids and grace_s > 0:
         time.sleep(grace_s)
-    remaining = _carla_pids()
+    remaining = _carla_pids(port_range)
     for pid in remaining:
         try:
             os.kill(pid, signal.SIGKILL)
@@ -215,6 +238,7 @@ def run(args: argparse.Namespace) -> int:
         output_root = SMPC_ROOT / "results" / "acc_scenario_sweep" / f"watchdog_{stamp}"
     output_root.mkdir(parents=True, exist_ok=True)
     log_path = output_root / "watchdog.log"
+    port_range = _infer_carla_port_range(command, args.carla_port_span)
 
     stop_requested = False
 
@@ -230,10 +254,14 @@ def run(args: argparse.Namespace) -> int:
     with log_path.open("a") as log_file:
         _log("watchdog started", log_file)
         _log(f"output_root={output_root}", log_file)
+        if port_range is None:
+            _log("no --port in the sweep command: counting and cleaning every CarlaUE4 on the machine", log_file)
+        else:
+            _log(f"CARLA RPC port range [{port_range[0]}, {port_range[1]})", log_file)
         while not stop_requested:
             attempt += 1
             if args.cleanup_carla_before_start:
-                _cleanup_carla(args.carla_cleanup_grace_s, log_file)
+                _cleanup_carla(args.carla_cleanup_grace_s, log_file, port_range)
 
             attempt_start = time.time()
             no_carla_since = None
@@ -263,7 +291,7 @@ def run(args: argparse.Namespace) -> int:
                         restart_reason = f"simulator timeout detected in {timeout_log}"
                         break
 
-                    pids = _carla_pids()
+                    pids = _carla_pids(port_range)
                     if pids:
                         no_carla_since = None
                     elif now - attempt_start >= args.startup_grace_s:
@@ -289,14 +317,14 @@ def run(args: argparse.Namespace) -> int:
 
             if stop_requested:
                 _stop_child(proc, log_file, args.term_timeout_s)
-                _cleanup_carla(args.carla_cleanup_grace_s, log_file)
+                _cleanup_carla(args.carla_cleanup_grace_s, log_file, port_range)
                 _log("watchdog stopped by signal", log_file)
                 return 130
 
             restarts += 1
             _log(f"restart requested: {restart_reason}", log_file)
             _stop_child(proc, log_file, args.term_timeout_s)
-            _cleanup_carla(args.carla_cleanup_grace_s, log_file)
+            _cleanup_carla(args.carla_cleanup_grace_s, log_file, port_range)
 
             if args.max_restarts > 0 and restarts > args.max_restarts:
                 _log(f"max restarts exceeded: {args.max_restarts}", log_file)
@@ -327,6 +355,10 @@ def main() -> int:
     parser.add_argument("--carla-cleanup-grace-s", type=float, default=2.0)
     parser.add_argument("--max-restarts", type=int, default=0,
                         help="0 means unlimited restarts.")
+    parser.add_argument("--carla-port-span", type=int, default=200,
+                        help="Only CARLA servers whose RPC port lies in [--port, --port + span) of the "
+                             "wrapped sweep command are counted and cleaned up, so several sweeps can "
+                             "share the machine. Without --port in the command every CarlaUE4 counts.")
     parser.add_argument("--cleanup-carla-before-start", action="store_true", default=True)
     parser.add_argument("--no-cleanup-carla-before-start",
                         dest="cleanup_carla_before_start",
