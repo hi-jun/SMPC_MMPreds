@@ -149,6 +149,13 @@ class NairACCConfig:
     #: stays the emergency relaxation.  ``None`` is off, and the QP then has no
     #: shortfall variables at all.
     standoff_shortfall_weight: Optional[float] = None
+    #: ``dopt<w>lk``: price the shortfall on the ego-lane lead's lane-keeping
+    #: cells as well (``MultimodalLeadPrediction.lead_mode_lk``), so a cut-in
+    #: keeps the price it had as a hypothesis once it is in the lane, instead
+    #: of snapping back to the hard ``d_safe`` and the emergency slack
+    #: (2026-10-16).  Cut-out cells keep Proposed's factor.  Needs
+    #: ``standoff_shortfall_weight``.
+    standoff_shortfall_on_lk: bool = False
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -209,6 +216,8 @@ class NairACCConfig:
                     "standoff_shortfall_weight (dopt<w>) is implemented only in the cached "
                     "feedback confidence_chance QP: needs confidence_chance safety, fixed risk "
                     "and a non-open-loop variant")
+        if self.standoff_shortfall_on_lk and self.standoff_shortfall_weight is None:
+            raise ValueError("standoff_shortfall_on_lk (dopt<w>lk) needs standoff_shortfall_weight")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -432,6 +441,10 @@ class MultimodalLeadPrediction:
     # Benciolini confidence beta_j per (mode, step); NaN marks a deterministic
     # cell (ego-lane lead) that gets no sigma-based tightening.
     chance_confidence: Optional[np.ndarray] = None
+    # True where the cell's lead is an ego-lane vehicle in its lane-keeping
+    # mode, the cells ``dopt<w>lk`` prices as well; None when the predictor
+    # does not say (then only cut-in cells are priced).
+    lead_mode_lk: Optional[np.ndarray] = None
     k_group_map: Optional[np.ndarray] = None
     k_group_names: Optional[List[str]] = None
 
@@ -507,6 +520,11 @@ class MultimodalLeadPrediction:
             finite = self.chance_confidence[np.isfinite(self.chance_confidence)]
             if np.any(finite < 0.0) or np.any(finite > 1.0):
                 raise ValueError("finite chance_confidence entries must lie in [0, 1]")
+        if self.lead_mode_lk is not None:
+            self.lead_mode_lk = np.asarray(self.lead_mode_lk, dtype=bool)
+            expected = (self.num_modes, horizon + 1)
+            if self.lead_mode_lk.shape != expected:
+                raise ValueError("lead_mode_lk must have shape %s" % (expected,))
         if self.k_group_map is not None:
             self.k_group_map = np.asarray(self.k_group_map, dtype=int)
             expected = (self.num_modes, horizon)
@@ -768,7 +786,7 @@ class OldACCReferenceAdapter:
         remembered_standoff = dopt_cells = None
         if self.config.standoff_shortfall_weight is not None:
             remembered_standoff = self._remembered_standoff(lead_prediction)
-            dopt_cells = standoff_shortfall_mask(lead_prediction)
+            dopt_cells = standoff_shortfall_mask(lead_prediction, self.config.standoff_shortfall_on_lk)
 
         for mode in range(num_modes):
             for step in range(horizon + 1):
@@ -858,7 +876,7 @@ class OldACCReferenceAdapter:
         for mode, name in enumerate(_scenario_names(prediction)):
             if name in self.previous_planned_standoff:
                 standoff[mode] = self.previous_planned_standoff[name]
-        standoff[~standoff_shortfall_mask(prediction)] = np.nan
+        standoff[~standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)] = np.nan
         return standoff
 
     def _old_speed_ramp(self, v_ego):
@@ -1121,6 +1139,10 @@ class NairACCSMPC:
             active_mask=prediction.active_mask[:, :self.config.horizon + 1],
             clearance_scale=prediction.clearance_scale[:, :self.config.horizon + 1],
             chance_confidence=prediction.chance_confidence[:, :self.config.horizon + 1],
+            lead_mode_lk=(
+                None if prediction.lead_mode_lk is None
+                else prediction.lead_mode_lk[:, :self.config.horizon + 1]
+            ),
             k_group_map=k_group_map,
             k_group_names=prediction.k_group_names,
         )
@@ -1209,7 +1231,8 @@ class NairACCSMPC:
         target_safe_probability = 0.0
         risk_diagnostics = risks
         shortfall = self._standoff_shortfall
-        dopt_cells = standoff_shortfall_mask(prediction) if shortfall is not None else None
+        dopt_cells = (standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
+                      if shortfall is not None else None)
         if optimized_eta_data is not None:
             eta_levels = np.asarray(optimized_eta_data["eta_levels"], dtype=float).reshape(-1)
             safe_probability_levels = np.asarray(
@@ -1270,7 +1293,9 @@ class NairACCSMPC:
             standoff = optimized_standoff(prediction.clearance_scale, x_nominal[:, :, 1], self.config)
             if shortfall is not None:  # None after a fallback, which plans no shortfall
                 standoff = standoff - shortfall
-            planned_standoff = np.where(standoff_shortfall_mask(prediction), standoff, np.nan)
+            planned_standoff = np.where(
+                standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk),
+                standoff, np.nan)
         timing_breakdown["solution_postprocess_s"] = time.perf_counter() - phase_start
 
         first_accel = reference.prev_u[0, 0] + policy.h[0, 0, 0]
@@ -1830,7 +1855,7 @@ class NairACCSMPC:
             opti.set_value(problem.lead_dev_v_params[sample_idx], lead_dev_v[sample_idx])
         shortfall_mask = None
         if problem.short_var is not None:
-            shortfall_mask = standoff_shortfall_mask(prediction)
+            shortfall_mask = standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
             opti.set_value(problem.shortfall_mask_param, shortfall_mask.astype(float))
         k_slot_by_step = []
         if problem.optimize_k:
@@ -2925,14 +2950,22 @@ def confidence_tightening(lead_covariance, beta, config):
     return float(confidence_quantile(beta) * safety_std(lead_covariance, config))
 
 
-def standoff_shortfall_mask(prediction):
+def standoff_shortfall_mask(prediction, include_lk=False):
     """Cells whose standoff the optimizer picks under ``dopt<w>``.
 
     The active cells with a finite chance confidence, which ``cutin_chance``
-    gives to cut-in leads only.  The QP's shortfall bound and the reference
-    generator both read it, so the two cannot disagree on which cells they are.
+    gives to cut-in leads only; with ``include_lk`` (``dopt<w>lk``) also the
+    active cells ``lead_mode_lk`` marks, the ego-lane lead's lane-keeping
+    cells, so a cut-in stays priced once it is in the lane.  Cut-out cells are
+    never in it, and a prediction that does not mark cells prices cut-in cells
+    only.  The QP's shortfall bound and the reference generator both read it,
+    so the two cannot disagree on which cells they are.
     """
-    return np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
+    active = np.asarray(prediction.active_mask, dtype=bool)
+    mask = active & np.isfinite(prediction.chance_confidence)
+    if include_lk and prediction.lead_mode_lk is not None:
+        mask |= active & np.asarray(prediction.lead_mode_lk, dtype=bool)
+    return mask
 
 
 def optimized_standoff(clearance_scale, speed, config):

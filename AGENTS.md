@@ -48,7 +48,7 @@ It describes the state on 2026-10-07, branch `feat/probability-gated-cutin`. Whe
 | `predictor/stdan_vel/` | A 9-mode STDAN with velocity output |
 | `predictor/uq/` | Conformal novelty detector and a 5-member deep ensemble for the `stdan_vel` checkpoint, ported from the maintainer's thesis repository (added 2026-10-13). Not wired into the controller, and not valid for `stdan_3int`. Read `predictor/uq/AGENTS.md` first |
 | `overleaf/` | Paper tables, the final formulation, and the figure and table generators (`overleaf/figs/scripts/`) |
-| `tests/` | 7 unit-test modules (124 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration |
+| `tests/` | 7 unit-test modules (129 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration |
 | `results/` | Sweep outputs. `results/*/` is gitignored, so sweep data and launch scripts exist only on the maintainer's machine |
 
 ## 3. The controller in one page
@@ -113,6 +113,7 @@ Sweeps pass `--ego-policy <string>`. The `_parse_*` methods of `ACCNairSMPCAgent
 | `cutin_gate<p>` | Probability below which a cut-in mode stops acting as a lead (default 0.1 for STDAN and IAIMM-KF) |
 | `sigmacap<c>` | With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_ref); the standoff factor keeps β_ref (added 2026-10-07, not in the paper) |
 | `dopt<w>` | With `cutin_chance` only: on cut-in cells the probability factor α_j scales the footprint L + d0 only, and the optimizer picks how much of the time gap τv to keep, paying w·P_j·shortfall² (`NairACCConfig.standoff_shortfall_weight`); the standoff lies in [α_j(L + d0), α_j(L + d0) + τv]. Cut-out cells keep Proposed's factor. Cached feedback QP only (added 2026-10-07 with a fixed L + d0 floor, which 2026-10-15 replaced by α_j(L + d0); not in the paper) |
+| `dopt<w>lk` | `dopt<w>` that also prices the shortfall on the ego-lane lead's lane-keeping cells (`NairACCConfig.standoff_shortfall_on_lk`, cells marked by `MultimodalLeadPrediction.lead_mode_lk`), so a cut-in keeps its price once it is in the lane instead of snapping back to the hard d_safe and the emergency slack. Cut-out cells still keep Proposed's factor. `stdan_3int` only (added 2026-10-16, not in the paper) |
 | `rmove<w>`, `rjerk<w>` | Weight on the step-0 command change; jerk weight |
 | `open_loop`, `multimodal_ol`, any `_ol` | Open-loop variant: one input sequence shared by all scenarios, and one scalar slack |
 | `no_k`, `with_k` | Disable or enable K-feedback optimisation (off by default) |

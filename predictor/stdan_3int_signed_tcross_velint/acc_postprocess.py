@@ -936,6 +936,7 @@ def build_multitarget_lead_prediction(
             active_mask=active_mask,
             clearance_scale=np.ones((1, horizon + 1)),
             chance_confidence=np.full((1, horizon + 1), np.nan),
+            lead_mode_lk=np.zeros((1, horizon + 1), dtype=bool),
         )
         return prediction, []
 
@@ -952,6 +953,7 @@ def build_multitarget_lead_prediction(
     active_mask = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     clearance_scale = np.ones((len(scenarios), horizon + 1), dtype=float)
     chance_confidence = np.full((len(scenarios), horizon + 1), np.nan)
+    lead_mode_lk = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     mode_names = []
     probabilities = []
     metadata = []
@@ -1000,6 +1002,7 @@ def build_multitarget_lead_prediction(
                 covariances[scenario_out_idx, step] = base_cov
             active_mask[scenario_out_idx, step] = True
             chance_confidence[scenario_out_idx, step], clearance_scale[scenario_out_idx, step] = cell
+            lead_mode_lk[scenario_out_idx, step] = selected.mode_name == "lk"
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
             effective_lead_keys.append((int(selected.vehicle_id), str(selected.mode_name)))
@@ -1040,6 +1043,7 @@ def build_multitarget_lead_prediction(
         active_mask=active_mask,
         clearance_scale=clearance_scale,
         chance_confidence=chance_confidence,
+        lead_mode_lk=lead_mode_lk,
         k_group_map=k_group_map,
         k_group_names=k_group_names,
     )

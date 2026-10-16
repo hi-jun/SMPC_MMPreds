@@ -797,6 +797,42 @@ class TestCutInChanceConstraint(unittest.TestCase):
             prediction.clearance_scale[active],
             confidence_quantile(beta) / confidence_quantile(self.REF),
         )
+        self.assertFalse(prediction.lead_mode_lk.any(), "an adjacent car's lk mode never leads")
+
+    def test_lane_keeping_cells_are_marked_for_dopt_lk(self):
+        """``lead_mode_lk`` is exactly the cells whose effective lead keeps its lane."""
+        gate = TestCutInProbabilityGate()
+        adjacent = gate._process(
+            gate._raw([0.60, 0.20, 0.20], [3.5, 0.0, 0.0]), cutin_chance_ref=self.REF)
+        s = np.array([20.0, 22.0, 24.0])
+        ahead = np.column_stack((s, np.zeros_like(s)))
+        away = np.column_stack((s, np.full_like(s, 3.5)))
+        in_lane = gate._process(
+            {
+                "vehicle_id": 11,
+                "raw_intention_prob": np.array([0.60, 0.20, 0.20]),
+                "pred_traj_frenet": np.stack((ahead, away, away)),
+                "raw_pred_vel": np.ones((3, 3, 2)),
+                "signed_t_cross": 1.0,
+                "valid_mask": np.ones((3, 3), dtype=bool),
+            },
+            current_d=0.0, relation=REL_EGO_LANE, cutin_chance_ref=self.REF,
+        )
+        prediction, metadata = build_multitarget_lead_prediction(
+            [adjacent, in_lane],
+            ego_state=np.array([0.0, 10.0]),
+            horizon=self.HORIZON,
+            desired_speed=15.0,
+            num_modes=8,
+        )
+        marked = prediction.lead_mode_lk
+        self.assertEqual(marked.shape, prediction.active_mask.shape)
+        self.assertFalse(marked[~prediction.active_mask].any())
+        for row, meta in zip(marked, metadata):
+            expected = [len(key) == 2 and key[1] == "lk" for key in meta["effective_lead_keys"]]
+            np.testing.assert_array_equal(row, expected)
+        self.assertTrue(marked.any(), "the in-lane lead's lk scenarios")
+        self.assertTrue((prediction.active_mask & ~marked).any(), "cut-in and cut-out cells")
 
 
 class TestLaneSideConvention(unittest.TestCase):
@@ -901,6 +937,22 @@ class TestChanceTokens(unittest.TestCase):
             self.assertEqual(agent._parse_r_move(policy), 1000.0)
             self.assertFalse(agent._parse_optimize_k(policy))
         self.assertEqual(agent._parse_chance_sigma_cap(self.PROPOSED + "_sigmacap0.99"), 0.99)
+        self.assertFalse(agent._parse_standoff_shortfall_on_lk(self.PROPOSED))
+        self.assertFalse(agent._parse_standoff_shortfall_on_lk(self.PROPOSED.replace("_rmove", "_dopt10_rmove")))
+        priced_lead = self.PROPOSED.replace("_rmove", "_dopt10lk_rmove")
+        self.assertTrue(agent._parse_standoff_shortfall_on_lk(priced_lead))
+        self.assertEqual(agent._parse_standoff_shortfall_weight(priced_lead), 10.0)
+
+    def test_dopt_lk_needs_the_stdan_3int_predictor(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent
+
+        class _Vehicle:  # the check runs before anything else touches the vehicle
+            def get_world(self):
+                return None
+
+        lstm = "acc_nair_smpc_lstm_fixed_risk_nominal_safe_distance_cutin_chance0.6_dopt10lk_rmove1000"
+        with self.assertRaisesRegex(ValueError, "stdan_3int"):
+            ACCNairSMPCAgent(_Vehicle(), None, smpc_config=lstm)
 
     def test_dopt_and_sigmacap_need_cutin_chance(self):
         from policies.acc_nair_smpc_agent import ACCNairSMPCAgent

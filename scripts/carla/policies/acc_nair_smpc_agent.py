@@ -110,10 +110,15 @@ class ACCNairSMPCAgent(object):
                 "cutin_ramp and cutin_chance both set the cut-in standoff scale; use one")
         self.chance_sigma_cap = self._parse_chance_sigma_cap(smpc_config)
         self.standoff_shortfall_weight = self._parse_standoff_shortfall_weight(smpc_config)
+        self.standoff_shortfall_on_lk = self._parse_standoff_shortfall_on_lk(smpc_config)
         if self.cutin_chance_ref <= 0.0 and (
                 self.chance_sigma_cap is not None or self.standoff_shortfall_weight is not None):
             raise ValueError(
                 "sigmacap and dopt modify the cutin_chance constraint; add cutin_chance<beta_ref>")
+        if self.standoff_shortfall_on_lk and self.predictor_type != "stdan_3int":
+            # Only the stdan_3int joint prediction marks lane-keeping cells; any
+            # other predictor would silently price cut-in cells only.
+            raise ValueError("dopt<w>lk needs the stdan_3int predictor")
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -161,6 +166,7 @@ class ACCNairSMPCAgent(object):
         if r_move is not None:
             self.controller_config.r_move = r_move
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
+        self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -1396,6 +1402,16 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"dopt([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_standoff_shortfall_on_lk(smpc_config):
+        """Read the ``lk`` suffix of ``dopt<w>lk`` (False = cut-in cells only).
+
+        With it the shortfall is priced on the ego-lane lead's lane-keeping
+        cells too, so a cut-in keeps its price once it is in the lane.  See
+        ``NairACCConfig.standoff_shortfall_on_lk``.
+        """
+        return re.search(r"dopt[0-9]*\.?[0-9]+lk", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_cutin_clearance_tlc_ref(smpc_config):

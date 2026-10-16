@@ -40,6 +40,7 @@ from utils.acc_nair_smpc import (  # noqa: E402
     safety_function,
     safety_std,
     scalar_chance_margin,
+    standoff_shortfall_mask,
     upper_bound_brake_distance,
 )
 from utils.synthetic_lk_cutin_prediction import (  # noqa: E402
@@ -808,7 +809,10 @@ class TestOptimizedStandoff(unittest.TestCase):
         config.__post_init__()
         return config
 
-    def _prediction(self, gap0, lead_v, probabilities, scale=1.0):
+    def _prediction(self, gap0, lead_v, probabilities, scale=1.0, lk_lead=False):
+        """The last scenario's lead is a cut-in (sigma term, no lk mark) or, with
+        ``lk_lead``, the in-lane lead keeping its lane (no sigma term, marked in
+        ``lead_mode_lk``)."""
         num_modes, steps = len(probabilities), self.HORIZON + 1
         means = np.zeros((num_modes, steps, 2))
         means[:, :, 0] = gap0 + lead_v * 0.2 * np.arange(steps)
@@ -816,19 +820,24 @@ class TestOptimizedStandoff(unittest.TestCase):
         active = np.zeros((num_modes, steps), dtype=bool)
         active[-1] = True
         chance_confidence = np.full((num_modes, steps), np.nan)
-        chance_confidence[-1] = self.CONFIDENCE
+        lead_mode_lk = np.zeros((num_modes, steps), dtype=bool)
+        if lk_lead:
+            lead_mode_lk[-1] = True
+        else:
+            chance_confidence[-1] = self.CONFIDENCE
         return MultimodalLeadPrediction(
             means=means,
             probabilities=np.asarray(probabilities, dtype=float),
             covariances=np.tile(self.COVARIANCE, (num_modes, steps, 1, 1)),
             active_mask=active,
             chance_confidence=chance_confidence,
+            lead_mode_lk=lead_mode_lk,
             clearance_scale=np.full((num_modes, steps), float(scale)),
-            mode_names=["10:lk", "10:cutin"][-num_modes:],
+            mode_names=(["10:lk", "20:lk"] if lk_lead else ["10:lk", "10:cutin"])[-num_modes:],
         )
 
-    def _solve(self, weight, prediction):
-        controller = NairACCSMPC(self._config(weight))
+    def _solve(self, weight, prediction, **overrides):
+        controller = NairACCSMPC(self._config(weight, **overrides))
         return controller, controller.solve(
             self.EGO, prediction, previous_accel_cmd=0.0, command_dt=0.05)
 
@@ -870,6 +879,50 @@ class TestOptimizedStandoff(unittest.TestCase):
         self.assertGreater(np.max(self._shortfall(light, 0)), 0.5)
         self.assertLess(np.max(self._shortfall(heavy, 0)), 0.05)
         np.testing.assert_allclose(heavy.u_nominal, plain.u_nominal, atol=0.02)
+
+    def test_a_lane_keeping_lead_is_priced_only_with_the_lk_token(self):
+        # The first test's cut-in, now reclassified as the in-lane lead: an lk
+        # cell with no sigma term, 15 m ahead at the ego's speed.
+        prediction = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True)
+        _, cutin_only = self._solve(3.0, prediction)
+        _, priced = self._solve(3.0, prediction, standoff_shortfall_on_lk=True)
+        # dopt<w> prices cut-in cells only: the lead keeps the hard d_safe and
+        # only the emergency slack meets step 0, as without dopt.
+        self.assertGreater(cutin_only.slack_max, 10.0)
+        self.assertTrue(np.all(np.isnan(cutin_only.planned_standoff)))
+        self.assertLess(cutin_only.action, -0.2)
+        # dopt<w>lk keeps the cut-in's price on the lead: a shortfall, no slack.
+        self.assertGreater(self._shortfall(priced, 1)[0], 10.0)
+        self.assertTrue(np.all(priced.planned_standoff[1] >= 7.5 - 1.0e-3))
+        self.assertTrue(np.all(np.isnan(priced.planned_standoff[0])))
+        self.assertLess(priced.slack_max, 0.01)
+        self.assertGreater(priced.chance_margin_min, -0.01)
+        self.assertGreater(priced.action, cutin_only.action + 0.15)
+
+    def test_a_priced_lane_keeping_lead_with_heavy_weight_follows_as_without_dopt(self):
+        prediction = self._prediction(28.0, 12.0, (1.0,), lk_lead=True)
+        _, plain = self._solve(None, prediction)
+        _, light = self._solve(0.1, prediction, standoff_shortfall_on_lk=True)
+        _, heavy = self._solve(1000.0, prediction, standoff_shortfall_on_lk=True)
+        self.assertGreater(np.max(self._shortfall(light, 0)), 0.5)
+        self.assertLess(np.max(self._shortfall(heavy, 0)), 0.05)
+        np.testing.assert_allclose(heavy.u_nominal, plain.u_nominal, atol=0.02)
+
+    def test_the_lk_token_prices_lane_keeping_cells_and_never_cutout_cells(self):
+        cutin = self._prediction(15.0, 14.0, (0.8, 0.2))
+        lk = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True)
+        cutout = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True)
+        cutout.lead_mode_lk[1] = False  # active, no sigma term, not lane keeping
+        unmarked = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True)
+        unmarked.lead_mode_lk = None  # a predictor that does not mark its cells
+        for include_lk in (False, True):
+            np.testing.assert_array_equal(standoff_shortfall_mask(cutin, include_lk), cutin.active_mask)
+            self.assertFalse(standoff_shortfall_mask(cutout, include_lk).any())
+            self.assertFalse(standoff_shortfall_mask(unmarked, include_lk).any())
+        self.assertFalse(standoff_shortfall_mask(lk).any())
+        np.testing.assert_array_equal(standoff_shortfall_mask(lk, True), lk.active_mask)
+        with self.assertRaisesRegex(ValueError, "dopt<w>lk"):
+            self._config(None, standoff_shortfall_on_lk=True)
 
     def test_the_standoff_never_drops_below_the_footprint_floor(self):
         # 5 m behind, inside L + d0: even a nearly free shortfall stops at the
