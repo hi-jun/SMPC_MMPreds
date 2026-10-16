@@ -722,6 +722,60 @@ class TestCutInChanceConstraint(unittest.TestCase):
         self.assertTrue(np.isnan(mode.chance_confidence))
         self.assertEqual(mode.clearance_scale, 1.0)
 
+    def test_trajcutin_makes_an_entering_lane_keeping_trajectory_a_cutin_mode(self):
+        """``lk_entry_as_cutin``: a right-adjacent car whose LK trajectory drifts into the
+        ego lane.  By label that trajectory is a lane-keeping cell (full standoff, no sigma
+        term); by trajectory it is a cut-in mode with its own probability."""
+        gate = TestCutInProbabilityGate()
+        s = np.array([20.0, 22.0, 24.0])
+        raw = {
+            "vehicle_id": 10,
+            "raw_intention_prob": np.array([0.5, 0.3, 0.2]),  # LK, LLC (labelled cut-in), RLC
+            "pred_traj_frenet": np.stack((
+                np.column_stack((s, [2.0, 0.4, 0.2])),   # LK drifts in from step 2
+                np.column_stack((s, [0.0, 0.0, 0.0])),   # LLC is in the lane from step 1
+                np.column_stack((s, [3.5, 3.5, 3.5])),   # RLC stays away
+            )),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+        by_label = gate._process(raw, cutin_chance_ref=self.REF)
+        self.assertEqual([m.mode_name for m in by_label.mode_predictions], ["lk", "cutin"])
+        lk = gate._mode(by_label, "lk")
+        self.assertAlmostEqual(lk.probability, 0.7, places=9)
+        np.testing.assert_array_equal(lk.active_mask, [False, False, True, True])
+        self.assertTrue(np.isnan(lk.chance_confidence))
+        self.assertEqual(lk.clearance_scale, 1.0)
+
+        by_traj = gate._process(raw, cutin_chance_ref=self.REF, lk_entry_as_cutin=True)
+        modes = {tuple(m.raw_mode_indices): m for m in by_traj.mode_predictions}
+        self.assertEqual([m.mode_name for m in by_traj.mode_predictions], ["lk", "cutin", "cutin"])
+        self.assertAlmostEqual(modes[(2,)].probability, 0.2, places=9)
+        self.assertFalse(modes[(2,)].active_mask.any(), "the trajectory that stays away")
+        self.assertAlmostEqual(modes[(1,)].probability, 0.3, places=9)
+        np.testing.assert_array_equal(modes[(1,)].active_mask, [False, True, True, True])
+        self.assertAlmostEqual(modes[(0,)].probability, 0.5, places=9)
+        np.testing.assert_array_equal(modes[(0,)].active_mask, [False, False, True, True])
+        for idx in ((0,), (1,)):
+            self.assertEqual(modes[idx].mode_name, "cutin")
+            self.assertAlmostEqual(modes[idx].chance_confidence, min(modes[idx].probability, self.REF), places=9)
+        self.assertAlmostEqual(by_traj.acc_mode_prob["cutin"], 0.8, places=9)
+        self.assertTrue(by_traj.branch_info["lk_entry_as_cutin"])
+        # An entering lane-keeping trajectory below the gate is switched off like any cut-in.
+        raw["raw_intention_prob"] = np.array([0.05, 0.75, 0.2])
+        gated = gate._process(raw, cutin_chance_ref=self.REF, lk_entry_as_cutin=True,
+                              cutin_probability_threshold=0.1)
+        faint = {tuple(m.raw_mode_indices): m for m in gated.mode_predictions}[(0,)]
+        self.assertEqual(faint.mode_name, "cutin")
+        self.assertFalse(faint.active_mask.any())
+        # Nothing changes while no lane-keeping trajectory enters.
+        plain = gate._raw([0.60, 0.30, 0.10], [3.5, 0.0, 0.0])
+        a = gate._process(plain, cutin_chance_ref=self.REF)
+        b = gate._process(plain, cutin_chance_ref=self.REF, lk_entry_as_cutin=True)
+        self.assertEqual([(m.mode_name, m.probability, tuple(m.raw_mode_indices)) for m in a.mode_predictions],
+                         [(m.mode_name, m.probability, tuple(m.raw_mode_indices)) for m in b.mode_predictions])
+
     def test_chance_only_touches_cutin_modes(self):
         gate = TestCutInProbabilityGate()
         processed = gate._process(
@@ -947,6 +1001,13 @@ class TestChanceTokens(unittest.TestCase):
         self.assertTrue(agent._parse_standoff_shortfall_on_lk(priced_lead))
         self.assertEqual(agent._parse_standoff_shortfall_weight(priced_lead), 10.0)
         self.assertFalse(agent._parse_standoff_shortfall_lk_cutin_only(priced_lead))
+        self.assertFalse(agent._parse_lk_entry_as_cutin(self.PROPOSED))
+        by_trajectory = self.PROPOSED.replace("_rmove", "_dopt100lkr_trajcutin_rmove")
+        self.assertTrue(agent._parse_lk_entry_as_cutin(by_trajectory))
+        self.assertEqual(agent._parse_cutin_chance_ref(by_trajectory), 0.6)
+        self.assertEqual(agent._parse_standoff_shortfall_weight(by_trajectory), 100.0)
+        self.assertTrue(agent._parse_standoff_shortfall_lk_cutin_only(by_trajectory))
+        self.assertIsNone(agent._parse_cutin_probability_threshold(by_trajectory))
         recovered = self.PROPOSED.replace("_rmove", "_dopt10lkr_rmove")
         self.assertTrue(agent._parse_standoff_shortfall_on_lk(recovered))
         self.assertTrue(agent._parse_standoff_shortfall_lk_cutin_only(recovered))
@@ -962,6 +1023,9 @@ class TestChanceTokens(unittest.TestCase):
         lstm = "acc_nair_smpc_lstm_fixed_risk_nominal_safe_distance_cutin_chance0.6_dopt10lk_rmove1000"
         with self.assertRaisesRegex(ValueError, "stdan_3int"):
             ACCNairSMPCAgent(_Vehicle(), None, smpc_config=lstm)
+        lstm_traj = "acc_nair_smpc_lstm_fixed_risk_nominal_safe_distance_cutin_chance0.6_trajcutin_rmove1000"
+        with self.assertRaisesRegex(ValueError, "stdan_3int"):
+            ACCNairSMPCAgent(_Vehicle(), None, smpc_config=lstm_traj)
 
     def test_dopt_and_sigmacap_need_cutin_chance(self):
         from policies.acc_nair_smpc_agent import ACCNairSMPCAgent

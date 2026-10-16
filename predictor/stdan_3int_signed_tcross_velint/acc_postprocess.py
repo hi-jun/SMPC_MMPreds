@@ -240,6 +240,7 @@ def _mode_specs_for_relation(
     relation: str,
     raw_probs: np.ndarray,
     memberships: Optional[np.ndarray] = None,
+    lk_entry_as_cutin: bool = False,
 ) -> List[tuple[str, List[int], float]]:
     """Mapping of the raw LK/LLC/RLC modes onto the ACC modes.
 
@@ -247,6 +248,16 @@ def _mode_specs_for_relation(
     become ``cutout`` only when their predicted trajectory actually ends
     outside the lane; the rest of the mass is lane keeping, whatever the
     intention head calls it.
+
+    With ``lk_entry_as_cutin`` (``trajcutin``) an adjacent vehicle's
+    lane-keeping-labelled trajectory that enters the ego lane within the
+    horizon becomes a cut-in mode of its own, with its own probability and
+    trajectory.  While a vehicle crosses the lane line, the intention head's LK
+    trajectory already drifts into the ego lane 0.4-0.5 s before the vehicle is
+    reclassified as ego-lane (2026-10-16), and as a lane-keeping cell it held
+    the full standoff, unscaled and without a sigma term, whatever its
+    probability.  The labelled cut-in keeps its mode; nothing changes while no
+    lane-keeping trajectory enters.
 
     The label alone puts phantom cut-out mass on every lane keeper -- 0.07
     median and 0.33 peak on a straight-driving second lead, 0.18 on the lead
@@ -262,16 +273,18 @@ def _mode_specs_for_relation(
     row per raw mode.  Without it there is no trajectory to consult and the
     ego-lane mapping falls back to the label.
     """
-    if relation == REL_LEFT_ADJACENT:
-        return [
-            ("lk", [0, 1], float(raw_probs[0] + raw_probs[1])),
-            ("cutin", [2], float(raw_probs[2])),
-        ]
-    if relation == REL_RIGHT_ADJACENT:
-        return [
-            ("lk", [0, 2], float(raw_probs[0] + raw_probs[2])),
-            ("cutin", [1], float(raw_probs[1])),
-        ]
+    if relation in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT):
+        cutin_idx = 2 if relation == REL_LEFT_ADJACENT else 1
+        lk_indices = [idx for idx in (0, 1, 2) if idx != cutin_idx]
+        entering = []
+        if lk_entry_as_cutin and memberships is not None:
+            entering = [idx for idx in lk_indices if np.asarray(memberships[idx], dtype=bool).any()]
+            lk_indices = [idx for idx in lk_indices if idx not in entering]
+        return (
+            [("lk", lk_indices, float(np.sum(raw_probs[lk_indices])))]
+            + [("cutin", [cutin_idx], float(raw_probs[cutin_idx]))]
+            + [("cutin", [idx], float(raw_probs[idx])) for idx in entering]
+        )
     if relation == REL_EGO_LANE:
         if memberships is None:
             return [
@@ -709,6 +722,7 @@ def process_vehicle_prediction(
     gap_recovery_s: float = 0.0,
     gap_recovery_floor: float = 0.6,
     gap_recovery_start_scale: Optional[float] = None,
+    lk_entry_as_cutin: bool = False,
 ) -> ACCProcessedPrediction:
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     raw_map = {name: float(raw_probs[idx]) for idx, name in enumerate(INTENTION_NAMES)}
@@ -769,7 +783,7 @@ def process_vehicle_prediction(
     mode_specs = (
         trajectory_mode_specs
         if use_trajectory_aware_cutin_mapping
-        else _mode_specs_for_relation(relation_to_ego_lane, raw_probs, memberships)
+        else _mode_specs_for_relation(relation_to_ego_lane, raw_probs, memberships, lk_entry_as_cutin)
     )
     prob_maps = _acc_probabilities_from_mode_specs(raw_probs, raw_map, mode_specs)
     mode_predictions = []
@@ -836,6 +850,7 @@ def process_vehicle_prediction(
             "lane_membership_source": lane_membership_source,
             "trajectory_suggested_cutin_raw_idx": trajectory_cutin_raw_idx,
             "used_trajectory_aware_cutin_mapping": bool(use_trajectory_aware_cutin_mapping),
+            "lk_entry_as_cutin": bool(lk_entry_as_cutin),
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),

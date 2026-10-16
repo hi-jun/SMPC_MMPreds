@@ -120,6 +120,9 @@ class ACCNairSMPCAgent(object):
             # Only the stdan_3int joint prediction marks lane-keeping cells; any
             # other predictor would silently price cut-in cells only.
             raise ValueError("dopt<w>lk needs the stdan_3int predictor")
+        self.lk_entry_as_cutin = self._parse_lk_entry_as_cutin(smpc_config)
+        if self.lk_entry_as_cutin and self.predictor_type != "stdan_3int":
+            raise ValueError("trajcutin needs the stdan_3int predictor")
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -778,6 +781,7 @@ class ACCNairSMPCAgent(object):
                 gap_recovery_elapsed=gap_recovery_elapsed,
                 gap_recovery_s=self.gap_recovery_s,
                 gap_recovery_start_scale=gap_recovery_start_scale,
+                lk_entry_as_cutin=self.lk_entry_as_cutin,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -1424,6 +1428,16 @@ class ACCNairSMPCAgent(object):
         ``NairACCConfig.standoff_shortfall_lk_cutin_only``.
         """
         return re.search(r"dopt[0-9]*\.?[0-9]+lkr", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_lk_entry_as_cutin(smpc_config):
+        """Read ``trajcutin`` from the config string (False = map by label).
+
+        With it an adjacent vehicle's lane-keeping-labelled trajectory that
+        enters the ego lane within the horizon is a cut-in mode of its own.  See
+        ``acc_postprocess._mode_specs_for_relation``.
+        """
+        return "trajcutin" in str(smpc_config)
 
     @staticmethod
     def _parse_cutin_clearance_tlc_ref(smpc_config):

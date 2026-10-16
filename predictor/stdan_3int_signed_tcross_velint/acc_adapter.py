@@ -500,6 +500,7 @@ class STDAN3IntACCAdapter:
         gap_recovery_s: float = 0.0,
         gap_recovery_floor: float = 0.6,
         gap_recovery_start_scale: Optional[Dict[int, float]] = None,
+        lk_entry_as_cutin: bool = False,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -562,6 +563,7 @@ class STDAN3IntACCAdapter:
                     gap_recovery_start_scale=(
                         None if gap_recovery_start_scale is None
                         else gap_recovery_start_scale.get(target_id)),
+                    lk_entry_as_cutin=lk_entry_as_cutin,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(
