@@ -965,10 +965,18 @@ class TestOptimizedStandoff(unittest.TestCase):
         self.assertGreater(plain.slack_max, 10.0)
         with self.assertRaisesRegex(ValueError, "dopt<w>lkr"):
             self._config(3.0, standoff_shortfall_lk_cutin_only=True)
-        unmarked = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True)
-        unmarked.lead_vehicle_ids = None
-        with self.assertRaisesRegex(ValueError, "lead vehicle ids"):
-            other.solve(self.EGO, unmarked, **kw)
+        # A prediction that names no lead (the agent's fallback when no target is
+        # in range) prices nothing and releases whatever was priced.
+        controller.solve(self.EGO, self._prediction(15.0, 14.0, (0.8, 0.2)), **kw)
+        controller.solve(self.EGO, close, **kw)
+        self.assertEqual(set(controller._priced_cutin_vehicles), {10})
+        for field in ("lead_vehicle_ids", "lead_mode_lk"):
+            unmarked = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True, vehicle_id=10)
+            setattr(unmarked, field, None)
+            fallback = controller.solve(self.EGO, unmarked, **kw)
+            self.assertTrue(np.all(np.isnan(fallback.planned_standoff)), field)
+            self.assertEqual(controller._priced_cutin_vehicles, {}, field)
+            self.assertEqual(controller._armed_cutin_vehicles, set(), field)
 
     def test_the_standoff_never_drops_below_the_footprint_floor(self):
         # 5 m behind, inside L + d0: even a nearly free shortfall stops at the

@@ -1194,7 +1194,14 @@ class NairACCSMPC:
         standoff, as in Proposed.  The prediction object is not modified.
         """
         if prediction.lead_mode_lk is None or prediction.lead_vehicle_ids is None:
-            raise ValueError("dopt<w>lkr needs per-cell lane-keeping marks and lead vehicle ids")
+            # The agent's fallback prediction (no target in range) names no lead:
+            # no vehicle leads this tick, so none stays armed or priced, and no
+            # lane-keeping cell is priced.
+            self._armed_cutin_vehicles.clear()
+            self._priced_cutin_vehicles.clear()
+            restricted = copy.copy(prediction)
+            restricted.lead_mode_lk = None
+            return restricted
         active = np.asarray(prediction.active_mask, dtype=bool)
         lk = np.asarray(prediction.lead_mode_lk, dtype=bool)
         ids = np.asarray(prediction.lead_vehicle_ids, dtype=int)
