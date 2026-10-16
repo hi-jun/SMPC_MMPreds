@@ -33,6 +33,16 @@ class ACCModePrediction:
     lead_covariance: Optional[np.ndarray] = None
     clearance_scale: float | np.ndarray = 1.0  # per-step array once gap recovery applies
     chance_confidence: float = float("nan")  # Benciolini beta_j; NaN = deterministic mode
+    # Name under which the mode enters joint-scenario names and effective-lead
+    # keys: ``mode_name`` unless set.  ``trajcutin`` labels the cut-in mode made
+    # from an entering lane-keeping trajectory ``cutin/LK`` so that two cut-in
+    # modes of one vehicle stay distinct scenarios -- under one name they shared
+    # one remembered ``dopt`` standoff and one policy group (2026-10-17).
+    scenario_label: Optional[str] = None
+
+    def __post_init__(self):
+        if self.scenario_label is None:
+            self.scenario_label = self.mode_name
 
     @property
     def branch_step(self) -> int:
@@ -236,6 +246,15 @@ def _representative_index(raw_probs: np.ndarray, indices: Sequence[int]) -> int:
     return int(max(indices, key=lambda idx: raw_probs[idx]))
 
 
+def _labelled_cutin_index(relation: str) -> Optional[int]:
+    """The raw mode whose label is the lane change toward the ego lane; None off the adjacent lanes."""
+    if relation == REL_LEFT_ADJACENT:
+        return 2
+    if relation == REL_RIGHT_ADJACENT:
+        return 1
+    return None
+
+
 def _mode_specs_for_relation(
     relation: str,
     raw_probs: np.ndarray,
@@ -257,7 +276,13 @@ def _mode_specs_for_relation(
     reclassified as ego-lane (2026-10-16), and as a lane-keeping cell it held
     the full standoff, unscaled and without a sigma term, whatever its
     probability.  The labelled cut-in keeps its mode; nothing changes while no
-    lane-keeping trajectory enters.
+    lane-keeping trajectory enters.  When every trajectory but the labelled
+    cut-in enters, the vehicle has no lane-keeping mode at all and its cut-in
+    modes carry the whole mass (until 2026-10-17 the empty mode reached
+    ``_representative_index`` and raised, and the agent replaced the whole
+    tick's prediction with the synthetic one).  The entering trajectory's mode
+    is a ``cutin`` for every constraint; its scenario label carries the
+    intention, see ``ACCModePrediction.scenario_label``.
 
     The label alone puts phantom cut-out mass on every lane keeper -- 0.07
     median and 0.33 peak on a straight-driving second lead, 0.18 on the lead
@@ -274,14 +299,14 @@ def _mode_specs_for_relation(
     ego-lane mapping falls back to the label.
     """
     if relation in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT):
-        cutin_idx = 2 if relation == REL_LEFT_ADJACENT else 1
+        cutin_idx = _labelled_cutin_index(relation)
         lk_indices = [idx for idx in (0, 1, 2) if idx != cutin_idx]
         entering = []
         if lk_entry_as_cutin and memberships is not None:
             entering = [idx for idx in lk_indices if np.asarray(memberships[idx], dtype=bool).any()]
             lk_indices = [idx for idx in lk_indices if idx not in entering]
         return (
-            [("lk", lk_indices, float(np.sum(raw_probs[lk_indices])))]
+            ([("lk", lk_indices, float(np.sum(raw_probs[lk_indices])))] if lk_indices else [])
             + [("cutin", [cutin_idx], float(raw_probs[cutin_idx]))]
             + [("cutin", [idx], float(raw_probs[idx])) for idx in entering]
         )
@@ -436,7 +461,7 @@ def ramp_cutin_clearance(
         if mode.mode_name != "cutin":
             continue
         mode.clearance_scale = cutin_clearance_scale(mode.probability, reference_beta)
-        scales[mode.mode_name] = mode.clearance_scale
+        scales[mode.scenario_label] = mode.clearance_scale
     return scales
 
 
@@ -487,7 +512,7 @@ def chance_cutin_clearance(
         mode.chance_confidence = (
             beta if sigma_cap is None else min(float(mode.probability), float(sigma_cap)))
         mode.clearance_scale = confidence_quantile(beta) / reference_quantile
-        result[mode.mode_name] = {"confidence": mode.chance_confidence, "scale": mode.clearance_scale}
+        result[mode.scenario_label] = {"confidence": mode.chance_confidence, "scale": mode.clearance_scale}
     return result
 
 
@@ -616,7 +641,7 @@ def tlc_cutin_clearance(
             tlc = float(np.argmax(active)) * float(dt)
             mode.clearance_scale = float(
                 np.clip(1.0 - tlc / float(reference_tlc_s), 0.0, 1.0))
-        scales[mode.mode_name] = mode.clearance_scale
+        scales[mode.scenario_label] = mode.clearance_scale
     return scales
 
 
@@ -668,7 +693,7 @@ def gap_reestablish_clearance(
         mode.clearance_scale = np.minimum(
             np.asarray(mode.clearance_scale, dtype=float), scale
         )
-        scales[mode.mode_name] = mode.clearance_scale.tolist()
+        scales[mode.scenario_label] = mode.clearance_scale.tolist()
     return scales
 
 
@@ -698,7 +723,7 @@ def gate_unlikely_cutin_modes(
     for mode in mode_predictions:
         if mode.mode_name == "cutin" and mode.probability < threshold:
             mode.active_mask[:] = False
-            gated.append(mode.mode_name)
+            gated.append(mode.scenario_label)
     return gated
 
 
@@ -806,6 +831,16 @@ def process_vehicle_prediction(
                 ),
             )
         )
+
+    if lk_entry_as_cutin:
+        # The cut-in mode made from an entering trajectory is told apart from the
+        # labelled one by its label (``ACCModePrediction.scenario_label``); the
+        # labelled cut-in keeps the plain name so that every other policy's
+        # scenario names are untouched.
+        labelled_idx = _labelled_cutin_index(relation_to_ego_lane)
+        for mode in mode_predictions:
+            if mode.mode_name == "cutin" and list(mode.raw_mode_indices) != [labelled_idx]:
+                mode.scenario_label = "cutin/" + INTENTION_NAMES[int(mode.raw_mode_indices[0])]
 
     if mode_predictions:
         norm = normalize_probabilities([mode.probability for mode in mode_predictions])
@@ -980,7 +1015,7 @@ def build_multitarget_lead_prediction(
     for scenario_out_idx, (combo_idx, combo, prob) in enumerate(scenarios):
         means[scenario_out_idx, :, 0] = ego_s
         means[scenario_out_idx, :, 1] = default_speed
-        mode_names.append("+".join(f"{mode.vehicle_id}:{mode.mode_name}" for mode in combo))
+        mode_names.append("+".join(f"{mode.vehicle_id}:{mode.scenario_label}" for mode in combo))
         probabilities.append(prob)
         selected_ids = []
         selected_modes = []
@@ -1023,7 +1058,7 @@ def build_multitarget_lead_prediction(
             lead_vehicle_ids[scenario_out_idx, step] = int(selected.vehicle_id)
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
-            effective_lead_keys.append((int(selected.vehicle_id), str(selected.mode_name)))
+            effective_lead_keys.append((int(selected.vehicle_id), str(selected.scenario_label)))
         effective_lead_keys_by_scenario.append(effective_lead_keys)
         metadata.append(
             {

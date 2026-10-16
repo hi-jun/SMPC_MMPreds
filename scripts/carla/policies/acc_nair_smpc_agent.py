@@ -933,7 +933,7 @@ class ACCNairSMPCAgent(object):
                 "vehicle_id": int(target.vehicle_id),
                 "relation_to_ego_lane": target.relation_to_ego_lane,
                 "acc_mode_raw_indices": {
-                    mode.mode_name: [int(idx) for idx in mode.raw_mode_indices]
+                    mode.scenario_label: [int(idx) for idx in mode.raw_mode_indices]
                     for mode in target.mode_predictions
                 },
                 "raw_mode_prob": {

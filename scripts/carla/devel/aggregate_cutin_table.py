@@ -142,10 +142,16 @@ cut-in 응답
 
 유효성
   invalid = pkl/json 로드 실패 | ran_successfully False
-            | fallback_ratio > FALLBACK_TOL (0.02) | s_map_err > 1.0 m.
+            | fallback_ratio > FALLBACK_TOL (0.02) | pred_error_steps > 0 | s_map_err > 1.0 m.
   fallback_ratio = solve_path == "fallback" 인 스텝 비율. v_max 교착(ego 20 m/s)
   은 0.17~1.0 이라 제어기 지표 전부 무의미하다. 충돌 직후 1~2 스텝(≤0.4 %)
   의 fallback 은 충격으로 튄 속도 때문이라 런을 버리지 않는다.
+  pred_fallback_ratio = 예측기가 결과를 주지 못하거나 예외를 내서 에이전트가 그 틱을
+  합성 두 모드 예측(lane_keeping 0.6 / cutin 0.4, 차량 id 없음)으로 대체한 스텝 비율
+  (stdan_debug.fallback). pred_error_steps = 그중 예외(stdan_debug.reason) 스텝 수.
+  solve_path 는 정상이라 fallback_ratio 에는 안 잡힌다 -- 2026-10-16 trajcutin 의 빈
+  lk 모드 ValueError 가 컷인 108/108 런에서 6~9틱씩 이렇게 숨었다. 예외는 무효 사유,
+  결과 없음(격자 안에 차가 없을 때)은 정상 동작이라 비율만 적는다.
   slack_steps = feasible False 스텝 수(진단용, 무효 사유 아님).
   충돌은 **무효 사유가 아니다** — 제어기의 결과이므로 빼면 표가 유리해진다.
   대신 collisions_in_window / ego_collision 로 표시하고 METRICS.md 에 나열한다.
@@ -965,6 +971,12 @@ def collect_run(policy, group, run_dir, window_s=None, window_start_s=None):
     solve_path = [s.get("solve_path") for s in steps]
     row["fallback_ratio"] = round(
         sum(1 for p in solve_path if p == "fallback") / float(len(steps)), 4)
+    # 예측기 대체: 에이전트가 예측기 예외/결과 없음을 삼키고 그 틱을 합성 예측으로 푼다.
+    # solve_path 는 정상이라 위 비율에 안 잡힌다(docstring "유효성").
+    debug = [s.get("stdan_debug") or {} for s in steps]
+    row["pred_fallback_ratio"] = round(
+        sum(1 for d in debug if d.get("fallback")) / float(len(steps)), 4)
+    row["pred_error_steps"] = sum(1 for d in debug if d.get("reason"))
     row["slack_steps"] = sum(1 for s in steps if not s.get("feasible"))
     pairs = set()
     ego_hit = False
@@ -1058,6 +1070,8 @@ def collect_run(policy, group, run_dir, window_s=None, window_start_s=None):
         reasons.append("ran_successfully=False")
     if row["fallback_ratio"] > FALLBACK_TOL:
         reasons.append("fallback_ratio=%.3f" % row["fallback_ratio"])
+    if row["pred_error_steps"] > 0:
+        reasons.append("pred_error_steps=%d" % row["pred_error_steps"])
     if row["s_map_err"] > S_MAP_TOL:
         reasons.append("s_map_err=%.2f m" % row["s_map_err"])
     row["valid"] = not reasons

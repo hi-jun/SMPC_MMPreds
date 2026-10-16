@@ -751,6 +751,7 @@ class TestCutInChanceConstraint(unittest.TestCase):
         by_traj = gate._process(raw, cutin_chance_ref=self.REF, lk_entry_as_cutin=True)
         modes = {tuple(m.raw_mode_indices): m for m in by_traj.mode_predictions}
         self.assertEqual([m.mode_name for m in by_traj.mode_predictions], ["lk", "cutin", "cutin"])
+        self.assertEqual([m.scenario_label for m in by_traj.mode_predictions], ["lk", "cutin", "cutin/LK"])
         self.assertAlmostEqual(modes[(2,)].probability, 0.2, places=9)
         self.assertFalse(modes[(2,)].active_mask.any(), "the trajectory that stays away")
         self.assertAlmostEqual(modes[(1,)].probability, 0.3, places=9)
@@ -769,12 +770,91 @@ class TestCutInChanceConstraint(unittest.TestCase):
         faint = {tuple(m.raw_mode_indices): m for m in gated.mode_predictions}[(0,)]
         self.assertEqual(faint.mode_name, "cutin")
         self.assertFalse(faint.active_mask.any())
+        self.assertEqual(gated.branch_info["gated_cutin_modes"], ["cutin/LK"])
         # Nothing changes while no lane-keeping trajectory enters.
         plain = gate._raw([0.60, 0.30, 0.10], [3.5, 0.0, 0.0])
         a = gate._process(plain, cutin_chance_ref=self.REF)
         b = gate._process(plain, cutin_chance_ref=self.REF, lk_entry_as_cutin=True)
         self.assertEqual([(m.mode_name, m.probability, tuple(m.raw_mode_indices)) for m in a.mode_predictions],
                          [(m.mode_name, m.probability, tuple(m.raw_mode_indices)) for m in b.mode_predictions])
+
+    def test_trajcutin_with_no_lane_keeping_trajectory_left_keeps_only_cutin_modes(self):
+        """Both trajectories that are not the labelled cut-in enter: no lane-keeping
+        mode remains and the vehicle's mass sits on three cut-in modes.  Until
+        2026-10-17 the empty lane-keeping mode raised in ``_representative_index``
+        and the agent ran the tick on the synthetic prediction instead -- in the
+        first ``trajcutin`` grid on 6-9 ticks of every cut-in run, right before
+        the vehicle was reclassified as ego-lane."""
+        gate = TestCutInProbabilityGate()
+        s = np.array([20.0, 22.0, 24.0])
+        raw = {
+            "vehicle_id": 10,
+            "raw_intention_prob": np.array([0.5, 0.3, 0.2]),  # LK, LLC (labelled cut-in), RLC
+            "pred_traj_frenet": np.stack((
+                np.column_stack((s, [2.0, 0.4, 0.2])),   # LK drifts in from step 2
+                np.column_stack((s, [0.0, 0.0, 0.0])),   # LLC is in the lane from step 1
+                np.column_stack((s, [3.5, 0.3, 0.1])),   # RLC drifts in from step 2 too
+            )),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+        by_label = gate._process(raw, cutin_chance_ref=self.REF)
+        self.assertEqual([m.mode_name for m in by_label.mode_predictions], ["lk", "cutin"])
+        by_traj = gate._process(raw, cutin_chance_ref=self.REF, lk_entry_as_cutin=True)
+        self.assertEqual([m.mode_name for m in by_traj.mode_predictions], ["cutin", "cutin", "cutin"])
+        self.assertEqual([m.scenario_label for m in by_traj.mode_predictions],
+                         ["cutin", "cutin/LK", "cutin/RLC"])
+        self.assertEqual([list(m.raw_mode_indices) for m in by_traj.mode_predictions], [[1], [0], [2]])
+        np.testing.assert_allclose([m.probability for m in by_traj.mode_predictions], [0.3, 0.5, 0.2])
+        self.assertAlmostEqual(by_traj.acc_mode_prob["cutin"], 1.0, places=9)
+        self.assertEqual(by_traj.acc_mode_prob["lk"], 0.0)
+        for mode in by_traj.mode_predictions:
+            self.assertAlmostEqual(mode.chance_confidence, min(mode.probability, self.REF), places=9)
+        np.testing.assert_array_equal(by_traj.mode_predictions[2].active_mask, [False, False, True, True])
+
+    def test_trajcutin_cutin_modes_of_one_vehicle_are_distinct_scenarios(self):
+        """The labelled cut-in and the entering trajectory are different scenarios
+        with different effective leads.  Under one name (``10:cutin`` twice, until
+        2026-10-17) they shared one remembered ``dopt`` standoff and, entering on
+        the same step, one policy group."""
+        gate = TestCutInProbabilityGate()
+        s = np.array([20.0, 22.0, 24.0])
+        raw = {
+            "vehicle_id": 10,
+            "raw_intention_prob": np.array([0.5, 0.3, 0.2]),
+            "pred_traj_frenet": np.stack((
+                np.column_stack((s, [0.4, 0.3, 0.2])),   # LK is in the lane from step 1 ...
+                np.column_stack((s, [0.0, 0.0, 0.0])),   # ... on the same steps as the labelled cut-in
+                np.column_stack((s, [3.5, 3.5, 3.5])),   # RLC stays away
+            )),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+        processed = gate._process(raw, cutin_chance_ref=self.REF, lk_entry_as_cutin=True)
+        prediction, metadata = build_multitarget_lead_prediction(
+            [processed],
+            ego_state=np.array([0.0, 10.0]),
+            horizon=self.HORIZON,
+            desired_speed=15.0,
+            num_modes=8,
+        )
+        self.assertEqual(sorted(prediction.mode_names), ["10:cutin", "10:cutin/LK", "10:lk"])
+        by_name = dict(zip(prediction.mode_names, metadata))
+        self.assertEqual(by_name["10:cutin"]["effective_lead_keys"], [("inactive",)] + [(10, "cutin")] * 3)
+        self.assertEqual(by_name["10:cutin/LK"]["effective_lead_keys"], [("inactive",)] + [(10, "cutin/LK")] * 3)
+        self.assertEqual(by_name["10:cutin/LK"]["selected_mode_names"][1:], ["cutin"] * 3)
+        labelled = prediction.mode_names.index("10:cutin")
+        entering = prediction.mode_names.index("10:cutin/LK")
+        for row in (labelled, entering):
+            active = prediction.active_mask[row]
+            self.assertFalse(prediction.lead_mode_lk[row][active].any())
+            self.assertTrue(np.isfinite(prediction.chance_confidence[row][active]).all())
+        groups = prediction.policy_tree.policy_groups_by_step
+        self.assertEqual(groups[labelled, 0], groups[entering, 0], "u0 is always shared")
+        self.assertTrue((groups[labelled, 1:] != groups[entering, 1:]).all(),
+                        "different leads from step 1 on, so different inputs")
 
     def test_chance_only_touches_cutin_modes(self):
         gate = TestCutInProbabilityGate()
