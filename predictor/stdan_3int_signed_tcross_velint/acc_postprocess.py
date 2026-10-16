@@ -102,6 +102,43 @@ def global_to_frenet_trajectory(points_xy: np.ndarray, frenet_handler, yaw: floa
     return frenet
 
 
+def global_to_frenet_points(points_xy: np.ndarray, frenet_handler):
+    """(s, d) of every point of ``points_xy`` (..., 2) in one pass.
+
+    The same arithmetic as ``FrenetTrajectoryHandler.convert_global_to_frenet_frame``
+    (nearest reference sample by Euclidean distance, tangential error clipped to
+    half a sample spacing), applied to all points at once instead of scanning
+    the reference line once per point.  Also returns the reference heading at
+    each point's nearest sample, which the covariance rotation needs.
+    Returns ``(frenet (..., 2), psi (...))``.
+    """
+    points = np.asarray(points_xy, dtype=float)
+    flat = points.reshape(-1, 2)
+    trajectory = np.asarray(frenet_handler.trajectory, dtype=float)
+    xy_traj = trajectory[:, 1:3]
+    closest = np.argmin(np.linalg.norm(flat[:, None, :] - xy_traj[None, :, :], axis=-1), axis=1)
+    psi = trajectory[closest, 3]
+    cos_psi, sin_psi = np.cos(psi), np.sin(psi)
+    error_xy = flat - xy_traj[closest]
+    e_s = cos_psi * error_xy[:, 0] + sin_psi * error_xy[:, 1]
+    e_d = -sin_psi * error_xy[:, 0] + cos_psi * error_xy[:, 1]
+    half_cell = 0.5 * float(trajectory[1, 0] - trajectory[0, 0]) if trajectory.shape[0] > 1 else 0.0
+    s = trajectory[closest, 0] + np.clip(e_s, -half_cell, half_cell)
+    return np.stack((s, e_d), axis=-1).reshape(points.shape), psi.reshape(points.shape[:-1])
+
+
+def rotate_covariances_to_frenet(covariances_xy: np.ndarray, psi: np.ndarray) -> np.ndarray:
+    """Rotate global (..., 2, 2) covariances into the Frenet frame of heading ``psi`` (...)."""
+    covariances = np.asarray(covariances_xy, dtype=float)
+    cos_psi, sin_psi = np.cos(psi), np.sin(psi)
+    rotation = np.stack(
+        (np.stack((cos_psi, sin_psi), axis=-1), np.stack((-sin_psi, cos_psi), axis=-1)),
+        axis=-2,
+    )
+    rotated = rotation @ covariances @ np.swapaxes(rotation, -1, -2)
+    return 0.5 * (rotated + np.swapaxes(rotated, -1, -2))
+
+
 def ego_pose_relative_frenet(points_xy: np.ndarray, ego_x: float, ego_y: float, ego_yaw: float) -> np.ndarray:
     points = np.asarray(points_xy, dtype=float)
     dx = points[:, 0] - float(ego_x)

@@ -13,8 +13,9 @@ from predictor.stdan_3int_signed_tcross_velint.configs.config_3int_signed_tcross
 from .acc_postprocess import (
     REL_OTHER,
     build_multitarget_lead_prediction,
-    global_to_frenet_trajectory,
+    global_to_frenet_points,
     process_vehicle_prediction,
+    rotate_covariances_to_frenet,
 )
 
 
@@ -215,25 +216,8 @@ class STDAN3IntACCAdapter:
                 "matching points_xy (num_modes, steps, 2)"
             )
 
-        trajectory = np.asarray(frenet_handler.trajectory, dtype=np.float64)
-        xy_traj = trajectory[:, 1:3]
-        yaw_traj = trajectory[:, 3]
-        flat_points = points_xy.reshape(-1, 2)
-        flat_covariances = covariances_xy.reshape(-1, 2, 2)
-        flat_output = np.zeros_like(flat_covariances)
-        for idx, (point, covariance) in enumerate(zip(flat_points, flat_covariances)):
-            closest_index = int(np.argmin(np.linalg.norm(xy_traj - point.reshape(1, 2), axis=1)))
-            psi = float(yaw_traj[closest_index])
-            rot_global_to_frenet = np.array(
-                [
-                    [np.cos(psi), np.sin(psi)],
-                    [-np.sin(psi), np.cos(psi)],
-                ],
-                dtype=np.float64,
-            )
-            flat_output[idx] = rot_global_to_frenet @ covariance @ rot_global_to_frenet.T
-        output = flat_output.reshape(covariances_xy.shape)
-        return 0.5 * (output + np.swapaxes(output, -1, -2))
+        _, psi = global_to_frenet_points(points_xy, frenet_handler)
+        return rotate_covariances_to_frenet(covariances_xy, psi)
 
     @staticmethod
     def _lead_covariance_from_frenet_moments(
@@ -343,7 +327,7 @@ class STDAN3IntACCAdapter:
         if self.gdEncoder is None or self.generator is None:
             raise RuntimeError("STDAN 3-int model is not loaded")
         hist, nbrs, mask, va, nbrsva, lane, nbrslane, cls, nbrscls = tensors
-        intent_enc = torch.zeros(1, 3, device=self.device)
+        intent_enc = torch.zeros(hist.shape[1], 3, device=self.device)
         self.gdEncoder.train() if self.mc_dropout else self.gdEncoder.eval()
         self.generator.eval()
         self.generator.train_flag = False
@@ -352,6 +336,22 @@ class STDAN3IntACCAdapter:
             fut_vel_modes, intent_prob, t_cross_pred = self.generator(values, intent_enc)
         self.gdEncoder.eval()
         return fut_vel_modes, intent_prob, t_cross_pred, mask
+
+    @staticmethod
+    def _concat_scenes(scenes):
+        """One batch from per-target scenes: targets along dim 1, the neighbour
+        lists along dim 1 and the grid masks along dim 0.  The model scatters
+        the neighbour encodings into the masks' set cells in order, so keeping
+        each target's neighbours contiguous keeps them with their own mask."""
+        cat = lambda index, dim: torch.cat([scene[index] for scene in scenes], dim=dim)
+        return (cat(0, 1), cat(1, 1), cat(2, 0), cat(3, 1), cat(4, 1), cat(5, 1), cat(6, 1), cat(7, 1), cat(8, 1))
+
+    @staticmethod
+    def _batch_item(model_output, index):
+        """The batch-1 view of one target in a batched model output."""
+        fut_vel_modes, intent_prob, t_cross_pred, mask = model_output
+        item = slice(index, index + 1)
+        return ([mode[:, item] for mode in fut_vel_modes], intent_prob[item], t_cross_pred[item], mask[item])
 
     def _decode_raw_prediction(
         self,
@@ -453,17 +453,25 @@ class STDAN3IntACCAdapter:
         trackings: Dict[int, np.ndarray],
         model_yaw: Optional[float] = None,
     ) -> Dict[int, dict]:
-        predictions = {}
+        # One forward pass for all targets (the paper's multi-vehicle scheme):
+        # each call carries about 9 ms of fixed cost on the sweep CPU, so
+        # per-target calls scaled with the number of targets (2026-09-28).
+        scenes = []
         for target_id in target_ids:
             if target_id not in trackings or not self._has_enough_history(trackings[target_id]):
                 continue
             target_state = np.asarray(trackings[target_id], dtype=np.float64)[-1]
-            tensors = self.make_tensor(int(target_id), target_state, trackings, model_yaw=model_yaw)
-            model_output = self._run_model(tensors)
-            predictions[int(target_id)] = self._decode_raw_prediction(
-                int(target_id),
+            scenes.append((int(target_id), target_state,
+                           self.make_tensor(int(target_id), target_state, trackings, model_yaw=model_yaw)))
+        if not scenes:
+            return {}
+        model_output = self._run_model(self._concat_scenes([scene[2] for scene in scenes]))
+        predictions = {}
+        for index, (target_id, target_state, _) in enumerate(scenes):
+            predictions[target_id] = self._decode_raw_prediction(
+                target_id,
                 target_state,
-                model_output,
+                self._batch_item(model_output, index),
                 model_yaw=model_yaw,
             )
         return predictions
@@ -497,22 +505,14 @@ class STDAN3IntACCAdapter:
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
         processed = []
         for target_id, raw in raw_predictions.items():
-            traj_frenet = []
-            for mode_xy in raw["raw_traj_xy"]:
-                traj_frenet.append(global_to_frenet_trajectory(mode_xy, frenet_handler))
+            # All modes and steps in one pass; the nearest reference sample is
+            # found once per point and reused for the covariance rotations.
+            traj_frenet, psi_nearest = global_to_frenet_points(raw["raw_traj_xy"], frenet_handler)
             raw["full_pred_traj_frenet"] = np.asarray(traj_frenet, dtype=float)
             raw["full_raw_pred_vel"] = np.asarray(raw["raw_pred_vel"], dtype=float)
             if "raw_position_cov_global" in raw and "raw_velocity_cov_global" in raw:
-                position_cov_frenet = self._global_covariances_to_frenet(
-                    raw["raw_position_cov_global"],
-                    raw["raw_traj_xy"],
-                    frenet_handler,
-                )
-                velocity_cov_frenet = self._global_covariances_to_frenet(
-                    raw["raw_velocity_cov_global"],
-                    raw["raw_traj_xy"],
-                    frenet_handler,
-                )
+                position_cov_frenet = rotate_covariances_to_frenet(raw["raw_position_cov_global"], psi_nearest)
+                velocity_cov_frenet = rotate_covariances_to_frenet(raw["raw_velocity_cov_global"], psi_nearest)
                 full_lead_covariance = self._lead_covariance_from_frenet_moments(
                     position_cov_frenet,
                     velocity_cov_frenet,
