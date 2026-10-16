@@ -18,6 +18,7 @@ CasADi Opti builds a convex QP and delegates it to Gurobi.  This replaces the
 earlier SciPy/SLSQP prototype, which was too slow for receding-horizon use.
 """
 
+import copy
 from dataclasses import dataclass
 import glob
 import os
@@ -156,6 +157,15 @@ class NairACCConfig:
     #: (2026-10-16).  Cut-out cells keep Proposed's factor.  Needs
     #: ``standoff_shortfall_weight``.
     standoff_shortfall_on_lk: bool = False
+    #: ``dopt<w>lkr``: with ``standoff_shortfall_on_lk``, price a lane-keeping
+    #: cell only while its lead is a vehicle that came in as a cut-in and has
+    #: not yet re-opened the full standoff for ``NairACCSMPC.LK_RECOVERY_HOLD_S``
+    #: (2026-10-16).  Priced on every in-lane lead, the shortfall also let the
+    #: ego settle 7-13 % inside ``d_safe`` behind an ordinary slow lead (the
+    #: cut-out groups' second lead), since the reference then asks for the
+    #: shortened standoff and nothing pushes the gap back out.  Needs
+    #: ``MultimodalLeadPrediction.lead_vehicle_ids``.
+    standoff_shortfall_lk_cutin_only: bool = False
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -218,6 +228,8 @@ class NairACCConfig:
                     "and a non-open-loop variant")
         if self.standoff_shortfall_on_lk and self.standoff_shortfall_weight is None:
             raise ValueError("standoff_shortfall_on_lk (dopt<w>lk) needs standoff_shortfall_weight")
+        if self.standoff_shortfall_lk_cutin_only and not self.standoff_shortfall_on_lk:
+            raise ValueError("standoff_shortfall_lk_cutin_only (dopt<w>lkr) needs standoff_shortfall_on_lk")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -445,6 +457,10 @@ class MultimodalLeadPrediction:
     # mode, the cells ``dopt<w>lk`` prices as well; None when the predictor
     # does not say (then only cut-in cells are priced).
     lead_mode_lk: Optional[np.ndarray] = None
+    # The vehicle id of the cell's effective lead (-1 where inactive), which
+    # ``dopt<w>lkr`` needs to price one vehicle and not another; None when the
+    # predictor does not say.
+    lead_vehicle_ids: Optional[np.ndarray] = None
     k_group_map: Optional[np.ndarray] = None
     k_group_names: Optional[List[str]] = None
 
@@ -525,6 +541,11 @@ class MultimodalLeadPrediction:
             expected = (self.num_modes, horizon + 1)
             if self.lead_mode_lk.shape != expected:
                 raise ValueError("lead_mode_lk must have shape %s" % (expected,))
+        if self.lead_vehicle_ids is not None:
+            self.lead_vehicle_ids = np.asarray(self.lead_vehicle_ids, dtype=int)
+            expected = (self.num_modes, horizon + 1)
+            if self.lead_vehicle_ids.shape != expected:
+                raise ValueError("lead_vehicle_ids must have shape %s" % (expected,))
         if self.k_group_map is not None:
             self.k_group_map = np.asarray(self.k_group_map, dtype=int)
             expected = (self.num_modes, horizon)
@@ -897,6 +918,11 @@ class OldACCReferenceAdapter:
 class NairACCSMPC:
     """Nair-style multimodal SMPC reduced to longitudinal ACC."""
 
+    #: ``dopt<w>lkr``: a cut-in vehicle stops being priced once the gap to it
+    #: has been at or above the full standoff for this long (the aggregator's
+    #: T_rec uses the same hold).
+    LK_RECOVERY_HOLD_S = 0.5
+
     def __init__(self, config=None):
         self.config = config if config is not None else NairACCConfig()
         self.config.__post_init__()
@@ -907,6 +933,10 @@ class NairACCSMPC:
         self._open_loop_fixed_qp_cache = {}
         self._feedback_scalar_chance_qp_cache = {}
         self._standoff_shortfall = None  # dopt<w>: the cached QP's solved shortfall
+        # dopt<w>lkr: vehicles seen with a live cut-in hypothesis, and those of
+        # them now followed as the in-lane lead -> ticks the gap has been full.
+        self._armed_cutin_vehicles = set()
+        self._priced_cutin_vehicles = {}
 
     @property
     def A(self):
@@ -936,6 +966,8 @@ class NairACCSMPC:
 
         phase_start = time.perf_counter()
         prediction = self._trim_prediction(lead_prediction)
+        if self.config.standoff_shortfall_lk_cutin_only:
+            prediction = self._restrict_lk_pricing(ego_state, prediction)
         timing_breakdown["trim_prediction_s"] = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
@@ -1143,9 +1175,53 @@ class NairACCSMPC:
                 None if prediction.lead_mode_lk is None
                 else prediction.lead_mode_lk[:, :self.config.horizon + 1]
             ),
+            lead_vehicle_ids=(
+                None if prediction.lead_vehicle_ids is None
+                else prediction.lead_vehicle_ids[:, :self.config.horizon + 1]
+            ),
             k_group_map=k_group_map,
             k_group_names=prediction.k_group_names,
         )
+
+    def _restrict_lk_pricing(self, ego_state, prediction):
+        """``dopt<w>lkr``: keep ``lead_mode_lk`` only on vehicles that came in as a
+        cut-in and have not yet re-opened the full standoff.
+
+        A vehicle is armed while a prediction gives it a cut-in cell, priced from
+        the tick it leads the ego lane at step 0, and released once the gap to it
+        has been at or above ``required_standoff`` for ``LK_RECOVERY_HOLD_S`` (or
+        it stops being the lead).  Every other lane-keeping lead keeps the hard
+        standoff, as in Proposed.  The prediction object is not modified.
+        """
+        if prediction.lead_mode_lk is None or prediction.lead_vehicle_ids is None:
+            raise ValueError("dopt<w>lkr needs per-cell lane-keeping marks and lead vehicle ids")
+        active = np.asarray(prediction.active_mask, dtype=bool)
+        lk = np.asarray(prediction.lead_mode_lk, dtype=bool)
+        ids = np.asarray(prediction.lead_vehicle_ids, dtype=int)
+        cutin_cells = active & np.isfinite(prediction.chance_confidence) & ~lk
+        self._armed_cutin_vehicles |= set(int(v) for v in np.unique(ids[cutin_cells]))
+        self._armed_cutin_vehicles &= set(int(v) for v in np.unique(ids[active]))
+        # the in-lane leads at step 0 and the (centre-to-centre) gap to each
+        leads_now = {int(ids[j, 0]): float(prediction.means[j, 0, 0])
+                     for j in range(prediction.num_modes) if active[j, 0] and lk[j, 0]}
+        for vid in leads_now:
+            if vid in self._armed_cutin_vehicles:
+                self._priced_cutin_vehicles.setdefault(vid, 0)
+        full = required_standoff(ego_state, self.config)
+        hold_ticks = max(1, int(round(self.LK_RECOVERY_HOLD_S / self._command_dt)))
+        for vid in list(self._priced_cutin_vehicles):
+            if vid not in leads_now:
+                released = True
+            else:
+                recovered = leads_now[vid] - float(ego_state[0]) >= full
+                self._priced_cutin_vehicles[vid] = self._priced_cutin_vehicles[vid] + 1 if recovered else 0
+                released = self._priced_cutin_vehicles[vid] >= hold_ticks
+            if released:
+                del self._priced_cutin_vehicles[vid]
+                self._armed_cutin_vehicles.discard(vid)
+        restricted = copy.copy(prediction)
+        restricted.lead_mode_lk = lk & np.isin(ids, list(self._priced_cutin_vehicles))
+        return restricted
 
     def _solve_open_loop(self, ego_state, prediction, reference, risks, policy0):
         policy0.K[:] = 0.0

@@ -809,11 +809,13 @@ class TestOptimizedStandoff(unittest.TestCase):
         config.__post_init__()
         return config
 
-    def _prediction(self, gap0, lead_v, probabilities, scale=1.0, lk_lead=False):
+    def _prediction(self, gap0, lead_v, probabilities, scale=1.0, lk_lead=False, vehicle_id=None):
         """The last scenario's lead is a cut-in (sigma term, no lk mark) or, with
         ``lk_lead``, the in-lane lead keeping its lane (no sigma term, marked in
-        ``lead_mode_lk``)."""
+        ``lead_mode_lk``); ``vehicle_id`` is that lead's id (10 for the cut-in,
+        20 for the lane keeper unless given)."""
         num_modes, steps = len(probabilities), self.HORIZON + 1
+        vid = (20 if lk_lead else 10) if vehicle_id is None else int(vehicle_id)
         means = np.zeros((num_modes, steps, 2))
         means[:, :, 0] = gap0 + lead_v * 0.2 * np.arange(steps)
         means[:, :, 1] = lead_v
@@ -821,6 +823,8 @@ class TestOptimizedStandoff(unittest.TestCase):
         active[-1] = True
         chance_confidence = np.full((num_modes, steps), np.nan)
         lead_mode_lk = np.zeros((num_modes, steps), dtype=bool)
+        lead_vehicle_ids = np.full((num_modes, steps), -1, dtype=int)
+        lead_vehicle_ids[-1] = vid
         if lk_lead:
             lead_mode_lk[-1] = True
         else:
@@ -832,8 +836,9 @@ class TestOptimizedStandoff(unittest.TestCase):
             active_mask=active,
             chance_confidence=chance_confidence,
             lead_mode_lk=lead_mode_lk,
+            lead_vehicle_ids=lead_vehicle_ids,
             clearance_scale=np.full((num_modes, steps), float(scale)),
-            mode_names=(["10:lk", "20:lk"] if lk_lead else ["10:lk", "10:cutin"])[-num_modes:],
+            mode_names=(["9:lk", "%d:lk" % vid] if lk_lead else ["10:lk", "%d:cutin" % vid])[-num_modes:],
         )
 
     def _solve(self, weight, prediction, **overrides):
@@ -923,6 +928,47 @@ class TestOptimizedStandoff(unittest.TestCase):
         np.testing.assert_array_equal(standoff_shortfall_mask(lk, True), lk.active_mask)
         with self.assertRaisesRegex(ValueError, "dopt<w>lk"):
             self._config(None, standoff_shortfall_on_lk=True)
+
+    def test_lkr_prices_a_cutin_vehicle_only_until_the_gap_recovers(self):
+        # Vehicle 10 is seen cutting in (its sigma cell is priced as before), then
+        # leads the lane 15 m ahead: priced, no emergency slack, until the ego has
+        # held the full standoff for LK_RECOVERY_HOLD_S.  Vehicle 20 never cut in.
+        flags = dict(standoff_shortfall_on_lk=True, standoff_shortfall_lk_cutin_only=True)
+        controller = NairACCSMPC(self._config(3.0, **flags))
+        kw = dict(previous_accel_cmd=0.0, command_dt=0.05)
+        armed = controller.solve(self.EGO, self._prediction(15.0, 14.0, (0.8, 0.2)), **kw)
+        self.assertGreater(self._shortfall(armed, 1)[0], 10.0)
+        self.assertEqual(controller._armed_cutin_vehicles, {10})
+        self.assertEqual(controller._priced_cutin_vehicles, {})
+        close = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True, vehicle_id=10)
+        priced = controller.solve(self.EGO, close, **kw)
+        self.assertEqual(set(controller._priced_cutin_vehicles), {10})
+        self.assertGreater(self._shortfall(priced, 1)[0], 10.0)
+        self.assertLess(priced.slack_max, 0.01)
+        # The gap re-opens (30 m > d_safe 25.7 m): still priced through the hold,
+        # released on its last tick, and hard again when the lead comes close.
+        far = self._prediction(30.0, 14.0, (0.8, 0.2), lk_lead=True, vehicle_id=10)
+        hold = int(round(NairACCSMPC.LK_RECOVERY_HOLD_S / 0.05))
+        for _ in range(hold - 1):
+            solution = controller.solve(self.EGO, far, **kw)
+            self.assertFalse(np.all(np.isnan(solution.planned_standoff[1])))
+        solution = controller.solve(self.EGO, far, **kw)
+        self.assertEqual(controller._priced_cutin_vehicles, {})
+        self.assertTrue(np.all(np.isnan(solution.planned_standoff)))
+        released = controller.solve(self.EGO, close, **kw)
+        self.assertTrue(np.all(np.isnan(released.planned_standoff)))
+        self.assertGreater(released.slack_max, 10.0)
+        # A lead that never cut in keeps the hard standoff from the start.
+        other = NairACCSMPC(self._config(3.0, **flags))
+        plain = other.solve(self.EGO, self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True, vehicle_id=20), **kw)
+        self.assertTrue(np.all(np.isnan(plain.planned_standoff)))
+        self.assertGreater(plain.slack_max, 10.0)
+        with self.assertRaisesRegex(ValueError, "dopt<w>lkr"):
+            self._config(3.0, standoff_shortfall_lk_cutin_only=True)
+        unmarked = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True)
+        unmarked.lead_vehicle_ids = None
+        with self.assertRaisesRegex(ValueError, "lead vehicle ids"):
+            other.solve(self.EGO, unmarked, **kw)
 
     def test_the_standoff_never_drops_below_the_footprint_floor(self):
         # 5 m behind, inside L + d0: even a nearly free shortfall stops at the

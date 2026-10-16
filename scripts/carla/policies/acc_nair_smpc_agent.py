@@ -111,6 +111,7 @@ class ACCNairSMPCAgent(object):
         self.chance_sigma_cap = self._parse_chance_sigma_cap(smpc_config)
         self.standoff_shortfall_weight = self._parse_standoff_shortfall_weight(smpc_config)
         self.standoff_shortfall_on_lk = self._parse_standoff_shortfall_on_lk(smpc_config)
+        self.standoff_shortfall_lk_cutin_only = self._parse_standoff_shortfall_lk_cutin_only(smpc_config)
         if self.cutin_chance_ref <= 0.0 and (
                 self.chance_sigma_cap is not None or self.standoff_shortfall_weight is not None):
             raise ValueError(
@@ -167,6 +168,7 @@ class ACCNairSMPCAgent(object):
             self.controller_config.r_move = r_move
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
+        self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -1412,6 +1414,16 @@ class ACCNairSMPCAgent(object):
         ``NairACCConfig.standoff_shortfall_on_lk``.
         """
         return re.search(r"dopt[0-9]*\.?[0-9]+lk", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_standoff_shortfall_lk_cutin_only(smpc_config):
+        """Read the ``r`` of ``dopt<w>lkr`` (False = every in-lane lead is priced).
+
+        With it a lane-keeping cell is priced only while its lead came in as a
+        cut-in and the gap to it has not yet recovered the full standoff.  See
+        ``NairACCConfig.standoff_shortfall_lk_cutin_only``.
+        """
+        return re.search(r"dopt[0-9]*\.?[0-9]+lkr", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_cutin_clearance_tlc_ref(smpc_config):

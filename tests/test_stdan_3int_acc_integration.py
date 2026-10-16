@@ -833,6 +833,10 @@ class TestCutInChanceConstraint(unittest.TestCase):
             np.testing.assert_array_equal(row, expected)
         self.assertTrue(marked.any(), "the in-lane lead's lk scenarios")
         self.assertTrue((prediction.active_mask & ~marked).any(), "cut-in and cut-out cells")
+        for row, meta in zip(prediction.lead_vehicle_ids, metadata):
+            expected = [key[0] if len(key) == 2 else -1 for key in meta["effective_lead_keys"]]
+            np.testing.assert_array_equal(row, expected)
+        self.assertEqual(set(np.unique(prediction.lead_vehicle_ids)) - {-1}, {10, 11})
 
 
 class TestLaneSideConvention(unittest.TestCase):
@@ -942,6 +946,11 @@ class TestChanceTokens(unittest.TestCase):
         priced_lead = self.PROPOSED.replace("_rmove", "_dopt10lk_rmove")
         self.assertTrue(agent._parse_standoff_shortfall_on_lk(priced_lead))
         self.assertEqual(agent._parse_standoff_shortfall_weight(priced_lead), 10.0)
+        self.assertFalse(agent._parse_standoff_shortfall_lk_cutin_only(priced_lead))
+        recovered = self.PROPOSED.replace("_rmove", "_dopt10lkr_rmove")
+        self.assertTrue(agent._parse_standoff_shortfall_on_lk(recovered))
+        self.assertTrue(agent._parse_standoff_shortfall_lk_cutin_only(recovered))
+        self.assertEqual(agent._parse_standoff_shortfall_weight(recovered), 10.0)
 
     def test_dopt_lk_needs_the_stdan_3int_predictor(self):
         from policies.acc_nair_smpc_agent import ACCNairSMPCAgent
