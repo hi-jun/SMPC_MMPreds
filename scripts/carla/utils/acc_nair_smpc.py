@@ -1187,11 +1187,15 @@ class NairACCSMPC:
         """``dopt<w>lkr``: keep ``lead_mode_lk`` only on vehicles that came in as a
         cut-in and have not yet re-opened the full standoff.
 
-        A vehicle is armed while a prediction gives it a cut-in cell, priced from
-        the tick it leads the ego lane at step 0, and released once the gap to it
-        has been at or above ``required_standoff`` for ``LK_RECOVERY_HOLD_S`` (or
-        it stops being the lead).  Every other lane-keeping lead keeps the hard
-        standoff, as in Proposed.  The prediction object is not modified.
+        A vehicle is armed while a prediction gives it a cut-in cell, and its
+        lane-keeping cells are priced from then on: while it crosses the lane
+        line its lane-keeping hypothesis is already in the ego lane at the first
+        steps, before it leads at step 0 (measured 0.4-0.5 s before the
+        aggregator's t_cross).  Once it leads at step 0 it is released when the
+        gap to it has been at or above ``required_standoff`` for
+        ``LK_RECOVERY_HOLD_S``, or when it leaves the prediction's active cells.
+        Every other lane-keeping lead keeps the hard standoff, as in Proposed.
+        The prediction object is not modified.
         """
         if prediction.lead_mode_lk is None or prediction.lead_vehicle_ids is None:
             # The agent's fallback prediction (no target in range) names no lead:
@@ -1206,8 +1210,9 @@ class NairACCSMPC:
         lk = np.asarray(prediction.lead_mode_lk, dtype=bool)
         ids = np.asarray(prediction.lead_vehicle_ids, dtype=int)
         cutin_cells = active & np.isfinite(prediction.chance_confidence) & ~lk
+        active_ids = set(int(v) for v in np.unique(ids[active]))
         self._armed_cutin_vehicles |= set(int(v) for v in np.unique(ids[cutin_cells]))
-        self._armed_cutin_vehicles &= set(int(v) for v in np.unique(ids[active]))
+        self._armed_cutin_vehicles &= active_ids
         # the in-lane leads at step 0 and the (centre-to-centre) gap to each
         leads_now = {int(ids[j, 0]): float(prediction.means[j, 0, 0])
                      for j in range(prediction.num_modes) if active[j, 0] and lk[j, 0]}
@@ -1217,17 +1222,20 @@ class NairACCSMPC:
         full = required_standoff(ego_state, self.config)
         hold_ticks = max(1, int(round(self.LK_RECOVERY_HOLD_S / self._command_dt)))
         for vid in list(self._priced_cutin_vehicles):
-            if vid not in leads_now:
+            if vid not in active_ids:
                 released = True
-            else:
+            elif vid in leads_now:
                 recovered = leads_now[vid] - float(ego_state[0]) >= full
                 self._priced_cutin_vehicles[vid] = self._priced_cutin_vehicles[vid] + 1 if recovered else 0
                 released = self._priced_cutin_vehicles[vid] >= hold_ticks
+            else:  # still in the lane ahead, not at step 0 this tick: keep it, hold the count
+                released = False
             if released:
                 del self._priced_cutin_vehicles[vid]
                 self._armed_cutin_vehicles.discard(vid)
+        priced_ids = self._armed_cutin_vehicles | set(self._priced_cutin_vehicles)
         restricted = copy.copy(prediction)
-        restricted.lead_mode_lk = lk & np.isin(ids, list(self._priced_cutin_vehicles))
+        restricted.lead_mode_lk = lk & np.isin(ids, list(priced_ids))
         return restricted
 
     def _solve_open_loop(self, ego_state, prediction, reference, risks, policy0):

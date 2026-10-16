@@ -929,6 +929,39 @@ class TestOptimizedStandoff(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dopt<w>lk"):
             self._config(None, standoff_shortfall_on_lk=True)
 
+    def test_lkr_prices_a_crossing_cutin_before_it_leads_at_step_zero(self):
+        # While the cut-in vehicle crosses the line, its lane-keeping hypothesis is
+        # already in the ego lane from step 2 on, before it leads at step 0: those
+        # cells are priced once it has been armed, never for a vehicle that was not.
+        flags = dict(standoff_shortfall_on_lk=True, standoff_shortfall_lk_cutin_only=True)
+        kw = dict(previous_accel_cmd=0.0, command_dt=0.05)
+
+        def crossing(vid):
+            prediction = self._prediction(15.0, 14.0, (0.8, 0.2), lk_lead=True, vehicle_id=vid)
+            prediction.active_mask[1, :2] = False
+            prediction.lead_mode_lk[1, :2] = False
+            prediction.lead_vehicle_ids[1, :2] = -1
+            return prediction
+
+        controller = NairACCSMPC(self._config(3.0, **flags))
+        controller.solve(self.EGO, self._prediction(15.0, 14.0, (0.8, 0.2)), **kw)
+        solution = controller.solve(self.EGO, crossing(10), **kw)
+        self.assertEqual(controller._armed_cutin_vehicles, {10})
+        self.assertEqual(controller._priced_cutin_vehicles, {}, "not yet the step-0 lead")
+        self.assertTrue(np.all(np.isfinite(solution.planned_standoff[1, 2:])))
+        self.assertTrue(np.all(np.isnan(solution.planned_standoff[1, :2])))
+        self.assertLess(solution.slack_max, 0.01)
+        # Leading at step 0 it is priced; a tick where it is ahead but not at
+        # step 0 keeps it priced and holds its recovery count.
+        controller.solve(self.EGO, self._prediction(30.0, 14.0, (0.8, 0.2), lk_lead=True, vehicle_id=10), **kw)
+        self.assertEqual(controller._priced_cutin_vehicles, {10: 1})
+        controller.solve(self.EGO, crossing(10), **kw)
+        self.assertEqual(controller._priced_cutin_vehicles, {10: 1})
+        never = NairACCSMPC(self._config(3.0, **flags))
+        unpriced = never.solve(self.EGO, crossing(20), **kw)
+        self.assertTrue(np.all(np.isnan(unpriced.planned_standoff)))
+        self.assertGreater(unpriced.slack_max, 1.0)
+
     def test_lkr_prices_a_cutin_vehicle_only_until_the_gap_recovers(self):
         # Vehicle 10 is seen cutting in (its sigma cell is priced as before), then
         # leads the lane 15 m ahead: priced, no emergency slack, until the ego has
