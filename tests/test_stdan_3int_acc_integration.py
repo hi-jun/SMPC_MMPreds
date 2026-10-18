@@ -1138,21 +1138,20 @@ class TestDecisionPointBranch(unittest.TestCase):
         self.assertIsNone(decision_point_branch_step(17.0, -2.0, self.DT, 7.0, 7.0))
         self.assertIsNone(decision_point_branch_step(float("nan"), 6.0, self.DT, 7.0, 7.0))
 
-    def test_tree_holds_a_pair_together_until_its_floor(self):
+    def test_a_decided_key_splits_the_tree_before_lane_entry(self):
         horizon = 10
-        lead, cutin, inactive = (1, "lk"), (2, "cutin"), ("inactive",)
-        histories = [[lead] * horizon, [lead] * 3 + [cutin] * (horizon - 3)]
-        plain = build_policy_sharing_tree_from_effective_leads(histories, horizon)
-        self.assertEqual(plain.policy_split_steps, (3,))
-        held = build_policy_sharing_tree_from_effective_leads(
-            histories, horizon, held_until=[[None, 6], [None, None]])
-        self.assertEqual(held.policy_split_steps, (6,))
-        self.assertEqual(len(set(held.policy_groups_by_step[:, 5])), 1)
-        self.assertEqual(len(set(held.policy_groups_by_step[:, 6])), 2)
-        # A floor before the key split changes nothing.
-        early = build_policy_sharing_tree_from_effective_leads(
-            histories, horizon, held_until=[[None, 2], [None, None]])
-        self.assertEqual(early.policy_split_steps, (3,))
+        inactive, cutin, decided = ("inactive",), (2, "cutin"), ("inactive", (2, "cutin", "decided"))
+        # Lane keeping never leads; the cut-in enters the ego lane at step 6
+        # but its vehicle must have decided by step 3.
+        histories = [[inactive] * horizon, [inactive] * 3 + [decided] * 3 + [cutin] * (horizon - 6)]
+        tree = build_policy_sharing_tree_from_effective_leads(histories, horizon)
+        self.assertEqual(tree.policy_split_steps, (3,))
+        self.assertEqual(len(set(tree.policy_groups_by_step[:, 2])), 1)
+        self.assertEqual(len(set(tree.policy_groups_by_step[:, 3])), 2)
+        # Without the marker the split waits for lane entry.
+        plain = build_policy_sharing_tree_from_effective_leads(
+            [[inactive] * horizon, [inactive] * 6 + [cutin] * (horizon - 6)], horizon)
+        self.assertEqual(plain.policy_split_steps, (6,))
 
     @staticmethod
     def _mode(vehicle_id, name, probability, frenet):
@@ -1166,30 +1165,36 @@ class TestDecisionPointBranch(unittest.TestCase):
             ego_lane_membership_split_step=0,
         )
 
-    def test_joint_prediction_applies_the_floor_per_vehicle(self):
+    def test_joint_prediction_branches_a_cutin_at_its_decision_step(self):
         from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import ACCProcessedPrediction
         horizon = 10
+        # Target 2 keeps lane (never a lead) or cuts in 20 m ahead from step 6
+        # on; the ego-lane lead is a single mode shared by both scenarios.
         ego_lane_lead = self._mode(1, "lk", 1.0, [[30.0 + k, 0.0, 10.0] for k in range(horizon + 1)])
-        # Target 2 keeps lane (never a lead) or cuts in 20 m ahead from step 3 on.
         lk = self._mode(2, "lk", 0.5, [[20.0 + k, 3.5, 10.0] for k in range(horizon + 1)])
         lk.active_mask[:] = False
         cutin = self._mode(2, "cutin", 0.5, [[20.0 + k, 0.0, 10.0] for k in range(horizon + 1)])
-        cutin.active_mask[:3] = False
+        cutin.active_mask[:6] = False
         targets = [
             ACCProcessedPrediction(1, REL_EGO_LANE, [ego_lane_lead], {}, {}, {}),
             ACCProcessedPrediction(2, REL_LEFT_ADJACENT, [lk, cutin], {}, {}, {}),
         ]
         common = dict(ego_state=np.array([0.0, 10.0]), horizon=horizon, desired_speed=10.0, num_modes=4)
         plain, _ = build_multitarget_lead_prediction(targets, **common)
-        self.assertEqual(plain.policy_tree.policy_split_steps, (3,))
-        held, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={2: 7}, **common)
-        self.assertEqual(held.policy_tree.policy_split_steps, (7,))
-        # The constraint cells are untouched: the cut-in lead is active from step 3.
-        np.testing.assert_array_equal(held.active_mask, plain.active_mask)
-        np.testing.assert_array_equal(held.means, plain.means)
-        # A floor for a vehicle whose modes agree between the two scenarios is inert.
-        other, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={1: 7}, **common)
-        self.assertEqual(other.policy_tree.policy_split_steps, (3,))
+        self.assertEqual(plain.policy_tree.policy_split_steps, (6,))
+        # Decided by step 3: the cut-in scenario is its own branch from step 3,
+        # before its lead enters the lane; the constraint cells do not move.
+        early, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={2: 3}, **common)
+        self.assertEqual(early.policy_tree.policy_split_steps, (3,))
+        np.testing.assert_array_equal(early.active_mask, plain.active_mask)
+        np.testing.assert_array_equal(early.means, plain.means)
+        # A decision step after lane entry changes nothing: the lead key
+        # already differs from step 6 on.
+        late, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={2: 8}, **common)
+        self.assertEqual(late.policy_tree.policy_split_steps, (6,))
+        # A step for the ego-lane vehicle (no cut-in mode) is inert.
+        other, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={1: 3}, **common)
+        self.assertEqual(other.policy_tree.policy_split_steps, (6,))
 
     def test_the_agent_reads_the_branchdec_token(self):
         from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent

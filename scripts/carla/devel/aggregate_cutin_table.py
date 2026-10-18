@@ -621,6 +621,15 @@ def policy_label(policy):
             m = re.search(token + r"([0-9]*\.?[0-9]+)", policy)
             if m:
                 label += " + %s=%s" % (name, m.group(1))
+        if re.search(r"dopt[0-9]*\.?[0-9]+lkr", policy):
+            label += " lkr"
+        elif re.search(r"dopt[0-9]*\.?[0-9]+lk", policy):
+            label += " lk"
+        if "trajcutin" in policy:
+            label += " + trajcutin"
+        m = re.search(r"branchdec([0-9]*\.?[0-9]+)", policy)
+        if m:
+            label += " + branchdec a=%s" % m.group(1)
         return label
     if "stdan_3int" in policy:
         return "STDAN ACC (no chance)"
