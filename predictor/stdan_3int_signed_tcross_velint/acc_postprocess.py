@@ -190,10 +190,65 @@ def _normalized_partition(labels: Sequence[object]) -> tuple[int, ...]:
     return tuple(partition)
 
 
+def decision_point_branch_step(
+        gap_to_lead: float,
+        closing_speed: float,
+        dt: float,
+        brake_decel: float,
+        min_gap: float) -> Optional[int]:
+    """Step at which a vehicle closing on its own lead must have decided to change lane.
+
+    Nair et al.'s traffic-light example branches the prediction tree where the
+    TV reaches its decision point, the last position from which it can still
+    stop: ``i = (s_dec - s_tv) / (v_tv dt)``.  For a vehicle catching up on a
+    slower lead the decision point is the gap at which a braking at
+    ``brake_decel`` would just settle at ``min_gap``: ``g_dec = dv^2 / (2 a) +
+    min_gap``.  The step is ``(g - g_dec) / (dv dt)`` (ceil); ``None`` when the
+    vehicle is not closing, so the caller keeps its own rule.  Clipped below at
+    1 (the first input is shared anyway).
+    """
+    closing_speed = float(closing_speed)
+    if not np.isfinite(gap_to_lead) or not np.isfinite(closing_speed) or closing_speed <= 1e-3:
+        return None
+    gap_decision = closing_speed ** 2 / (2.0 * float(brake_decel)) + float(min_gap)
+    steps = (float(gap_to_lead) - gap_decision) / (closing_speed * float(dt))
+    return int(max(1, int(np.ceil(steps))))
+
+
+def _branch_floor_for_pair(
+        combo_a: Sequence[ACCModePrediction],
+        combo_b: Sequence[ACCModePrediction],
+        branch_floor_by_vehicle: Dict[int, int]) -> Optional[int]:
+    """Steps before which two joint scenarios may not split, or None.
+
+    The scenarios may be held together only if every vehicle whose mode
+    differs between them has a decision-point step; the floor is the smallest
+    of those steps.  A pair that differs in a vehicle without one follows the
+    effective-lead rule as before.
+    """
+    floor = None
+    for mode_a, mode_b in zip(combo_a, combo_b):
+        if mode_a.scenario_label == mode_b.scenario_label:
+            continue
+        step = branch_floor_by_vehicle.get(int(mode_a.vehicle_id))
+        if step is None:
+            return None
+        floor = step if floor is None else min(floor, step)
+    return floor
+
+
 def build_policy_sharing_tree_from_effective_leads(
         effective_lead_keys_by_scenario: Sequence[Sequence[tuple]],
         horizon: int,
-        mode_names: Optional[List[str]] = None) -> PolicySharingTree:
+        mode_names: Optional[List[str]] = None,
+        held_until: Optional[Sequence[Sequence[Optional[int]]]] = None) -> PolicySharingTree:
+    """Policy groups per step from the scenarios' effective-lead histories.
+
+    Two scenarios share a group at step ``k`` while their effective-lead key
+    prefixes up to ``k`` agree.  With ``held_until[a][b] = m`` the pair's keys
+    before step ``m`` are treated as equal as well (the decision-point branch
+    rule, ``decision_point_branch_step``); ``None`` keeps the key rule.
+    """
     horizon = int(horizon)
     num_scenarios = len(effective_lead_keys_by_scenario)
     policy_groups = np.zeros((num_scenarios, horizon), dtype=int)
@@ -215,6 +270,25 @@ def build_policy_sharing_tree_from_effective_leads(
                 raise ValueError("effective lead key sequence is shorter than horizon")
             prefix = tuple(tuple(key) for key in keys[:step + 1])
             prefixes.append(prefix)
+        if held_until is not None:
+            # Merge the prefixes of pairs still held together at this step:
+            # a scenario takes the prefix of the lowest-indexed scenario it
+            # is held with, transitively through the union of pairs.
+            parent = list(range(num_scenarios))
+
+            def _root(idx):
+                while parent[idx] != idx:
+                    parent[idx] = parent[parent[idx]]
+                    idx = parent[idx]
+                return idx
+
+            for a in range(num_scenarios):
+                for b in range(a + 1, num_scenarios):
+                    hold = held_until[a][b]
+                    if hold is not None and step < int(hold):
+                        parent[_root(b)] = _root(a)
+            prefixes = [prefixes[_root(idx)] for idx in range(num_scenarios)]
+        for scenario_idx, prefix in enumerate(prefixes):
             if prefix not in prefix_to_group:
                 prefix_to_group[prefix] = next_group_id
                 next_group_id += 1
@@ -958,13 +1032,16 @@ def build_multitarget_lead_prediction(
     reference_beta: float = 0.0,
     vanish_threshold: float = 0.0,
     sigma_cap: Optional[float] = None,
+    branch_floor_by_vehicle: Optional[Dict[int, int]] = None,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
 
     With ``reference_beta`` > 0 (the confidence chance constraint) a cell whose
     lead is seen past a vacating ego-lane vehicle inherits that vehicle's
     cut-out probability, see ``_inherit_vacating_confidence``; ``sigma_cap`` is
-    ``chance_cutin_clearance``'s.
+    ``chance_cutin_clearance``'s.  ``branch_floor_by_vehicle`` maps a vehicle id
+    to the step before which scenarios differing only in that vehicle's mode
+    keep one policy (``decision_point_branch_step``).
     """
     targets = [pred for pred in processed_predictions if pred.mode_predictions]
     horizon = int(horizon)
@@ -1072,10 +1149,18 @@ def build_multitarget_lead_prediction(
             }
         )
 
+    held_until = None
+    if branch_floor_by_vehicle:
+        held_until = [[None] * len(scenarios) for _ in scenarios]
+        for a in range(len(scenarios)):
+            for b in range(a + 1, len(scenarios)):
+                held_until[a][b] = _branch_floor_for_pair(
+                    scenarios[a][1], scenarios[b][1], branch_floor_by_vehicle)
     policy_tree = build_policy_sharing_tree_from_effective_leads(
         effective_lead_keys_by_scenario,
         horizon=horizon,
         mode_names=mode_names,
+        held_until=held_until,
     )
     k_group_map = np.zeros((len(scenarios), horizon), dtype=int)
     k_group_names = []

@@ -52,6 +52,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
     REL_LEFT_ADJACENT,
     REL_OTHER,
     REL_RIGHT_ADJACENT,
+    decision_point_branch_step,
 )
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 from predictor.lstm.acc_adapter import LSTMACCAdapter
@@ -123,6 +124,9 @@ class ACCNairSMPCAgent(object):
         self.lk_entry_as_cutin = self._parse_lk_entry_as_cutin(smpc_config)
         if self.lk_entry_as_cutin and self.predictor_type != "stdan_3int":
             raise ValueError("trajcutin needs the stdan_3int predictor")
+        self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
+        if self.branch_decision_brake is not None and self.predictor_type != "stdan_3int":
+            raise ValueError("branchdec needs the stdan_3int predictor")
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -707,6 +711,9 @@ class ACCNairSMPCAgent(object):
         target_states = {}
         target_relations = {}
         target_current_rhs_xy = {}
+        # Every other vehicle's (s, d, v), for the decision-point branch rule:
+        # a target's own lead is a traffic actor, not a prediction target.
+        other_states = {}
         nearest_target = None
         carla_map = self.world.get_map()
         ego_wp = self.world.get_map().get_waypoint(
@@ -718,11 +725,12 @@ class ACCNairSMPCAgent(object):
             if actor.id == self.vehicle.id:
                 continue
             role = actor.attributes.get("role_name", "")
-            if "target" not in role:
-                continue
             x, y, psi, actor_speed = self._actor_state_rhs(actor)
             s_tv, d_tv, _ = self._frenet_traj.convert_global_to_frenet_frame(x, y, psi)
             if s_tv < s_ego - 5.0:
+                continue
+            other_states[actor.id] = np.array([s_tv, d_tv, actor_speed], dtype=float)
+            if "target" not in role:
                 continue
             target_states[actor.id] = np.array([s_tv, d_tv, actor_speed], dtype=float)
             target_current_rhs_xy[actor.id] = np.array([x, y], dtype=float)
@@ -759,6 +767,8 @@ class ACCNairSMPCAgent(object):
 
         gap_recovery_elapsed, gap_recovery_start_scale = self._gap_recovery_elapsed(
             target_relations, target_states, np.array([s_ego, speed]))
+        branch_floor_by_vehicle, branch_decision_debug = self._decision_point_branch_floors(
+            target_states, target_relations, other_states)
         predictor_start = time.time()
         try:
             result = self.stdan_predictor.predict_acc(
@@ -782,6 +792,7 @@ class ACCNairSMPCAgent(object):
                 gap_recovery_s=self.gap_recovery_s,
                 gap_recovery_start_scale=gap_recovery_start_scale,
                 lk_entry_as_cutin=self.lk_entry_as_cutin,
+                branch_floor_by_vehicle=branch_floor_by_vehicle,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -813,10 +824,53 @@ class ACCNairSMPCAgent(object):
             "prediction_num_modes": int(result["prediction"].num_modes),
             "controller_config_num_modes": int(self.controller_config.num_modes),
             "scenario_metadata": result.get("scenario_metadata", []),
+            "branch_decision": branch_decision_debug,
             "processed_targets": self._stdan_processed_target_debug(
                 result.get("processed_targets", [])),
         }
         return result
+
+    # Nair et al.'s traffic-light example decides where its TV must choose:
+    # the point from which a 0.7 g brake just stops at the light.  Here a
+    # target closing on its own lead must choose (change lane or brake) at the
+    # gap from which that brake just settles at its minimum following gap.
+    BRANCH_DECISION_MIN_GAP_M = 4.5 + 2.5   # SPEED_CAP_VEHICLE_LENGTH_M + SPEED_CAP_MIN_LONGITUDINAL_GAP_M
+
+    def _decision_point_branch_floors(self, target_states, target_relations, other_states):
+        """Per adjacent target: the step before which its cut-in and lane-keeping
+        scenarios keep one policy, from its gap and closing speed to the vehicle
+        ahead of it in its own lane (``decision_point_branch_step``).  Empty
+        when the token is off or no target has a lead ahead."""
+        floors = {}
+        debug = {}
+        if self.branch_decision_brake is None:
+            return floors, debug
+        for target_id, state in target_states.items():
+            if target_relations.get(target_id) == REL_EGO_LANE:
+                continue
+            s_tv, d_tv, v_tv = float(state[0]), float(state[1]), float(state[2])
+            lead = None
+            for other_id, other in other_states.items():
+                if other_id == target_id:
+                    continue
+                gap = float(other[0]) - s_tv
+                if gap <= 0.0 or abs(float(other[1]) - d_tv) > self.EGO_LANE_HALF_WIDTH_M:
+                    continue
+                if lead is None or gap < lead[0]:
+                    lead = (gap, float(other[2]), other_id)
+            if lead is None:
+                continue
+            step = decision_point_branch_step(
+                lead[0], v_tv - lead[1], self.DT, self.branch_decision_brake,
+                self.BRANCH_DECISION_MIN_GAP_M)
+            debug[int(target_id)] = {
+                "lead_id": int(lead[2]), "gap": round(lead[0], 3),
+                "closing_speed": round(v_tv - lead[1], 3),
+                "step": None if step is None else int(step),
+            }
+            if step is not None:
+                floors[int(target_id)] = int(step)
+        return floors, debug
 
     def _acc_reference_debug(self, solution):
         reference = solution.reference
@@ -1428,6 +1482,19 @@ class ACCNairSMPCAgent(object):
         ``NairACCConfig.standoff_shortfall_lk_cutin_only``.
         """
         return re.search(r"dopt[0-9]*\.?[0-9]+lkr", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_branch_decision_brake(smpc_config):
+        """Read ``branchdec<a>`` from the config string (None = off).
+
+        With it the policy tree splits a cut-in hypothesis from lane keeping at
+        the target's decision point -- the step at which a brake at ``a`` m/s^2
+        would just settle behind its own lead -- instead of at the step its
+        predicted trajectory enters the ego lane.  See
+        ``acc_postprocess.decision_point_branch_step``.
+        """
+        match = re.search(r"branchdec([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_lk_entry_as_cutin(smpc_config):

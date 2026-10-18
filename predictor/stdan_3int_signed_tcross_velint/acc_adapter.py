@@ -501,6 +501,7 @@ class STDAN3IntACCAdapter:
         gap_recovery_floor: float = 0.6,
         gap_recovery_start_scale: Optional[Dict[int, float]] = None,
         lk_entry_as_cutin: bool = False,
+        branch_floor_by_vehicle: Optional[Dict[int, int]] = None,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -575,6 +576,7 @@ class STDAN3IntACCAdapter:
             reference_beta=cutin_chance_ref,
             vanish_threshold=cutin_probability_threshold,
             sigma_cap=cutin_chance_sigma_cap,
+            branch_floor_by_vehicle=branch_floor_by_vehicle,
         )
         return {
             "prediction": prediction,
