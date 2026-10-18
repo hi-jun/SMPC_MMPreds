@@ -1,7 +1,7 @@
 # AGENTS.md — guide for AI assistants working on this repository
 
 Audience: AI coding assistants (Claude, GPT, …) and new contributors who read this repository on GitHub.
-It describes the state on 2026-10-07, branch `feat/probability-gated-cutin`. Where this file and the code disagree, the code is right.
+It describes the state on 2026-10-18, branch `feat/probability-gated-cutin`. Where this file and the code disagree, the code is right.
 
 **The maintainer works in Korean. Answer in Korean unless asked otherwise.**
 
@@ -15,12 +15,18 @@ It describes the state on 2026-10-07, branch `feat/probability-gated-cutin`. Whe
   - **STDAN**, a learned trajectory predictor with three intentions (lane keep, left lane change, right lane change)
   - single-mode **LSTM** baselines
   - **IAIMM-KF** (Zhou et al.), a model-based baseline
-- **The contribution ("Proposed", policy token `cutin_chance0.6`)** is a confidence chance constraint. The code describes it as the 1-D counterpart of Benciolini et al. eq. (19a).
+- **The paper's contribution ("Proposed", policy token `cutin_chance0.6`)** is a confidence chance constraint. The code describes it as the 1-D counterpart of Benciolini et al. eq. (19a).
   - Inputs: each mode j has probability p_j, and β_ref = 0.6.
   - Definitions: q(β) = Φ⁻¹((1+β)/2) and α_j = q(β_j)/q(β_ref).
   - **Cut-in modes:** β_j = min(p_j, β_ref). The gap to the predicted vehicle must exceed α_j·d_safe(v) + q(β_j)·σ_j.
   - **Lane-keeping (`lk`) modes of the ego-lane lead:** the safe distance is scaled by α_j, with β_j = min(p_j, β_ref) and no σ term.
   - **`cutout` modes:** β_j = min(1 − p_j, β_ref). The scale is floored at 0.35, and there is no σ term.
+- **The current design is D-opt, `dopt100lkr_trajcutin`** (the maintainer's decision on 2026-10-17). Its policy string is `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin_rmove1000`: Proposed plus three tokens (§4).
+  - `dopt100`: on cut-in cells α_j scales only the footprint L + d0, and the optimizer chooses how much of the time gap τv to keep, at a price 100·P_j·shortfall².
+  - `lkr`: the same price on the lane-keeping cells of a vehicle that has had a cut-in cell, until it leads and the gap has held the full standoff for 0.5 s. Every other in-lane lead keeps the hard standoff.
+  - `trajcutin`: an adjacent vehicle's lane-keeping trajectory that enters the ego lane is a cut-in mode of its own.
+  - Proposed (`cutin_chance0.6` alone) is kept unchanged so that the paper's sweeps reproduce. The paper and its tables (2026-09-10) predate D-opt.
+  - Against Proposed on the same code (`cutin_postfix_cmp_20261016`, `cutout_postfix_cmp_20261016`, 66 runs each): aggressive cut-in a_min_cmd −2.73 → −2.09 m/s² (+3.0 SE) and j_max_cmd_filt 4.07 → 3.14 (−2.4 SE); normal cut-in a_min +1.4 SE, j_max −1.6 SE; no-cut-in and cut-out not distinguishable (|diff| ≤ 1.4 SE).
 - **Unlikely cut-in modes are switched off, not removed.** Below p_j = 0.1 (`CUTIN_CHANCE_VANISH_BELOW`; override with `cutin_gate<p>`), the mode's `active_mask` is cleared.
   - The mode then never acts as a lead, but it stays in the scenario set.
   - This gate applies to every STDAN and IAIMM-KF policy, not only to Proposed.
@@ -48,7 +54,7 @@ It describes the state on 2026-10-07, branch `feat/probability-gated-cutin`. Whe
 | `predictor/stdan_vel/` | A 9-mode STDAN with velocity output |
 | `predictor/uq/` | Conformal novelty detector and a 5-member deep ensemble for the `stdan_vel` checkpoint, ported from the maintainer's thesis repository (added 2026-10-13). Not wired into the controller, and not valid for `stdan_3int`. Read `predictor/uq/AGENTS.md` first |
 | `overleaf/` | Paper tables, the final formulation, and the figure and table generators (`overleaf/figs/scripts/`) |
-| `tests/` | 7 unit-test modules (134 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration |
+| `tests/` | 7 unit-test modules (138 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration |
 | `results/` | Sweep outputs. `results/*/` is gitignored, so sweep data and launch scripts exist only on the maintainer's machine |
 
 ## 3. The controller in one page
@@ -143,6 +149,14 @@ export ACC_NAIR_IAIMM_CFG='{"lat_speedup": 2.0, "proj_horizon_s": 3.0, "q_lat_sc
 ```
 
 When the variable is unset, the adapter's built-in defaults apply.
+
+The current design (§1), not in the paper:
+
+| Label | Policy string |
+|---|---|
+| D-opt | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin_rmove1000` |
+
+Compare it with the paper's controllers only on runs made with the same code (§8.11). The same-code roots `cutin_postfix_cmp_20261016` and `cutout_postfix_cmp_20261016` hold it next to Proposed, Multimodal SCC and the other D-opt variants.
 
 ## 5. Environment
 
@@ -304,7 +318,7 @@ Inside it:
 - **Claims.** Report only improvements that were measured. Before comparing with an older sweep, re-aggregate both with the current script, because metric definitions have changed over time.
 - **Changes.** Keep them surgical: touch only what the task needs, and match the existing style.
 
-## 10. Open items (2026-10-15)
+## 10. Open items (2026-10-18)
 
 - **`_fallback_policy` sign.** It commands `a_ref − 0.25·min(0, gap)`. `safety_function` is negative when the gap is violated, so this accelerates toward a lead that is too close. No run in the final sweeps used the fallback (§8.1).
 - **Step-0 jerk cost.** All three QP builders price the step-0 command change with `config.dt` (0.2 s) instead of `command_dt` (0.05 s), which makes it 16× too cheap. The hard jerk constraint already uses `command_dt`.
