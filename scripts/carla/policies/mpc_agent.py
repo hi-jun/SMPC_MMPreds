@@ -492,10 +492,23 @@ class MPCAgent(object):
         self._update_obstacles( update_dict['tv_refs'], update_dict['tv_Rs'] )
 
         if 'warm_start' in update_dict.keys():
-            # Warm Start used if provided.  Else I believe the problem is solved from scratch with initial values of 0.
+            # Warm Start used if provided.
             self.opti.set_initial(self.z_dv,  update_dict['warm_start']['z_ws'])
             self.opti.set_initial(self.u_dv,  update_dict['warm_start']['u_ws'])
             self.opti.set_initial(self.sl_dv, update_dict['warm_start']['sl_ws'])
+        else:
+            # No warm start (first step, or a new route): start from the current
+            # state followed by the reference, with zero inputs and slacks.  Opti
+            # otherwise keeps the guess set last -- all zeros at the first step,
+            # with the vehicle at x ~ -13, y ~ 60-100, v ~ 11-15 -- and under
+            # load that solve hit the 0.2 s CPU limit, whose unconverged steering
+            # (at the +/-0.5 rad bound) was applied: 7/50 cut-in TVs moved up to
+            # 1 m sideways in the first second (cutin_ooddump_20261019).
+            z_ws = np.vstack(([update_dict[key] for key in ['x0', 'y0', 'psi0', 'v0']],
+                              np.column_stack([update_dict[key] for key in ['x_ref', 'y_ref', 'psi_ref', 'v_ref']])))
+            self.opti.set_initial(self.z_dv,  z_ws)
+            self.opti.set_initial(self.u_dv,  np.zeros((self.N, 2)))
+            self.opti.set_initial(self.sl_dv, np.zeros((self.N, 2)))
 
     def _solve(self):
         st = time.time()

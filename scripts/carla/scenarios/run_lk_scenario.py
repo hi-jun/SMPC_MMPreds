@@ -459,6 +459,21 @@ class RunLKScenario:
             for policy in self.vehicle_policies
             if callable(getattr(policy, "_update_agent_history", None))
         ]
+        # Steer every vehicle onto its lane centre meanwhile.  With df_des = 0
+        # the heading error left by the spawn hand-over (up to ~0.03 rad) ran
+        # the vehicle straight for the whole warm-up: the right-lane straight
+        # car of 03/no_cutin_decel_0006 drifted 1.24 m toward the ego lane in
+        # the last 3 s and started t0 1.47 m off its lane centre, visible in
+        # the predictor's input history (cutin_ooddump_20261019).  The lane
+        # errors are those of FixedLaneSpeedAgent; the steer is the Stanley
+        # form rather than the shared lane_keeping_steer, because under the
+        # velocity pin above the lateral velocity is zeroed every tick (no
+        # rear-axle slip damping) and that keeper, whose natural frequency
+        # grows with speed, was left lightly damped by the actuator lag:
+        # period 1.5 s and zeta ~0.05 at 17 m/s, ~0.15 at 15 m/s (measured
+        # 2026-10-19).  Dividing the cross-track gain by the speed keeps
+        # zeta >= 0.4 from 5 to 17 m/s with a 0.25 s lag.
+        carla_map = self.world.get_map()
         speeds = []
         sim_start = None
         sim_end = None
@@ -484,8 +499,22 @@ class RunLKScenario:
                     continue
                 velocity = vehicle_actor.get_velocity()
                 speed = float(np.sqrt(velocity.x ** 2 + velocity.y ** 2))
+                vehicle_tf = vehicle_actor.get_transform()
+                waypoint_tf = carla_map.get_waypoint(
+                    vehicle_tf.location,
+                    project_to_road=True,
+                    lane_type=carla.LaneType.Driving,
+                ).transform
+                # Lateral offset (+left) and heading error, right-handed frame.
+                psi = -fix_angle(np.radians(vehicle_tf.rotation.yaw))
+                psi_wp = -fix_angle(np.radians(waypoint_tf.rotation.yaw))
+                dx = vehicle_tf.location.x - waypoint_tf.location.x
+                dy = -vehicle_tf.location.y + waypoint_tf.location.y
+                ey = -np.sin(psi_wp) * dx + np.cos(psi_wp) * dy
+                epsi = fix_angle(psi - psi_wp)
+                df_des = -(0.6 * epsi + np.arctan(0.5 * ey / max(speed, 1.0)))
                 self.tick_commands.append(carla.command.ApplyVehicleControl(
-                    vehicle_actor.id, low_level.update(speed, 0.0, float(nominal), 0.0)))
+                    vehicle_actor.id, low_level.update(speed, 0.0, float(nominal), df_des)))
             self._apply_tick_commands()
             sync_data = sync_mode.tick(timeout=self.timeout)
             snap = sync_data[0]
