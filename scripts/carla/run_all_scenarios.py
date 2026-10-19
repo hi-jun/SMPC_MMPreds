@@ -82,6 +82,9 @@ def run_with_tvs(scene, scenario_dict, ego_init_dict, ego_policy_config, savedir
     elif ego_policy_config.startswith("acc_nair_smpc"):
         policy_type = "acc_nair_smpc"
         policy_config = ego_policy_config
+    elif ego_policy_config.startswith("acc_pcacc"):
+        policy_type = "acc_pcacc"
+        policy_config = ego_policy_config
     else:
         raise ValueError(f"Invalid ego policy config: {ego_policy_config}")
 

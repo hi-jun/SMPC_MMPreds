@@ -40,6 +40,7 @@ from policies.distance_triggered_lane_change_agent import DistanceTriggeredLaneC
 from policies.distance_triggered_cutout_agent import DistanceTriggeredCutOutAgent
 from policies.fixed_lane_speed_agent import FixedLaneSpeedAgent
 from policies.acc_nair_smpc_agent import ACCNairSMPCAgent
+from policies.pcacc_agent import PCACCAgent
 
 from rasterizer.agent_history import AgentHistory
 from rasterizer.sem_box_rasterizer import SemBoxRasterizer
@@ -217,6 +218,13 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform):
                         nominal_speed_mps=vehicle_params.nominal_speed)
     elif vehicle_params.policy_type == "acc_nair_smpc":
         return ACCNairSMPCAgent(vehicle_actor, goal_transform.location, \
+                        N=vehicle_params.N,
+                        dt=vehicle_params.dt,
+                        N_modes=vehicle_params.num_modes,
+                        nominal_speed_mps=vehicle_params.nominal_speed,
+                        smpc_config=vehicle_params.smpc_config)
+    elif vehicle_params.policy_type == "acc_pcacc":
+        return PCACCAgent(vehicle_actor, goal_transform.location, \
                         N=vehicle_params.N,
                         dt=vehicle_params.dt,
                         N_modes=vehicle_params.num_modes,
