@@ -286,6 +286,66 @@ def _labelled_cutin_index(relation: str) -> Optional[int]:
     return None
 
 
+#: Lateral offset toward the ego lane below which a lane keeper is not moving (o_v = 0):
+#: the lane-keeping lateral noise toward the ego lane measured today is <= 0.05 m
+#: (after the run-start artefacts).
+CTX_LATERAL_NOISE_M = 0.10
+#: Lateral offset at which the body starts crossing the lane line (o_v = 1): lane
+#: half-width 1.75 m minus half a car width ~0.9 m.
+CTX_LATERAL_CROSSING_M = 0.85
+
+
+def lateral_observation(lateral_offset_m: float) -> float:
+    """o_v = clip((y_v - y_0) / (y_1 - y_0), 0, 1) of a measured offset toward the ego lane.
+
+    ``y_0 = CTX_LATERAL_NOISE_M`` and ``y_1 = CTX_LATERAL_CROSSING_M``.
+    """
+    return float(np.clip(
+        (float(lateral_offset_m) - CTX_LATERAL_NOISE_M)
+        / (CTX_LATERAL_CROSSING_M - CTX_LATERAL_NOISE_M), 0.0, 1.0))
+
+
+def mix_cutin_probability(
+    raw_probs: np.ndarray,
+    relation: str,
+    context_trust: float,
+    lateral_offset_m: Optional[float],
+) -> tuple[np.ndarray, Dict[str, object]]:
+    """Context trust ``lambda`` (token ``ctx<lambda>``): trust the predictor's
+    interaction context less, the measured lateral motion more.
+
+    On an adjacent vehicle's cut-in-direction intention (``_labelled_cutin_index``)
+    ``p_lambda = p_S * [(1 - lambda) + lambda * o_v]`` with ``o_v`` the lateral
+    observation of ``lateral_offset_m`` (``lateral_observation``); the removed mass
+    ``p_S - p_lambda`` goes to lane keeping (index 0) so the vehicle's intentions
+    still sum to 1.  The away-direction intention and every trajectory stay as
+    STDAN produced them -- the trajectory is the full-context one.  ``lambda = 0``
+    returns the probabilities unchanged; ``lambda = 1`` believes no cut-in a
+    vehicle has not started laterally.  Applied before the ACC-mode mapping, so
+    the activation gate, the chance factor, the ``dopt`` price, ``trajcutin`` and
+    ``branchdec`` all read the mixed value.  Vehicles off the adjacent lanes, and
+    an adjacent vehicle without a measured offset, are untouched.
+
+    Returns ``(probs, info)``; ``info`` holds what the log records (``lambda``,
+    ``y_v``, ``o_v``, ``p_raw``, ``p_mixed``; the last four ``None`` when nothing
+    was mixed).
+    """
+    probs = np.asarray(raw_probs, dtype=float).copy()
+    info = {"lambda": float(context_trust), "y_v": None, "o_v": None,
+            "p_raw": None, "p_mixed": None}
+    cutin_idx = _labelled_cutin_index(relation)
+    if cutin_idx is None or lateral_offset_m is None or probs.size < 3:
+        return probs, info
+    o_v = lateral_observation(lateral_offset_m)
+    p_raw = float(probs[cutin_idx])
+    p_mixed = p_raw * ((1.0 - float(context_trust)) + float(context_trust) * o_v)
+    probs[cutin_idx] = p_mixed
+    probs[0] += p_raw - p_mixed
+    info.update({"y_v": float(lateral_offset_m), "o_v": o_v,
+                 "p_raw": p_raw, "p_mixed": float(p_mixed)})
+    return probs, info
+
+
 def _mode_specs_for_relation(
     relation: str,
     raw_probs: np.ndarray,
@@ -779,8 +839,15 @@ def process_vehicle_prediction(
     gap_recovery_floor: float = 0.6,
     gap_recovery_start_scale: Optional[float] = None,
     lk_entry_as_cutin: bool = False,
+    context_trust: Optional[float] = None,
+    lateral_offset_m: Optional[float] = None,
 ) -> ACCProcessedPrediction:
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
+    context_trust_info = None
+    if context_trust is not None:
+        # Before the mode mapping: everything below reads the mixed value.
+        raw_probs, context_trust_info = mix_cutin_probability(
+            raw_probs, relation_to_ego_lane, context_trust, lateral_offset_m)
     raw_map = {name: float(raw_probs[idx]) for idx, name in enumerate(INTENTION_NAMES)}
     traj_frenet = np.asarray(raw_prediction["pred_traj_frenet"], dtype=float)
     raw_vel = np.asarray(raw_prediction.get("raw_pred_vel", np.zeros_like(traj_frenet)), dtype=float)
@@ -929,6 +996,7 @@ def process_vehicle_prediction(
             "gap_recovery_elapsed_s": gap_recovery_elapsed_s,
             "gap_recovery_start_scale": gap_recovery_start_scale,
             "gap_recovery_scales": gap_recovery_scales,
+            "context_trust": context_trust_info,
         },
         raw_prediction=raw_prediction,
     )

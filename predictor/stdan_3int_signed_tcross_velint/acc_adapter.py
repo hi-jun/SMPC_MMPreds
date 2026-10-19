@@ -502,6 +502,8 @@ class STDAN3IntACCAdapter:
         gap_recovery_start_scale: Optional[Dict[int, float]] = None,
         lk_entry_as_cutin: bool = False,
         branch_floor_by_vehicle: Optional[Dict[int, int]] = None,
+        context_trust: Optional[float] = None,
+        lateral_offsets: Optional[Dict[int, float]] = None,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -565,6 +567,9 @@ class STDAN3IntACCAdapter:
                         None if gap_recovery_start_scale is None
                         else gap_recovery_start_scale.get(target_id)),
                     lk_entry_as_cutin=lk_entry_as_cutin,
+                    context_trust=context_trust,
+                    lateral_offset_m=(
+                        None if lateral_offsets is None else lateral_offsets.get(target_id)),
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

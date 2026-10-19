@@ -134,6 +134,16 @@ cut-in 응답
   T_rec = t_cross 이후 delta(t) == 0 이 0.5 s 이상 연속으로 유지되는 첫 시각
           - t_cross.  t_cross 시점에 이미 delta == 0 이면 0.0.
           창 안에서 회복 못하면 None + T_rec_censored = 창끝 - t_cross.
+  ctx_miss / ctx_unnec (2026-10-19) = 맥락 신뢰 λ 설계의 두 손실 사건. 런 사실이라 모든
+           정책에서 나오고, 요약은 셀별 개수(ctx_miss_runs / ctx_unnec_runs)와 비율(mean)을 낸다.
+    ctx_miss  = TV 가 ego 차선에 들어왔고(t_cross 존재) [t_cross, t_cross + 3 s] 안의 delta
+           최대가 δ_thr 를 넘는 런. δ_thr 는 ``--ctx-delta-thr`` (비율; 기본 0.2 = 20 %).
+           줄일 수 없는 침범 -- 급컷인 Multimodal SCC 의 δ_max 평균 17.5 % -- 보다 커야
+           하고, 아직 확정값이 아니다.
+    ctx_unnec = TV 가 들어오지 않았는데(t_cross 없음) accel_cmd <= -0.3 m/s^2 인 스텝 중
+           그 틱에 d_safe(v) 안에 실측 차선 내 선행차(위 판정, 범퍼 간격 <= d_safe)가
+           없는 스텝이 하나라도 있는 런. 들어온 런은 False.
+    target_cutin 이 없는 런(컷아웃 그룹)은 둘 다 None.
 
 03_no_cutin_decel (TV가 인접 차선에서 감속만 함) 추가 지표
   v_avg = 창 내 ego_v 평균, v_min, a_min, passed = 창 끝에서 s_ego > s_TV,
@@ -332,6 +342,8 @@ CTRL_DT = 0.2
 ONSET_ACCEL = -0.3
 ONSET_HOLD_STEPS = 2
 REC_HOLD_S = 0.5
+CTX_MISS_POST_S = 3.0          # ctx_miss: t_cross 뒤 delta 를 보는 길이
+DEFAULT_CTX_DELTA_THR = 0.2    # ctx_miss 의 δ_thr (비율; 미확정, --ctx-delta-thr)
 DEFAULT_WINDOW_S = 25.0
 COLLISION_PAD_S = 0.25
 S_MAP_LAG_S = 3.0
@@ -394,7 +406,7 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
                "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev",
                "j_avg_filt_ev", "j_max_filt_ev", "T_rec_ev",
-               "j_at_limit", "j_at_limit_ev")
+               "j_at_limit", "j_at_limit_ev", "ctx_miss", "ctx_unnec")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max",
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
@@ -630,10 +642,16 @@ def policy_label(policy):
         m = re.search(r"branchdec([0-9]*\.?[0-9]+)", policy)
         if m:
             label += " + branchdec a=%s" % m.group(1)
-        return label
+        return label + _ctx_suffix(policy)
     if "stdan_3int" in policy:
-        return "STDAN ACC (no chance)"
+        return "STDAN ACC (no chance)" + _ctx_suffix(policy)
     return policy
+
+
+def _ctx_suffix(policy):
+    """`` + ctx lambda=<value>`` for a policy with the context trust token."""
+    m = re.search(r"(?:^|_)ctx([0-9]*\.?[0-9]+)(?=_|$)", policy)
+    return " + ctx lambda=%s" % m.group(1) if m else ""
 
 
 def _finite(values):
@@ -905,7 +923,8 @@ EVENT_KEYS = ("j_avg_cmd_ev", "j_max_cmd_ev", "j_at_limit_ev", "j_avg_cmd_ev_fil
               "collisions_in_event", "ego_collision_ev")
 
 
-def collect_run(policy, group, run_dir, window_s=None, window_start_s=None):
+def collect_run(policy, group, run_dir, window_s=None, window_start_s=None,
+                ctx_delta_thr=DEFAULT_CTX_DELTA_THR):
     row = collections.OrderedDict()
     row["policy"] = policy
     row["policy_label"] = policy_label(policy)
@@ -1184,6 +1203,20 @@ def collect_run(policy, group, run_dir, window_s=None, window_start_s=None):
             else:
                 row["T_rec"] = round(float(t[i_cross + i_ok]) - t_cross, 3)
 
+    # 맥락 신뢰 λ 의 손실 사건 (docstring "cut-in 응답"): 놓침은 진입 뒤 3 s 의 침범,
+    # 불필요 제동은 진입 없는 런에서 d_safe 안에 선행차가 없는데 밟은 스텝.
+    row["ctx_miss"] = None
+    row["ctx_unnec"] = None
+    if tv_key is not None:
+        if t_cross is not None:
+            post = (t >= t_cross - 1e-9) & (t <= t_cross + CTX_MISS_POST_S + 1e-9)
+            row["ctx_miss"] = bool(np.max(delta[post]) / 100.0 > ctx_delta_thr)
+            row["ctx_unnec"] = False
+        else:
+            covered = has_lead & (np.where(has_lead, bumper, np.inf) <= d_safe)
+            row["ctx_miss"] = False
+            row["ctx_unnec"] = bool(np.any((cmd <= ONSET_ACCEL) & ~covered))
+
     row["v_avg"] = float(np.mean(ego_v))
     row["v_min"] = float(np.min(ego_v))
     if is_cutout_group(group):
@@ -1362,6 +1395,10 @@ def aggregate(rows, group_key=None):
         # cut-out 셀에서는 같은 열이 LV↔subLV 접촉 수를 뜻한다
         stats["_tv_lead_contacts"] = sum(
             1 for r in sel if r.get("tv_lead_contact") or r.get("lv_sublv_contact"))
+        # 맥락 신뢰 λ 의 손실 사건 개수 (target_cutin 이 있는 런만 센다)
+        stats["_ctx_miss"] = sum(1 for r in sel if r.get("ctx_miss"))
+        stats["_ctx_unnec"] = sum(1 for r in sel if r.get("ctx_unnec"))
+        stats["_ctx_n"] = sum(1 for r in sel if r.get("ctx_miss") is not None)
         stats["_label"] = sel[0]["policy_label"]
         out[key] = stats
     return out
@@ -1389,7 +1426,7 @@ def write_summary_csv(path, agg):
         writer = csv.writer(f)
         writer.writerow(["group", "policy", "policy_label", "metric",
                          "n", "mean", "std", "n_runs", "ego_collision_runs",
-                         "tv_lead_contact_runs"])
+                         "tv_lead_contact_runs", "ctx_miss_runs", "ctx_unnec_runs"])
         for (group, policy), stats in agg.items():
             for metric in [m for m in stats if not m.startswith("_")]:
                 mean, std, n = stats[metric]
@@ -1397,7 +1434,8 @@ def write_summary_csv(path, agg):
                                  "" if mean is None else "%.4f" % mean,
                                  "" if std is None else "%.4f" % std,
                                  stats["_n_runs"], stats["_ego_collisions"],
-                                 stats["_tv_lead_contacts"]])
+                                 stats["_tv_lead_contacts"],
+                                 stats["_ctx_miss"], stats["_ctx_unnec"]])
 
 
 def write_tex(path, agg):
@@ -1515,16 +1553,18 @@ def markdown_table_cutout(agg, event=False):
 
 def markdown_table(agg, event=False):
     head = ("| 시나리오 | 제어기 | n | a_avg | j_avg 명령대역(실측대역) | j_max 명령대역(실측대역) "
-            "| δ_max | δ_avg | Δt_ant | T_rec | ego충돌 | TV-앞차접촉 |")
-    lines = [head, "|" + "---|" * 12]
+            "| δ_max | δ_avg | Δt_ant | T_rec | ego충돌 | TV-앞차접촉 | ctx_miss | ctx_unnec |")
+    lines = [head, "|" + "---|" * 14]
     for (group, _policy), stats in agg.items():
         if is_cutout_group(group):
             continue
         cells = [_cell(stats, m, event) for m in TEX_METRICS]
-        lines.append("| %s | %s | %d | %s | %d | %d |"
+        lines.append("| %s | %s | %d | %s | %d | %d | %d/%d | %d/%d |"
                      % (group, stats["_label"], stats["_n_runs"], " | ".join(cells),
                         stats["_ego_collisions_ev" if event else "_ego_collisions"],
-                        stats["_tv_lead_contacts"]))
+                        stats["_tv_lead_contacts"],
+                        stats["_ctx_miss"], stats["_ctx_n"],
+                        stats["_ctx_unnec"], stats["_ctx_n"]))
     return "\n".join(lines)
 
 
@@ -1653,6 +1693,9 @@ def main():
     ap.add_argument("--window-s", type=float, default=None,
                     help="채점 창을 제어 시작 이후 이 초수로 자른다 (기본: 스윕 전체 25 s). "
                          "런마다 t0 가 14.4~14.6 s 라 17.5 는 절대 시각 약 32 s 에 해당한다.")
+    ap.add_argument("--ctx-delta-thr", type=float, default=DEFAULT_CTX_DELTA_THR,
+                    help="ctx_miss 의 δ_thr, 비율 (기본 %g = %g %%). 진입 뒤 3 s 의 delta 최대가 "
+                         "이를 넘으면 놓침." % (DEFAULT_CTX_DELTA_THR, 100 * DEFAULT_CTX_DELTA_THR))
     args = ap.parse_args()
     root = pathlib.Path(args.root).resolve()
     speeds = [float(v) for v in args.ego_speeds.split(",") if v.strip()]
@@ -1666,9 +1709,11 @@ def main():
         if groups and rel[1] not in groups:
             continue
         row = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s,
-                          window_start_s=args.window_start_s)
+                          window_start_s=args.window_start_s,
+                          ctx_delta_thr=args.ctx_delta_thr)
         if args.window_start_s is not None:
-            base = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s)
+            base = collect_run(rel[0], rel[1], pkl.parent, window_s=args.window_s,
+                               ctx_delta_thr=args.ctx_delta_thr)
             for key in EVENT_KEYS:      # 이벤트 열은 절단 전 창에서 잰 값을 쓴다
                 row[key] = base.get(key)
         if speeds and row.get("ego_speed") not in speeds:
@@ -1694,6 +1739,8 @@ def main():
         " --groups " + args.groups if groups else "",
         " --window-s %g" % args.window_s if args.window_s is not None else "",
         " --window-start-s %g" % args.window_start_s if args.window_start_s is not None else "")
+    if args.ctx_delta_thr != DEFAULT_CTX_DELTA_THR:
+        note += " --ctx-delta-thr %g" % args.ctx_delta_thr
     write_metrics_md(root / "METRICS.md", agg, rows, note)
     print("%d runs (%d valid) -> table_cutin_runs.csv, table_cutin_summary.csv, "
           "table_cutin_rows.tex, %sMETRICS.md in %s\n"

@@ -127,6 +127,12 @@ class ACCNairSMPCAgent(object):
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
         if self.branch_decision_brake is not None and self.predictor_type != "stdan_3int":
             raise ValueError("branchdec needs the stdan_3int predictor")
+        self.context_trust = self._parse_context_trust(smpc_config)
+        if self.context_trust is not None:
+            if self.predictor_type != "stdan_3int":
+                raise ValueError("ctx needs the stdan_3int predictor")
+            if not 0.0 <= self.context_trust <= 1.0:
+                raise ValueError("ctx<lambda> takes lambda in [0, 1]")
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -714,6 +720,9 @@ class ACCNairSMPCAgent(object):
         # Every other vehicle's (s, d, v), for the decision-point branch rule:
         # a target's own lead is a traffic actor, not a prediction target.
         other_states = {}
+        # Adjacent targets' measured lateral offset toward the ego lane, for
+        # the context trust mixing (``ctx<lambda>``); empty when the token is off.
+        target_lateral = {}
         nearest_target = None
         carla_map = self.world.get_map()
         ego_wp = self.world.get_map().get_waypoint(
@@ -752,6 +761,10 @@ class ACCNairSMPCAgent(object):
             if relation != REL_EGO_LANE:
                 relation = self._relation_from_frenet_offset(d_tv)
             target_relations[actor.id] = relation
+            if (self.context_trust is not None and target_wp is not None
+                    and relation in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT)):
+                target_lateral[actor.id] = self._lateral_offset_toward_ego_lane(
+                    actor.get_location(), target_wp, relation)
             if nearest_target is None or s_tv - s_ego < nearest_target[0]:
                 nearest_target = (s_tv - s_ego, target_states[actor.id])
 
@@ -793,6 +806,8 @@ class ACCNairSMPCAgent(object):
                 gap_recovery_start_scale=gap_recovery_start_scale,
                 lk_entry_as_cutin=self.lk_entry_as_cutin,
                 branch_floor_by_vehicle=branch_floor_by_vehicle,
+                context_trust=self.context_trust,
+                lateral_offsets=target_lateral,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -1035,6 +1050,17 @@ class ACCNairSMPCAgent(object):
                 "full_pred_traj_xy": full_pred_traj_xy,
                 "predictor_covariance": predictor_covariance,
             })
+            ctx = target.branch_info.get("context_trust")
+            if ctx is not None:
+                # ctx<lambda>: the measured lateral offset toward the ego lane,
+                # its observation, and the cut-in intention before/after mixing.
+                summaries[-1].update({
+                    "ctx_lambda": ctx["lambda"],
+                    "ctx_y_v": ctx["y_v"],
+                    "ctx_o_v": ctx["o_v"],
+                    "ctx_p_raw": ctx["p_raw"],
+                    "ctx_p_mixed": ctx["p_mixed"],
+                })
         return summaries
 
     def _stdan_ego_lane_memberships_from_carla_waypoints(
@@ -1497,6 +1523,20 @@ class ACCNairSMPCAgent(object):
         return float(match.group(1)) if match else None
 
     @staticmethod
+    def _parse_context_trust(smpc_config):
+        """Read ``ctx<lambda>`` from the config string (None = off).
+
+        Context trust ``lambda`` in [0, 1]: an adjacent vehicle's cut-in
+        intention is mixed with its measured lateral motion toward the ego
+        lane, ``p = p_S [(1 - lambda) + lambda o_v]``, before the mode mapping.
+        The token is matched between ``_`` separators so that it can neither
+        catch nor be caught by another token.  See
+        ``acc_postprocess.mix_cutin_probability``.
+        """
+        match = re.search(r"(?:^|_)ctx([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
     def _parse_lk_entry_as_cutin(smpc_config):
         """Read ``trajcutin`` from the config string (False = map by label).
 
@@ -1546,6 +1586,25 @@ class ACCNairSMPCAgent(object):
         if d_tv < -cls.EGO_LANE_HALF_WIDTH_M:
             return REL_RIGHT_ADJACENT
         return REL_EGO_LANE
+
+    @staticmethod
+    def _lateral_offset_toward_ego_lane(location, waypoint, relation):
+        """Signed cross-track offset [m] of a vehicle's centre from its own lane
+        centre, positive toward the ego lane (``ctx<lambda>``'s ``y_v``).
+
+        The lane centre is the CARLA map's waypoint, not +/-3.5 m from the ego
+        path: near a Town04 segment boundary (y ~ 47) adjacent traffic runs
+        2.0 m from the ego path.  Both poses are taken into the repository's
+        right-handed frame (y -> -y, yaw -> -yaw), where +d is to the left of
+        the lane heading; a left-adjacent vehicle moves toward the ego lane by
+        going right, so its sign flips.
+        """
+        centre = waypoint.transform.location
+        psi = -fth.fix_angle(np.radians(waypoint.transform.rotation.yaw))
+        dx = float(location.x) - float(centre.x)
+        dy = -float(location.y) + float(centre.y)
+        d_left = -np.sin(psi) * dx + np.cos(psi) * dy
+        return float(-d_left if relation == REL_LEFT_ADJACENT else d_left)
 
     @staticmethod
     def _lane_keeping_steer(ey, epsi):
