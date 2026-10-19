@@ -17,13 +17,17 @@ Perception (Sec. II-C, III-C of the paper), per tick and per other vehicle:
   vehicle width).
 * The cut-in rule (``s_lat`` > 0.4 m and ``theta`` > 0.035 rad toward the ego
   lane for 0.5 s) and the 1.0 s leave lag are in ``LaneMembershipTracker``.
-* The gap is rear bumper of the vehicle minus front bumper of the ego
-  (``bounding_box.extent.x``), the paper's s_p - s.
+* The gap is centre to centre minus L = 4.5 m, the bumper gap the aggregator
+  scores delta with (so delta = 0 means the fork's standoff is held exactly);
+  with ``paperdsafe`` it is rear bumper of the vehicle minus front bumper of
+  the ego (``bounding_box.extent.x``), the paper's s_p - s.
 
-Limits: Table I of the paper (a in [-10, 3] m/s^2, |j| <= 10 m/s^3, lead
-a_p_min = -10.5), not this fork's [-3, 2] / 5.  ``amin<x>``, ``amax<x>``,
-``jlim<x>``, ``apmin<x>``, ``acutin<x>``, ``tc<x>`` in the policy string
-override them (``acc_pcacc_amin3_amax2_jlim5_apmin3`` is the fork's set).
+Safe distance and limits: this fork's by default (``utils/pcacc.py``): the
+standoff d0 + tau v = 3 + 1.3 v on that gap, a in [-3, 2] m/s^2, |j| <= 5
+m/s^3; the lead's a_p_min = -10.5 of Table I stays.  ``paperdsafe`` restores
+the paper's braking-based d_safe and ``amin10_amax3_jlim10`` Table I's
+limits; ``amin<x>``, ``amax<x>``, ``jlim<x>``, ``apmin<x>``, ``acutin<x>``,
+``tc<x>`` in the policy string override the numbers.
 The issued command is clipped to the acceleration bounds and, except on the
 acceleration-bounded path, to the jerk bound.  The ego's acceleration state of
 the paper's model is the last issued command (the ideal actuator realises it).
@@ -156,7 +160,10 @@ class PCACCAgent(object):
             s_tv, d_tv, _ = self._frenet_traj.convert_global_to_frenet_frame(x, y, psi)
             if s_tv <= s_ego:
                 continue
-            gap = (s_tv - float(actor.bounding_box.extent.x)) - (s_ego + ego_half_len)
+            if cfg.paper_d_safe:
+                gap = (s_tv - float(actor.bounding_box.extent.x)) - (s_ego + ego_half_len)
+            else:
+                gap = s_tv - s_ego - cfg.vehicle_length
             if gap > cfg.sensor_range_m:
                 continue
             waypoint = carla_map.get_waypoint(

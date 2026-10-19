@@ -30,6 +30,22 @@ propagation; the ego's acceleration state is the last issued command; the
 terminal safe distance of Prop. V.1 is linearised in the ego's terminal speed
 around the lead's speed at t_c; the cruise controller is a proportional speed
 law that also caps every following command at the set speed.
+
+Safe distance and limits (2026-10-19, the maintainer's choice for the thesis
+comparison): by default this fork's, not the paper's.  The standoff is
+``d_safe(v) = d0 + tau v`` on the bumper gap (``standoff``; L = 4.5 m, d0 = 3 m,
+tau = 1.3 s, AGENTS.md §3), the gap being centre to centre minus L exactly as
+the aggregator scores delta, so delta = 0 means this standoff is held.  It
+replaces Def. II.1 / Prop. IV.5 wherever the paper's d_safe is a standoff: the
+nominal QP's reference and constraint (3), per step and linear in the ego's
+speed (``ds_k >= d0 + tau v_k``); condition (7), which engages the fail-safe
+when the next state's gap is below ``d_safe(v_next)``; Def. II.3; and the
+terminal constraint of Prop. V.1 (linear in v, so exact).  The relevant-vehicle
+reach and the inevitable collision state stay physical.  The limits default to
+a in [-3, 2] m/s^2 and |j| <= 5 m/s^3 (Table I's through
+``amin10_amax3_jlim10``); a_p_min, a_cut-in and t_c are unchanged.
+``paperdsafe`` restores the paper's d_safe everywhere, on the physical bumper
+gap.
 """
 import math
 import re
@@ -65,10 +81,11 @@ _POLICY_TOKENS = {
 
 @dataclass
 class PCACCConfig:
-    """Table I of the paper, plus the values it leaves open."""
-    jerk_max: float = 10.0        # j_bar [m/s^3]; j_min = -jerk_max
-    a_max: float = 3.0            # a_bar [m/s^2]  (constant: v_S is not given)
-    a_min: float = -10.0          # a_underbar
+    """Table I of the paper, plus the values it leaves open.  The limits and the
+    safe distance default to this fork's (module docstring)."""
+    jerk_max: float = 5.0         # j_bar [m/s^3]; j_min = -jerk_max  (Table I: 10)
+    a_max: float = 2.0            # a_bar [m/s^2]  (constant: v_S is not given; Table I: 3)
+    a_min: float = -3.0           # a_underbar  (Table I: -10)
     v_max: float = 51.0           # v_bar (sensor-range / limit speed)
     v_min: float = 0.0
     sensor_range_m: float = 200.0  # s_sr
@@ -88,6 +105,12 @@ class PCACCConfig:
     t_clear_s: float = 4.0        # clearing time t_c (user-defined there)
     cruise_gain: float = 0.5      # cruise controller a = K (v_set - v)
     jerk_profile_fractions: Tuple[float, ...] = JERK_PROFILE_FRACTIONS
+    # This fork's safe distance (AGENTS.md §3): ``d0 + tau v`` on the bumper gap,
+    # the gap being centre to centre minus ``vehicle_length``.
+    d0: float = 3.0
+    time_headway: float = 1.3     # tau
+    vehicle_length: float = 4.5   # L
+    paper_d_safe: bool = False    # ``paperdsafe``: Def. II.1 / Prop. IV.5 instead
 
     @property
     def jerk_min(self):
@@ -100,12 +123,14 @@ class PCACCConfig:
     @classmethod
     def from_policy_string(cls, policy):
         """``acc_pcacc`` plus optional ``amin<x>`` ``amax<x>`` ``jlim<x>`` ``apmin<x>``
-        ``acutin<x>`` ``tc<x>`` tokens (magnitudes; the sign is the field's)."""
+        ``acutin<x>`` ``tc<x>`` tokens (magnitudes; the sign is the field's;
+        ``amin10_amax3_jlim10`` is Table I) and ``paperdsafe`` (the paper's d_safe)."""
         cfg = cls()
         for token, (name, sign) in _POLICY_TOKENS.items():
             m = re.search(r"(?:^|_)" + token + r"([0-9]*\.?[0-9]+)(?:_|$)", str(policy))
             if m:
                 setattr(cfg, name, sign * float(m.group(1)))
+        cfg.paper_d_safe = re.search(r"(?:^|_)paperdsafe(?:_|$)", str(policy)) is not None
         if cfg.a_p_min > cfg.a_min:
             raise ValueError("Spec. III.5 needs a_p_min <= a_min (%.2f > %.2f)" % (cfg.a_p_min, cfg.a_min))
         return cfg
@@ -197,6 +222,13 @@ def safe_distance(v, a, v_p, cfg, dt_cmd, u0=0.0):
     v1 = max(0.0, v1)
     a1 = min(cfg.a_max, max(cfg.a_min, a1))
     return max(0.0, s1) + ego_brake_distance(v1, a1, cfg) - lead_brake_distance(v_p, cfg)
+
+
+def standoff(v, cfg):
+    """This fork's safe distance on the bumper gap, ``d0 + tau v`` (AGENTS.md §3:
+    ``L + d0 + tau v`` centre to centre).  The aggregator scores delta against
+    the same geometry, so delta = 0 means the controller holds exactly it."""
+    return cfg.d0 + cfg.time_headway * float(v)
 
 
 def emergency_accel(t_since, a_engage, cfg):
@@ -350,8 +382,11 @@ class _BatchQP:
             Se[3 * k:3 * k + 3] = se
         return Se
 
-    def solve(self, x0, d_ref, ds_min, dv_lo, dv_hi, a_lo, a_hi, a_lead=None, terminal=None):
-        """``a_lead``: lead acceleration per step (default 0).  ``terminal`` =
+    def solve(self, x0, d_ref, ds_min, dv_lo, dv_hi, a_lo, a_hi, a_lead=None, terminal=None,
+              ds_dv_coef=0.0):
+        """``a_lead``: lead acceleration per step (default 0).  ``ds_dv_coef``:
+        the gap rows read ds_k + ds_dv_coef * dv_k >= ds_min_k (a standoff
+        linear in the ego's speed v_k = v_p - dv_k).  ``terminal`` =
         (step k, coef_dv, rhs): the extra row ds_k + coef_dv * dv_k >= rhs at
         step k in 1..N.  Returns (feasible, U, X) with X the stacked predicted
         states."""
@@ -373,6 +408,9 @@ class _BatchQP:
         uba[idx_a] = float(a_hi) - free[idx_a]
         A_c = np.zeros((self.rows, N))
         A_c[:3 * N] = self.Su
+        if ds_dv_coef:
+            A_c[idx_ds] += ds_dv_coef * self.Su[idx_dv]
+            lba[idx_ds] -= ds_dv_coef * free[idx_dv]
         if terminal is not None:
             k, coef_dv, rhs = terminal
             i_ds, i_dv = idx_ds[int(k) - 1], idx_dv[int(k) - 1]
@@ -397,7 +435,7 @@ class _BatchQP:
 class VehicleObs:
     """One preceding vehicle as the controller sees it this tick."""
     vid: int
-    gap: float          # rear bumper of the vehicle minus front bumper of the ego [m]
+    gap: float          # bumper gap [m]: centre to centre minus cfg.vehicle_length (paperdsafe: the measured bumpers)
     speed: float        # measured speed [m/s]
     member: bool        # ego-lane member (LaneMembershipTracker)
     role: str = ""
@@ -464,21 +502,46 @@ class PCACCController:
     def _command_from_jerk(self, a, u0, dt_cmd):
         return min(self.cfg.a_max, max(self.cfg.a_min, float(a) + float(u0) * float(dt_cmd)))
 
+    def _d_safe(self, v, a, v_p, dt_cmd):
+        """Safe distance at the current state: this fork's standoff of the ego's
+        speed, or the paper's Prop. IV.5 distance with ``paperdsafe``."""
+        if self.cfg.paper_d_safe:
+            return safe_distance(v, a, v_p, self.cfg, dt_cmd)
+        return standoff(v, self.cfg)
+
+    def _next_state_unsafe(self, gap, v, a, v_p, u0, dt_cmd):
+        """Condition (7) fails under the planned jerk ``u0``: one command interval
+        on, the gap is below the safe distance of the state reached (the paper:
+        its fail-safe no longer stops behind the fully braking lead; the fork:
+        the standoff of the next speed, the lead at constant speed)."""
+        cfg = self.cfg
+        if cfg.paper_d_safe:
+            return gap < safe_distance(v, a, v_p, cfg, dt_cmd, u0=u0)
+        s1, v1, _ = _advance(float(v), float(a), float(u0), float(dt_cmd))
+        return gap + float(v_p) * float(dt_cmd) - s1 < standoff(max(0.0, v1), cfg)
+
     # ---- Sec. IV: safety-keeping controller w.r.t. one vehicle
     def _safety_keeping(self, t, v, a, veh, dt_cmd):
         cfg = self.cfg
         N = self.N_keep
-        d_ref = safe_distance(v, a, veh.speed, cfg, dt_cmd)
+        d_ref = self._d_safe(v, a, veh.speed, dt_cmd)
+        if cfg.paper_d_safe:
+            # (3) with d_safe of the zero-jerk propagation: one constant
+            ds_min, ds_dv_coef = np.full(N, d_ref), 0.0
+        else:
+            # (3) per step, linear in the ego's speed v_k = v_p - dv_k:
+            # ds_k >= d0 + tau v_k  <=>  ds_k + tau dv_k >= d0 + tau v_p
+            ds_min, ds_dv_coef = np.full(N, standoff(veh.speed, cfg)), cfg.time_headway
         feasible, U, X = self._qp_keep.solve(
             [veh.gap, veh.speed - v, a], d_ref,
-            ds_min=np.full(N, d_ref),
+            ds_min=ds_min, ds_dv_coef=ds_dv_coef,
             dv_lo=np.full(N, veh.speed - cfg.v_max), dv_hi=np.full(N, veh.speed - cfg.v_min),
             a_lo=cfg.a_min, a_hi=cfg.a_max)
         unsafe = True
         a_nom = None
         if feasible:
             a_nom = self._command_from_jerk(a, U[0], dt_cmd)
-            unsafe = veh.gap < safe_distance(v, a, veh.speed, cfg, dt_cmd, u0=U[0])
+            unsafe = self._next_state_unsafe(veh.gap, v, a, veh.speed, U[0], dt_cmd)
         if not unsafe:
             self._emergency.pop(veh.vid, None)
             return VehicleDecision(PATH_NOMINAL, a_nom, d_ref, veh.gap, veh.speed, True,
@@ -494,7 +557,7 @@ class PCACCController:
     # ---- Sec. V: safety-recapturing controller w.r.t. one cut-in vehicle
     def _safety_recapturing(self, t, v, a, veh, dt_cmd):
         cfg = self.cfg
-        d_now = safe_distance(v, a, veh.speed, cfg, dt_cmd)
+        d_now = self._d_safe(v, a, veh.speed, dt_cmd)
         if is_inevitable_collision(veh.gap, v, a, veh.speed, cfg):
             return VehicleDecision(PATH_ICS, self._command_from_jerk(a, cfg.jerk_min, dt_cmd),
                                    d_now, veh.gap, veh.speed, False, {"reason": 0.0})
@@ -507,9 +570,10 @@ class PCACCController:
         v_p_k = np.maximum(0.0, veh.speed + cfg.a_cutin * steps)
         a_lead = np.where(v_p_k > 0.0, cfg.a_cutin, 0.0)
         # Prop. V.1 terminal constraint ds(t_c) >= d_safe(x(t_c), v_p(t_c)),
-        # linearised in the ego's terminal speed around the lead's speed at t_c.
+        # linearised in the ego's terminal speed around the lead's speed at t_c
+        # (exact for the fork's standoff, which is linear in that speed).
         v_p_tc = float(v_p_k[k_c - 1])
-        d_tc = lambda vv: safe_distance(max(0.0, vv), 0.0, v_p_tc, cfg, dt_cmd)
+        d_tc = lambda vv: self._d_safe(max(0.0, vv), 0.0, v_p_tc, dt_cmd)
         d0 = d_tc(v_p_tc)
         lo, hi = max(0.0, v_p_tc - 0.5), v_p_tc + 0.5
         slope = (d_tc(hi) - d_tc(lo)) / (hi - lo)
@@ -552,7 +616,7 @@ class PCACCController:
                 self._cutin_since.pop(veh.vid, None)
                 self._emergency.pop(veh.vid, None)
                 continue
-            d_safe = safe_distance(v, a, veh.speed, cfg, dt_cmd)
+            d_safe = self._d_safe(v, a, veh.speed, dt_cmd)
             if not was and veh.gap < d_safe:
                 # Def. II.3: entered the ego lane inside the safe distance
                 self._cutin_since.setdefault(veh.vid, t)

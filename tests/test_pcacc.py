@@ -25,9 +25,11 @@ from utils.pcacc import (  # noqa: E402
     lead_brake_distance,
     relevant_vehicles,
     safe_distance,
+    standoff,
 )
 
 DT_CMD = 0.05
+PAPER = "acc_pcacc_paperdsafe_amin10_amax3_jlim10"   # the paper's d_safe and Table I limits
 
 
 def _numeric_brake_distance(v, a, cfg, step=1.0e-4):
@@ -50,6 +52,17 @@ def _numeric_brake_distance(v, a, cfg, step=1.0e-4):
 class SafeDistanceTests(unittest.TestCase):
     def setUp(self):
         self.cfg = PCACCConfig()
+        self.paper = PCACCConfig.from_policy_string(PAPER)
+
+    def test_standoff_is_the_forks(self):
+        # AGENTS.md §3: L + d0 + tau v centre to centre, so d0 + tau v on the bumper gap.
+        self.assertEqual((self.cfg.vehicle_length, self.cfg.d0, self.cfg.time_headway), (4.5, 3.0, 1.3))
+        self.assertAlmostEqual(standoff(17.0, self.cfg), 3.0 + 1.3 * 17.0, places=9)
+        ctrl = PCACCController(self.cfg)
+        self.assertAlmostEqual(ctrl._d_safe(17.0, 0.0, 15.0, DT_CMD), standoff(17.0, self.cfg), places=9)
+        paper = PCACCController(self.paper)
+        self.assertAlmostEqual(paper._d_safe(17.0, 0.0, 15.0, DT_CMD),
+                               safe_distance(17.0, 0.0, 15.0, self.paper, DT_CMD), places=9)
 
     def test_lead_brakes_at_a_p_min(self):
         self.assertAlmostEqual(lead_brake_distance(15.0, self.cfg), 15.0 ** 2 / 21.0, places=9)
@@ -67,18 +80,31 @@ class SafeDistanceTests(unittest.TestCase):
         self.assertEqual(ego_brake_distance(0.0, 0.0, self.cfg), 0.0)
 
     def test_safe_distance_magnitudes(self):
-        # Fig. 8(d): about 15-17 m at 12 m/s with the lead at the same speed.
-        self.assertTrue(14.0 <= safe_distance(12.0, 0.0, 12.0, self.cfg, DT_CMD) <= 19.0)
-        d_fast_lead = safe_distance(17.0, 0.0, 17.0, self.cfg, DT_CMD)
-        d_slow_lead = safe_distance(17.0, 0.0, 12.0, self.cfg, DT_CMD)
+        # Fig. 8(d): about 15-17 m at 12 m/s with the lead at the same speed (Table I limits).
+        cfg = self.paper
+        self.assertTrue(14.0 <= safe_distance(12.0, 0.0, 12.0, cfg, DT_CMD) <= 19.0)
+        d_fast_lead = safe_distance(17.0, 0.0, 17.0, cfg, DT_CMD)
+        d_slow_lead = safe_distance(17.0, 0.0, 12.0, cfg, DT_CMD)
         self.assertGreater(d_slow_lead, d_fast_lead)
-        self.assertGreater(safe_distance(20.0, 0.0, 15.0, self.cfg, DT_CMD),
-                           safe_distance(15.0, 0.0, 15.0, self.cfg, DT_CMD))
+        self.assertGreater(safe_distance(20.0, 0.0, 15.0, cfg, DT_CMD),
+                           safe_distance(15.0, 0.0, 15.0, cfg, DT_CMD))
 
     def test_condition_seven_uses_the_planned_first_step(self):
         # Braking in the first interval shortens the stopping distance.
-        self.assertLess(safe_distance(17.0, 0.0, 15.0, self.cfg, DT_CMD, u0=-10.0),
-                        safe_distance(17.0, 0.0, 15.0, self.cfg, DT_CMD, u0=0.0))
+        self.assertLess(safe_distance(17.0, 0.0, 15.0, self.paper, DT_CMD, u0=-10.0),
+                        safe_distance(17.0, 0.0, 15.0, self.paper, DT_CMD, u0=0.0))
+
+    def test_condition_seven_on_the_standoff_uses_the_next_state(self):
+        ctrl = PCACCController(self.cfg)
+        gap = standoff(17.0, self.cfg) + 0.05
+        # Closing on a 15 m/s lead at 17 m/s, the gap after 0.05 s is 0.1 m smaller.
+        self.assertTrue(ctrl._next_state_unsafe(gap, 17.0, 0.0, 15.0, 0.0, DT_CMD))
+        self.assertFalse(ctrl._next_state_unsafe(gap, 17.0, 0.0, 17.0, 0.0, DT_CMD))
+        # The paper's check: the gap now against Prop. IV.5 with the planned jerk.
+        paper = PCACCController(self.paper)
+        d = safe_distance(17.0, 0.0, 15.0, self.paper, DT_CMD, u0=-10.0)
+        self.assertFalse(paper._next_state_unsafe(d + 0.01, 17.0, 0.0, 15.0, -10.0, DT_CMD))
+        self.assertTrue(paper._next_state_unsafe(d - 0.01, 17.0, 0.0, 15.0, -10.0, DT_CMD))
 
     def test_emergency_profile(self):
         cfg = self.cfg
@@ -94,14 +120,18 @@ class SafeDistanceTests(unittest.TestCase):
         self.assertTrue(is_inevitable_collision(2.0, 17.0, 0.0, 5.0, self.cfg))
 
     def test_policy_tokens(self):
-        cfg = PCACCConfig.from_policy_string("acc_pcacc_amin3_amax2_jlim5_apmin3_tc3_acutin1.5")
-        self.assertEqual((cfg.a_min, cfg.a_max, cfg.jerk_max, cfg.jerk_min), (-3.0, 2.0, 5.0, -5.0))
-        self.assertEqual((cfg.a_p_min, cfg.t_clear_s, cfg.a_cutin), (-3.0, 3.0, -1.5))
+        cfg = PCACCConfig.from_policy_string("acc_pcacc_amin10_amax3_jlim10_apmin10.5_tc3_acutin1.5")
+        self.assertEqual((cfg.a_min, cfg.a_max, cfg.jerk_max, cfg.jerk_min), (-10.0, 3.0, 10.0, -10.0))
+        self.assertEqual((cfg.a_p_min, cfg.t_clear_s, cfg.a_cutin), (-10.5, 3.0, -1.5))
+        self.assertFalse(cfg.paper_d_safe)
         default = PCACCConfig.from_policy_string("acc_pcacc")
-        self.assertEqual((default.a_min, default.a_max, default.jerk_max, default.a_p_min), (-10.0, 3.0, 10.0, -10.5))
-        PCACCConfig.from_policy_string("acc_pcacc_amin3")   # a_p_min -10.5 <= -3 (Spec. III.5)
+        self.assertEqual((default.a_min, default.a_max, default.jerk_max, default.a_p_min), (-3.0, 2.0, 5.0, -10.5))
+        self.assertEqual((default.d0, default.time_headway, default.vehicle_length), (3.0, 1.3, 4.5))
+        self.assertFalse(default.paper_d_safe)
+        self.assertTrue(PCACCConfig.from_policy_string(PAPER).paper_d_safe)
+        PCACCConfig.from_policy_string("acc_pcacc_apmin3")   # a_p_min -3 <= a_min -3 (Spec. III.5)
         with self.assertRaises(ValueError):
-            PCACCConfig.from_policy_string("acc_pcacc_apmin3")   # lead braking weaker than the ego's
+            PCACCConfig.from_policy_string("acc_pcacc_apmin2")   # lead braking weaker than the ego's
 
 
 class ModeSwitchingTests(unittest.TestCase):
@@ -116,7 +146,7 @@ class ModeSwitchingTests(unittest.TestCase):
         self.assertTrue(dec.feasible)
 
     def test_nominal_when_the_gap_is_safe(self):
-        d = safe_distance(15.0, 0.0, 15.0, self.cfg, DT_CMD)
+        d = standoff(15.0, self.cfg)
         dec = self.ctrl.step(0.0, 15.0, 0.0, 17.0, [VehicleObs(1, d + 5.0, 15.0, True)], DT_CMD)
         self.assertEqual(dec.path, PATH_NOMINAL)
         self.assertEqual(dec.lead_vid, 1)
@@ -125,7 +155,7 @@ class ModeSwitchingTests(unittest.TestCase):
 
     def test_emergency_follows_the_jerk_profile_and_releases(self):
         cfg = self.cfg
-        d = safe_distance(15.0, 0.0, 15.0, cfg, DT_CMD)
+        d = standoff(15.0, cfg)
         unsafe = [VehicleObs(1, d - 3.0, 15.0, True)]
         dec1 = self.ctrl.step(0.0, 15.0, 0.0, 17.0, unsafe, DT_CMD)
         self.assertEqual(dec1.path, PATH_EMERGENCY)
@@ -141,7 +171,7 @@ class ModeSwitchingTests(unittest.TestCase):
     def test_cut_in_inside_the_safe_distance_is_recaptured(self):
         cfg = self.cfg
         v, v_p = 17.0, 15.0
-        d = safe_distance(v, 0.0, v_p, cfg, DT_CMD)
+        d = standoff(v, cfg)
         self.ctrl.step(0.0, v, 0.0, 17.0, [VehicleObs(2, d - 8.0, v_p, False)], DT_CMD)
         dec = self.ctrl.step(DT_CMD, v, 0.0, 17.0, [VehicleObs(2, d - 8.0, v_p, True)], DT_CMD)
         self.assertEqual(dec.path, PATH_RECAPTURE)
@@ -151,23 +181,57 @@ class ModeSwitchingTests(unittest.TestCase):
         extra = dec.per_vehicle[2].extra
         self.assertAlmostEqual(extra["v_p_tc"], max(0.0, v_p + cfg.a_cutin * cfg.t_clear_s), places=6)
         # Safe distance restored (ego slower than the lead) -> safety keeping again.
-        d_restored = safe_distance(12.0, dec.accel, v_p, cfg, DT_CMD)
+        d_restored = standoff(12.0, cfg)
         dec = self.ctrl.step(2 * DT_CMD, 12.0, dec.accel, 17.0, [VehicleObs(2, d_restored + 2.0, v_p, True)], DT_CMD)
         self.assertNotIn(2, self.ctrl._cutin_since)
         self.assertEqual(dec.path, PATH_NOMINAL)
 
     def test_first_sight_inside_the_lane_is_not_a_cut_in(self):
-        d = safe_distance(15.0, 0.0, 15.0, self.cfg, DT_CMD)
+        d = standoff(15.0, self.cfg)
         dec = self.ctrl.step(0.0, 15.0, 0.0, 17.0, [VehicleObs(7, d - 3.0, 15.0, True)], DT_CMD)
         self.assertEqual(dec.path, PATH_EMERGENCY)
         self.assertNotIn(7, self.ctrl._cutin_since)
 
     def test_entry_outside_the_safe_distance_is_not_a_cut_in(self):
-        d = safe_distance(17.0, 0.0, 15.0, self.cfg, DT_CMD)
+        d = standoff(17.0, self.cfg)
         self.ctrl.step(0.0, 17.0, 0.0, 17.0, [VehicleObs(3, d + 2.0, 15.0, False)], DT_CMD)
         dec = self.ctrl.step(DT_CMD, 17.0, 0.0, 17.0, [VehicleObs(3, d + 2.0, 15.0, True)], DT_CMD)
         self.assertEqual(dec.path, PATH_NOMINAL)
         self.assertNotIn(3, self.ctrl._cutin_since)
+
+    def test_cut_in_is_judged_against_the_forks_standoff(self):
+        # At 12 m/s the paper's d_safe (Table I limits) is shorter than the fork's
+        # 3 + 1.3 v: a vehicle entering between the two is a cut-in here, not there.
+        paper_cfg = PCACCConfig.from_policy_string(PAPER)
+        d_paper = safe_distance(12.0, 0.0, 12.0, paper_cfg, DT_CMD)
+        d_fork = standoff(12.0, self.cfg)
+        self.assertLess(d_paper, d_fork)
+        gap = 0.5 * (d_paper + d_fork)
+        for cfg, path, d in ((self.cfg, PATH_RECAPTURE, d_fork), (paper_cfg, PATH_NOMINAL, d_paper)):
+            ctrl = PCACCController(cfg)
+            ctrl.step(0.0, 12.0, 0.0, 17.0, [VehicleObs(8, gap, 12.0, False)], DT_CMD)
+            dec = ctrl.step(DT_CMD, 12.0, 0.0, 17.0, [VehicleObs(8, gap, 12.0, True)], DT_CMD)
+            self.assertEqual(dec.path, path)
+            self.assertAlmostEqual(dec.per_vehicle[8].d_safe, d, places=9)
+
+    def test_keeping_constraint_is_linear_in_the_step_speed(self):
+        # (3) on the fork's standoff: ds_k >= d0 + tau v_k at every step, v_k = v_p - dv_k.
+        cfg = self.cfg
+        qp = self.ctrl._qp_keep
+        v, v_p = 16.0, 15.0
+        kw = dict(dv_lo=np.full(qp.N, v_p - cfg.v_max), dv_hi=np.full(qp.N, v_p - cfg.v_min),
+                  a_lo=cfg.a_min, a_hi=cfg.a_max, ds_min=np.full(qp.N, standoff(v_p, cfg)))
+        feasible, _, X = qp.solve([standoff(v, cfg) + 5.0, v_p - v, 0.0], standoff(v, cfg),
+                                  ds_dv_coef=cfg.time_headway, **kw)
+        self.assertTrue(feasible)
+        ds, dv = X[0::3], X[1::3]
+        self.assertTrue(np.all(ds + 1.0e-6 >= cfg.d0 + cfg.time_headway * (v_p - dv)))
+        # 1 m outside the standoff of the lead's speed but 0.3 m inside its own,
+        # closing at 1 m/s: infeasible per step in v_k, feasible against the
+        # lead-speed constant.
+        x0 = [standoff(v_p, cfg) + 1.0, v_p - v, 0.0]
+        self.assertFalse(qp.solve(x0, standoff(v, cfg), ds_dv_coef=cfg.time_headway, **kw)[0])
+        self.assertTrue(qp.solve(x0, standoff(v, cfg), **kw)[0])
 
     def test_inevitable_collision_state_brakes_fully(self):
         self.ctrl.step(0.0, 17.0, 0.0, 17.0, [VehicleObs(4, 2.0, 5.0, False)], DT_CMD)
@@ -176,7 +240,7 @@ class ModeSwitchingTests(unittest.TestCase):
         self.assertAlmostEqual(dec.accel, self.cfg.jerk_min * DT_CMD, places=9)
 
     def test_selector_takes_the_minimum(self):
-        d = safe_distance(15.0, 0.0, 15.0, self.cfg, DT_CMD)
+        d = standoff(15.0, self.cfg)
         near = VehicleObs(5, d - 3.0, 15.0, True)
         far = VehicleObs(6, d + 20.0, 12.0, True)
         dec = self.ctrl.step(0.0, 15.0, 0.0, 17.0, [far, near], DT_CMD)
