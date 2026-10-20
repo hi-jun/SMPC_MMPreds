@@ -144,6 +144,13 @@ cut-in 응답
            그 틱에 d_safe(v) 안에 실측 차선 내 선행차(위 판정, 범퍼 간격 <= d_safe)가
            없는 스텝이 하나라도 있는 런. 들어온 런은 False.
     target_cutin 이 없는 런(컷아웃 그룹)은 둘 다 None.
+  floor_breach / phantom_brake (2026-10-20) = λ 보정(CRC)의 손실에 쓰는 런 값. 컷아웃 그룹은 None.
+    floor_breach  = TV 가 들어왔고 t_cross 뒤 범퍼 간격이 d0 (3 m) 아래로 내려간 런 = 중심 간격
+           < L + d0, D-opt 가 차선에 들어온 차에 하드로 거는 바닥. delta 로는 τv/(d0 + τv),
+           v 11–17 m/s 에서 83–88 %. 안 들어온 런은 False.
+    phantom_brake = TV 가 들어오지 않은 런에서 d_safe 안에 실측 차선 내 선행차가 없는 틱의 최대
+           제동 명령 max(0, -accel_cmd) [m/s^2] = ctx_unnec 의 크기판(0.3 이상이면 ctx_unnec).
+           밟지 않았으면 0, 들어온 런은 None.
 
 03_no_cutin_decel (TV가 인접 차선에서 감속만 함) 추가 지표
   v_avg = 창 내 ego_v 평균, v_min, a_min, passed = 창 끝에서 s_ego > s_TV,
@@ -406,7 +413,8 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "a_avg_ev", "a_min_ev", "j_avg_cmd_ev_filt", "j_max_cmd_ev_filt",
                "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev",
                "j_avg_filt_ev", "j_max_filt_ev", "T_rec_ev",
-               "j_at_limit", "j_at_limit_ev", "ctx_miss", "ctx_unnec")
+               "j_at_limit", "j_at_limit_ev", "ctx_miss", "ctx_unnec",
+               "floor_breach", "phantom_brake")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max",
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
@@ -1216,6 +1224,16 @@ def collect_run(policy, group, run_dir, window_s=None, window_start_s=None,
             covered = has_lead & (np.where(has_lead, bumper, np.inf) <= d_safe)
             row["ctx_miss"] = False
             row["ctx_unnec"] = bool(np.any((cmd <= ONSET_ACCEL) & ~covered))
+    # λ 보정 손실 (docstring "cut-in 응답"): 진입 뒤 바닥 L + d0 위반, 진입 없는 런의 헛제동 크기.
+    row["floor_breach"] = None
+    row["phantom_brake"] = None
+    if tv_key is not None:
+        if t_cross is not None:
+            after = (t >= t_cross - 1e-9) & has_lead
+            row["floor_breach"] = bool(np.any(bumper[after] < D0))
+        else:
+            row["floor_breach"] = False
+            row["phantom_brake"] = float(np.max(np.maximum(0.0, -cmd[~covered]), initial=0.0))
 
     row["v_avg"] = float(np.mean(ego_v))
     row["v_min"] = float(np.min(ego_v))
