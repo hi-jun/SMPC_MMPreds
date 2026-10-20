@@ -17,7 +17,7 @@ def _load_summary(path):
 
 def _iter_ego_steps(summary):
     for policy_log in summary.get("policy_logs", {}).values():
-        if isinstance(policy_log, dict) and policy_log.get("controller") in ("acc_nair_smpc", "acc_pcacc"):
+        if isinstance(policy_log, dict) and policy_log.get("controller") in ("acc_nair_smpc", "acc_pcacc", "acc_isampc"):
             for step in policy_log.get("steps", []):
                 yield step
 

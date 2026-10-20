@@ -20,14 +20,26 @@ two-lane merge and the steering states go away):
    a separate MATLAB comparison; the planner itself is sequence based).
 2. ``ProjectSpeed`` / ``construct_QP``: the reference speed is the largest
    v_ref <= v_des for which the ego's closed-loop velocity tracker (gains
-   ``K_Lon_EV``) keeps ``Th_QP`` = 2 s of headway plus half a vehicle to every
-   occupancy's rear edge at every step where the occupancy overlaps the ego
-   laterally.  A scalar QP; solved in closed form here (an upper bound per step).
+   ``K_Lon_EV``) keeps the safe distance to every occupancy's rear edge at every
+   step where the occupancy overlaps the ego laterally.  A scalar QP; solved in
+   closed form here (an upper bound per step).
 3. ``contruct_MT_MPC``: the longitudinal part of their moving-target MPC -- state
    (s, v, a, j), input snap, cost 0.5 snap^2 + 0.5 a^2 + (v_N - v_ref)^2 +
-   0.055 rho^2, soft headway ``Th_MPC`` = 1.5 s with slack rho >= 0, v >= 0.  Their
-   bicycle model is nonlinear (IPOPT); its longitudinal chain is linear, so the
-   problem is a QP and runs through Gurobi like the fork's controllers.
+   0.055 rho^2, the safe distance as a soft constraint with slack rho >= 0, v >= 0.
+   Their bicycle model is nonlinear (IPOPT); its longitudinal chain is linear, so
+   the problem is a QP and runs through Gurobi like the fork's controllers.
+
+Both headway layers use the fork's standoff instead of Zhou's two headways (the
+maintainer's decision for the thesis comparison, 2026-10-19): d_safe(v) = L + d0 +
+tau v with L = 4.5 m, d0 = 3 m, tau = 1.3 s (``NairACCConfig``) between Frenet
+centre positions, which is exactly what ``aggregate_cutin_table.py`` scores delta
+against (bumper gap = centre gap - L >= d0 + tau v  <=>  delta = 0).  It replaces
+the projection's ``Th_QP`` = 2 s + l_veh/2, which becomes
+v_ref <= (x_rear_k - B_k - (L + d0)) / (A_k + tau), and the MPC's soft ``Th_MPC``
+= 1.5 s + l_veh/2, which becomes x_rear_k - s_k - (L + d0 + tau v_k) + rho_k >= 0.
+x_rear is the level-set box's rear edge without the longitudinal vehicle growth
+(zeta_l = 0: L already covers the vehicle, their zeta_l = 0.5 would add l_veh/2 on
+top of it); the lateral growth and the lane test are unchanged.
 
 Deviations from their code, all stated in the report: horizon N = 15 at 0.2 s
 instead of 25 at 0.32 s (the fork's sweep setting and the predictor's 3 s future);
@@ -60,16 +72,15 @@ sys.path.append(scriptdir)
 rootdir = os.path.abspath(__file__).split('scripts')[0]
 sys.path.append(rootdir)
 from policies.acc_nair_smpc_agent import ACCNairSMPCAgent  # noqa: E402  (also sets GUROBI_VERSION)
+from utils.acc_nair_smpc import NairACCConfig  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import normalize_probabilities  # noqa: E402
 
 # Zhou et al., CASE_1_ISAMPC_SIM/main.ipynb (opts_EV) -- CASE_3 sweeps epsilon over
 # 0.1 / 0.4 / 1 and CASE_4 (highD replay) uses epsilon 0.1, Th 1 s / 0.5 s.
 ZHOU_EPSILON = 0.8
-ZHOU_TH_QP = 2.0            # Th_long: headway of the reference-speed projection
-ZHOU_TH_MPC = 1.5           # Th_short: headway of the MPC's soft constraint
-ZHOU_L_VEH = 4.3
+ZHOU_L_VEH = 4.3            # their Th_QP = 2 s / Th_MPC = 1.5 s headways are replaced by the fork's standoff
 ZHOU_W_VEH = 1.8
-ZHOU_ZETA_L = 0.5           # occupancy grows by zeta * vehicle size
+ZHOU_ZETA_L = 0.5           # occupancy grows by zeta * vehicle size; the planner uses zeta_l = 0 (L covers it)
 ZHOU_ZETA_W = 0.5
 ZHOU_K_LON_EV = (0.1029, 0.3423)
 ZHOU_Q_SNAP = 0.5           # Q1
@@ -130,8 +141,9 @@ class ISAMPCPlanner:
 
     def __init__(self, horizon, dt, v_des, a_min=-3.0, a_max=2.0, jerk_limit=5.0,
                  v_min=0.0, v_max=20.0, lane_half_width=1.75, epsilon=ZHOU_EPSILON,
-                 th_qp=ZHOU_TH_QP, th_mpc=ZHOU_TH_MPC, l_veh=ZHOU_L_VEH, w_veh=ZHOU_W_VEH,
-                 zeta_l=ZHOU_ZETA_L, zeta_w=ZHOU_ZETA_W, k_lon=ZHOU_K_LON_EV,
+                 vehicle_length=NairACCConfig.vehicle_length, d0=NairACCConfig.d0,
+                 time_headway=NairACCConfig.time_headway, l_veh=ZHOU_L_VEH, w_veh=ZHOU_W_VEH,
+                 zeta_l=0.0, zeta_w=ZHOU_ZETA_W, k_lon=ZHOU_K_LON_EV,
                  q_snap=ZHOU_Q_SNAP, q_accel=ZHOU_Q_ACCEL, q_terminal_v=ZHOU_Q_TERMINAL_V,
                  q_slack=ZHOU_Q_SLACK, gurobi_time_limit=0.15, solver_tol=1.0e-4):
         self.N = int(horizon)
@@ -142,7 +154,8 @@ class ISAMPCPlanner:
         self.v_min, self.v_max = float(v_min), float(v_max)
         self.lane_half_width = float(lane_half_width)
         self.epsilon = float(epsilon)
-        self.th_qp, self.th_mpc = float(th_qp), float(th_mpc)
+        # the fork's standoff d_safe(v) = L + d0 + tau v, in both headway layers
+        self.vehicle_length, self.d0, self.time_headway = float(vehicle_length), float(d0), float(time_headway)
         self.l_veh, self.w_veh = float(l_veh), float(w_veh)
         self.zeta_l, self.zeta_w = float(zeta_l), float(zeta_w)
         self.weights = {"q_snap": float(q_snap), "q_accel": float(q_accel),
@@ -172,9 +185,10 @@ class ISAMPCPlanner:
 
     # ------------------------------------------------------------------ reference speed
     def project_speed(self, s, v, a, d_ego, occupancies):
-        """Zhou's construct_QP in closed form: v_ref = max v <= v_des that keeps Th_QP
-        headway (+ l_veh/2) to every laterally overlapping occupancy under the
-        closed-loop tracker started at (s, v, a)."""
+        """Zhou's construct_QP in closed form: v_ref = max v <= v_des that keeps the
+        fork's standoff L + d0 + tau v to every laterally overlapping occupancy's
+        rear edge under the closed-loop tracker started at (s, v, a):
+        x_rear_k - (A_k v + B_k) >= L + d0 + tau v."""
         x0 = np.array([s, v, a], dtype=float)
         A, B = np.zeros(self.N), np.zeros(self.N)
         acc, apow = np.zeros(3), np.eye(3)
@@ -186,7 +200,7 @@ class ISAMPCPlanner:
         v_up, binding = self.v_des, None
         for occ in occupancies:
             sel = np.abs(float(d_ego) - occ["y_bar"]) < self.w_veh / 2.0 + occ["dy"]
-            bound = (occ["x_bar"] - occ["dx"] - B - self.l_veh / 2.0) / (A + self.th_qp)
+            bound = (occ["x_bar"] - occ["dx"] - B - (self.vehicle_length + self.d0)) / (A + self.time_headway)
             for k in np.nonzero(sel)[0]:
                 if bound[k] < v_up:
                     v_up, binding = float(bound[k]), (occ["vehicle_id"], int(k) + 1)
@@ -217,7 +231,7 @@ class ISAMPCPlanner:
         opti.subject_to(opti.bounded(self.a_min, a, self.a_max))
         if self.jerk_limit is not None:
             opti.subject_to(opti.bounded(-self.jerk_limit, j, self.jerk_limit))
-        opti.subject_to(v * self.th_mpc - RHO.T <= XDV.T - s - self.l_veh / 2.0)
+        opti.subject_to(v * self.time_headway - RHO.T <= XDV.T - s - (self.vehicle_length + self.d0))
         opti.subject_to(RHO >= 0.0)
         w = self.weights
         cost = (w["q_snap"] * ca.sumsqr(U) + w["q_accel"] * ca.sumsqr(a)
@@ -279,7 +293,7 @@ class ISAMPCPlanner:
                         "X": None, "U": None, "rho": None, "cost": float("nan"), "min_gap": float("nan")})
             return out
         X, U = sol["X"], sol["U"]
-        margin = x_dv - X[0, 1:] - self.l_veh / 2.0 - self.th_mpc * X[1, 1:]
+        margin = x_dv - X[0, 1:] - (self.vehicle_length + self.d0) - self.time_headway * X[1, 1:]
         finite = np.isfinite(margin)
         out.update({"accel_raw": float(a + j * tau + 0.5 * U[0] * tau ** 2),
                     "jerk_next": self._clip_jerk(j + U[0] * tau),
@@ -346,6 +360,7 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             horizon=N, dt=dt, v_des=nominal_speed_mps,
             a_min=cfg.a_min, a_max=cfg.a_max, jerk_limit=cfg.jerk_limit,
             v_min=cfg.v_min, v_max=cfg.v_max, lane_half_width=self.EGO_LANE_HALF_WIDTH_M,
+            vehicle_length=cfg.vehicle_length, d0=cfg.d0, time_headway=cfg.time_headway,
             gurobi_time_limit=cfg.gurobi_time_limit)
         self._prev_command_jerk = 0.0
 
@@ -451,11 +466,13 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             "policy": self.smpc_config,
             "predictor_type": self.predictor_type,
             "epsilon": p.epsilon,
-            "th_qp": p.th_qp,
-            "th_mpc": p.th_mpc,
+            "vehicle_length": p.vehicle_length,
+            "d0": p.d0,
+            "time_headway": p.time_headway,
             "weights": dict(p.weights),
             "l_veh": p.l_veh,
             "w_veh": p.w_veh,
+            "zeta_l": p.zeta_l,
             "accel_bounds": [p.a_min, p.a_max],
             "jerk_limit": p.jerk_limit,
             "cutin_probability_threshold": float(self.cutin_probability_threshold),

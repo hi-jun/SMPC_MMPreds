@@ -85,13 +85,29 @@ class TestISAMPCPlanner(unittest.TestCase):
         occ, = out["occupancies"]
         self.assertTrue(occ["in_ego_lane"].all())
         self.assertTrue(all(x is not None for x in out["x_dv"]))
-        # rear edge = centre - half length (2.15 m) within the grid cell
-        self.assertLess(abs(out["x_dv"][0] - (125.0 + 12.0 * DT - 2.15)), 0.3)
+        # rear edge = the predicted centre within the grid cell: no longitudinal
+        # vehicle growth, the fork's L covers the vehicle
+        self.assertLess(abs(out["x_dv"][0] - (125.0 + 12.0 * DT)), 0.3)
         self.assertLess(out["v_ref"], 12.0)
         self.assertEqual(out["binding"][0], 1)
+        # the projection keeps the fork's standoff L + d0 + tau v = 7.5 + 1.3 v to every
+        # rear edge under the closed-loop tracker, with equality at the binding step
+        A, B = lon_tracker_matrices(DT)
+        x, s_cl = np.array([100.0, 17.0, 0.0]), []
+        for _ in range(N):
+            x = A @ x + B * out["v_ref"]
+            s_cl.append(x[0])
+        surplus = np.asarray(out["x_dv"]) - np.asarray(s_cl) - (7.5 + 1.3 * out["v_ref"])
+        self.assertGreaterEqual(float(surplus.min()), -1.0e-6)
+        self.assertAlmostEqual(float(surplus[out["binding"][1] - 1]), 0.0, places=6)
         self.assertLess(out["accel_raw"], 0.0)
         self.assertGreaterEqual(float(np.min(out["rho"])), -1.0e-6)
-        self.assertLess(out["min_gap"], 0.0)   # the 1.5 s headway is soft: slack carries the shortfall
+        # the standoff is soft in the QP: the slack carries the planned gap's shortfall
+        self.assertLess(out["min_gap"], 0.0)
+        X = out["X"]
+        shortfall = (7.5 + 1.3 * X[1, 1:]) - (np.asarray(out["x_dv"]) - X[0, 1:])
+        np.testing.assert_allclose(out["rho"], np.maximum(shortfall, 0.0), atol=1.0e-2)
+        self.assertAlmostEqual(out["min_gap"], -float(np.max(out["rho"])), places=2)
 
     def test_cutin_hypothesis_enters_only_above_epsilon_times_the_dominant_mode(self):
         # 2-mode weight ratio p / (1 - p) >= 0.8  <=>  p >= 0.444

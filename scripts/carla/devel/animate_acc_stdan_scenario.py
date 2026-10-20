@@ -38,7 +38,7 @@ def _load_summary(path: Path) -> dict:
 
 def _ego_steps(summary: dict) -> list[dict]:
     for log in summary.get("policy_logs", {}).values():
-        if isinstance(log, dict) and log.get("controller") == "acc_nair_smpc":
+        if isinstance(log, dict) and log.get("controller") in ("acc_nair_smpc", "acc_isampc"):
             return log.get("steps", [])
     return []
 
