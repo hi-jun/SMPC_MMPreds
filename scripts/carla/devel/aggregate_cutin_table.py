@@ -151,6 +151,10 @@ cut-in 응답
     phantom_brake = TV 가 들어오지 않은 런에서 d_safe 안에 실측 차선 내 선행차가 없는 틱의 최대
            제동 명령 max(0, -accel_cmd) [m/s^2] = ctx_unnec 의 크기판(0.3 이상이면 ctx_unnec).
            밟지 않았으면 0, 들어온 런은 None.
+           NGSIM 재생기(results/ngsim_lambda_cal_20261019/replay)의 같은 이름 값은 여기에 한 가지를
+           더 뺀다: 그 틱 뒤 3 s 안에 다른 차가 ego 차선의 30 m 앞(뒷범퍼 기준) 또는 ego 와 겹친
+           자리로 들어오면 그 틱은 헛제동이 아니다. CARLA 무컷인 그룹에서는 차선 내 차량이 한 번도
+           없어서(ctxcal_carla_20261020 무컷인 288 런 모두 has_inlane_lead 0) 두 정의의 값이 같다.
 
 03_no_cutin_decel (TV가 인접 차선에서 감속만 함) 추가 지표
   v_avg = 창 내 ego_v 평균, v_min, a_min, passed = 창 끝에서 s_ego > s_TV,
