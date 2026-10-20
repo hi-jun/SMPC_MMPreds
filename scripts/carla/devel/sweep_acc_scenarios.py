@@ -367,6 +367,10 @@ def main():
     parser.add_argument("--ego-policy", default="acc_nair_smpc_stdan_3int")
     parser.add_argument("--output-root", default=str(_default_output_root()))
     parser.add_argument("--max-runs", type=int, default=0)
+    parser.add_argument("--cells-json", default=None,
+                        help="JSON list of parameter dicts to run instead of the grid (e.g. randomly "
+                             "drawn scenarios). Each dict overrides the grid row, so every other grid "
+                             "flag must be single-valued.")
     parser.add_argument("--resume", action="store_true",
                         help="Skip successful rows already present in sweep_manifest.json.")
     parser.add_argument("--dry-run", action="store_true")
@@ -426,6 +430,15 @@ def main():
     output_root.mkdir(parents=True, exist_ok=True)
     write_json(output_root / "sweep_config.json", vars(args))
     param_rows = list(_param_grid(args))
+    if args.cells_json:
+        with open(args.cells_json, "r") as f:
+            cells = json.load(f)
+        if len(param_rows) != 1:
+            raise SystemExit(f"--cells-json needs single-valued grid flags, got {len(param_rows)} grid rows")
+        unknown = sorted({key for cell in cells for key in cell} - set(param_rows[0]))
+        if unknown:
+            raise SystemExit(f"--cells-json keys not in the grid row for kind {args.kind}: {unknown}")
+        param_rows = [dict(param_rows[0], **cell) for cell in cells]
     resume_rows = _successful_resume_rows(output_root, args, param_rows) if args.resume else {}
 
     rows = []

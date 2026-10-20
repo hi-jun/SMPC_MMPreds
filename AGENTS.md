@@ -47,7 +47,7 @@ It describes the state on 2026-10-20, branch `feat/probability-gated-cutin`. Whe
 | `scripts/carla/policies/isampc_agent.py` | Baseline `acc_isampc`: Zhou, Olofsson & Frisk's ISA-MPC restricted to lane keeping, on the IAIMM-KF port (§4) |
 | `scripts/carla/run_all_scenarios.py` | Maps `--ego-policy` prefixes (`acc_nair_smpc`, `acc_isampc`, `acc_pcacc`) to the runner's `policy_type` |
 | `scripts/carla/scenarios/run_lk_scenario.py` | The scenario runner: spawns actors, steps CARLA, records results |
-| `scripts/carla/devel/sweep_acc_scenarios.py` | Grid sweeps. `--kind` selects the scenario family (the kinds are built in `acc_scenario_factory.py`) |
+| `scripts/carla/devel/sweep_acc_scenarios.py` | Grid sweeps. `--kind` selects the scenario family (the kinds are built in `acc_scenario_factory.py`). `--cells-json` runs a given list of scenarios instead of the grid, e.g. randomly drawn ones for calibration; the other grid flags must then be single-valued |
 | `scripts/carla/devel/watch_acc_sweep.py` | Watchdog that restarts a sweep after a CARLA crash or stall. It counts and cleans up only the CARLA servers in its own sweep's port range (`--carla-port-span`), so several sweeps can share the machine (§6) |
 | `scripts/carla/devel/aggregate_cutin_table.py` | Metrics and tables. **Its docstring is the definition of record for every metric** |
 | `scripts/carla/devel/animate_acc_stdan_scenario.py` | Renders one run: scene, predicted intentions, mode probabilities, control panel |
