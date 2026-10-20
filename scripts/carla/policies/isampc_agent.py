@@ -56,6 +56,23 @@ planned state at Ts the same way.  (Issuing the first step's mean acceleration a
 reading the jerk state back from tick-to-tick command differences was unstable:
 a 20 Hz difference is four times the per-step rate the plan expects, and the loop
 settled into a +/-3 m/s^2 cycle at the jerk limit, offline and in CARLA.)
+
+``ainput`` (2026-10-20, ``acc_isampc_ainput_rmove1000``) is an appendix ablation:
+acceleration as the input with the fork's own jerk penalty, to isolate the effect of
+Zhou's snap input; the default snap path above is the baseline.  State (s, v), input
+a_k (k = 0..N-1), the fork's double integrator (``acc_dynamics_matrices``).  Zhou's
+terms stay -- 0.5 sum a_k^2 + (v_N - v_ref)^2 + 0.055 sum rho^2, the soft standoff
+row, the speed projection, epsilon, the occupancy box -- and the snap cost becomes
+``NairACCSMPC``'s jerk terms: r_move (a_0 - u_prev)^2 against the issued command
+u_prev and r_jerk ((a_k - a_{k-1}) / dt)^2 for k >= 1, with r_jerk and r_move taken
+from the parent agent's ``controller_config`` as D-opt gets them (r_jerk 10;
+``rmove<w>`` sets r_move, which is otherwise the config's r_jerk / dt^2 = 250 at
+dt = 0.2, fixed when the config is built, so ``rjerk<w>`` alone leaves it at 250),
+and the fork's hard jerk limit on a_0 - u_prev over the command interval and on
+a_k - a_{k-1} over dt.  The command is a_0 through the agent's limiter, as for D-opt.
+D-opt's QP sums its whole tracking block, these terms included, over three identical
+samples (no K feedback), so its absolute price is 3 r_jerk and 3 r_move against its
+5000 slack weight; here they enter once.
 """
 from __future__ import annotations
 
@@ -72,7 +89,7 @@ sys.path.append(scriptdir)
 rootdir = os.path.abspath(__file__).split('scripts')[0]
 sys.path.append(rootdir)
 from policies.acc_nair_smpc_agent import ACCNairSMPCAgent  # noqa: E402  (also sets GUROBI_VERSION)
-from utils.acc_nair_smpc import NairACCConfig  # noqa: E402
+from utils.acc_nair_smpc import NairACCConfig, acc_dynamics_matrices  # noqa: E402
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import normalize_probabilities  # noqa: E402
 
 # Zhou et al., CASE_1_ISAMPC_SIM/main.ipynb (opts_EV) -- CASE_3 sweeps epsilon over
@@ -145,7 +162,8 @@ class ISAMPCPlanner:
                  time_headway=NairACCConfig.time_headway, l_veh=ZHOU_L_VEH, w_veh=ZHOU_W_VEH,
                  zeta_l=0.0, zeta_w=ZHOU_ZETA_W, k_lon=ZHOU_K_LON_EV,
                  q_snap=ZHOU_Q_SNAP, q_accel=ZHOU_Q_ACCEL, q_terminal_v=ZHOU_Q_TERMINAL_V,
-                 q_slack=ZHOU_Q_SLACK, gurobi_time_limit=0.15, solver_tol=1.0e-4):
+                 q_slack=ZHOU_Q_SLACK, gurobi_time_limit=0.15, solver_tol=1.0e-4,
+                 accel_input=False, r_jerk=None, r_move=None):
         self.N = int(horizon)
         self.dt = float(dt)
         self.v_des = float(v_des)
@@ -160,10 +178,18 @@ class ISAMPCPlanner:
         self.zeta_l, self.zeta_w = float(zeta_l), float(zeta_w)
         self.weights = {"q_snap": float(q_snap), "q_accel": float(q_accel),
                         "q_terminal_v": float(q_terminal_v), "q_slack": float(q_slack)}
+        # ``ainput``: acceleration is the input and the fork's jerk terms replace the snap cost
+        self.accel_input = bool(accel_input)
+        if self.accel_input:
+            del self.weights["q_snap"]
+            self.weights.update({"r_jerk": float(r_jerk), "r_move": float(r_move)})
         self._lon_a, self._lon_b = lon_tracker_matrices(self.dt, k_lon)
         self._gurobi_time_limit = gurobi_time_limit
         self._solver_tol = float(solver_tol)
-        self._build_qp()
+        if self.accel_input:
+            self._build_accel_qp()
+        else:
+            self._build_qp()
 
     # ------------------------------------------------------------------ occupancy
     def target_occupancy(self, target):
@@ -237,25 +263,74 @@ class ISAMPCPlanner:
         cost = (w["q_snap"] * ca.sumsqr(U) + w["q_accel"] * ca.sumsqr(a)
                 + w["q_terminal_v"] * (X[1, N] - VREF) ** 2 + w["q_slack"] * ca.sumsqr(RHO))
         opti.minimize(cost)
+        self._set_gurobi(opti)
+        self._qp = {"opti": opti, "X": X, "U": U, "RHO": RHO, "X0": X0, "VREF": VREF, "XDV": XDV, "cost": cost}
+
+    def _build_accel_qp(self):
+        """``ainput``: the QP above with acceleration as the input and the fork's jerk terms.
+
+        Dynamics are ``acc_dynamics_matrices``; the jerk terms and limits are
+        ``NairACCSMPC``'s (cached feedback QP, ``_get_open_loop_fixed_qp``,
+        ``_add_symbolic_jerk_constraints``): step 0 is priced r_move (a_0 - u_prev)^2
+        against the issued command and bounded over the command interval, step k >= 1
+        is priced r_jerk ((a_k - a_{k-1}) / dt)^2 and bounded over dt."""
+        N, T = self.N, self.dt
+        a_dyn, b_dyn = acc_dynamics_matrices(T)
+        opti = ca.Opti("conic")
+        X = opti.variable(2, N + 1)          # s, v
+        U = opti.variable(N)                 # acceleration a_0 .. a_{N-1}
+        RHO = opti.variable(N)
+        X0 = opti.parameter(2)
+        VREF = opti.parameter()
+        XDV = opti.parameter(N)              # occupancy rear edge, steps 1..N
+        UPREV = opti.parameter()             # the issued command the plan continues from
+        CMD_DT = opti.parameter()            # the interval until a_0 is issued
+        opti.subject_to(X[:, 0] == X0)
+        for k in range(N):
+            # x_{k+1} = A x_k + B a_k with A = [[1, dt], [0, 1]], B = [dt^2 / 2, dt]; row by
+            # row so no zero coefficients reach Gurobi
+            opti.subject_to(X[0, k + 1] == X[0, k] + float(a_dyn[0, 1]) * X[1, k] + float(b_dyn[0, 0]) * U[k])
+            opti.subject_to(X[1, k + 1] == X[1, k] + float(b_dyn[1, 0]) * U[k])
+        s, v = X[0, 1:], X[1, 1:]
+        opti.subject_to(opti.bounded(self.v_min, v, self.v_max))
+        opti.subject_to(opti.bounded(self.a_min, U, self.a_max))
+        if self.jerk_limit is not None:
+            opti.subject_to(U[0] - UPREV <= self.jerk_limit * CMD_DT)
+            opti.subject_to(UPREV - U[0] <= self.jerk_limit * CMD_DT)
+            opti.subject_to(opti.bounded(-self.jerk_limit * T, U[1:] - U[:-1], self.jerk_limit * T))
+        opti.subject_to(v * self.time_headway - RHO.T <= XDV.T - s - (self.vehicle_length + self.d0))
+        opti.subject_to(RHO >= 0.0)
+        w = self.weights
+        cost = (w["q_accel"] * ca.sumsqr(U) + w["q_terminal_v"] * (X[1, N] - VREF) ** 2
+                + w["q_slack"] * ca.sumsqr(RHO)
+                + w["r_move"] * (U[0] - UPREV) ** 2 + w["r_jerk"] * ca.sumsqr((U[1:] - U[:-1]) / T))
+        opti.minimize(cost)
+        self._set_gurobi(opti)
+        self._qp = {"opti": opti, "X": X, "U": U, "RHO": RHO, "X0": X0, "VREF": VREF, "XDV": XDV,
+                    "UPREV": UPREV, "CMD_DT": CMD_DT, "cost": cost}
+
+    def _set_gurobi(self, opti):
         s_opts = {"OutputFlag": 0, "FeasibilityTol": self._solver_tol, "OptimalityTol": self._solver_tol,
                   "BarConvTol": self._solver_tol, "BarQCPConvTol": self._solver_tol,
                   "PSDTol": max(self._solver_tol, 1.0e-9)}
         if self._gurobi_time_limit is not None:
             s_opts["TimeLimit"] = float(self._gurobi_time_limit)
         opti.solver("gurobi", {"error_on_fail": 0}, s_opts)
-        self._qp = {"opti": opti, "X": X, "U": U, "RHO": RHO, "X0": X0, "VREF": VREF, "XDV": XDV, "cost": cost}
 
-    def solve_mpc(self, x0, v_ref, x_dv):
+    def solve_mpc(self, x0, v_ref, x_dv, u_prev=None, command_dt=None):
         q = self._qp
         q["opti"].set_value(q["X0"], np.asarray(x0, dtype=float))
         q["opti"].set_value(q["VREF"], float(v_ref))
         q["opti"].set_value(q["XDV"], np.asarray(x_dv, dtype=float))
+        if self.accel_input:
+            q["opti"].set_value(q["UPREV"], float(u_prev))
+            q["opti"].set_value(q["CMD_DT"], float(command_dt))
         try:
             sol = q["opti"].solve()
         except Exception as exc:  # Gurobi failure -> the caller falls back
             return None, "gurobi_failed: %r" % (exc,)
         status = str(q["opti"].return_status())
-        return ({"X": np.asarray(sol.value(q["X"]), dtype=float).reshape(4, self.N + 1),
+        return ({"X": np.asarray(sol.value(q["X"]), dtype=float).reshape(-1, self.N + 1),
                  "U": np.asarray(sol.value(q["U"]), dtype=float).reshape(-1),
                  "rho": np.asarray(sol.value(q["RHO"]), dtype=float).reshape(-1),
                  "cost": float(sol.value(q["cost"])), "status": status},
@@ -267,7 +342,10 @@ class ISAMPCPlanner:
 
         ``accel_raw`` is the planned acceleration ``command_dt`` (default: one MPC
         step) into the plan and ``jerk_next`` the jerk state there; the caller
-        feeds both back as the next solve's (a, j)."""
+        feeds both back as the next solve's (a, j).  With ``accel_input`` ``a`` is
+        the issued command the plan continues from (clipped to the bounds, as
+        ``NairACCSMPC._set_command_context`` does), ``j`` is unused and
+        ``accel_raw`` is the first planned acceleration a_0."""
         tau = self.dt if command_dt is None else max(float(command_dt), 1.0e-6)
         t0 = time.time()
         occupancies = [self.target_occupancy(t) for t in targets if float(t["s0"]) >= float(s)]
@@ -279,9 +357,14 @@ class ISAMPCPlanner:
         v_ref, v_up, binding = self.project_speed(s, v, a, d_ego, occupancies)
         t2 = time.time()
         x_dv_qp = np.where(np.isfinite(x_dv), x_dv, float(s) + 1.0e4)
-        sol, message = self.solve_mpc([s, v, a, j], v_ref, x_dv_qp)
+        if self.accel_input:
+            sol, message = self.solve_mpc([s, v], v_ref, x_dv_qp,
+                                          u_prev=float(np.clip(a, self.a_min, self.a_max)), command_dt=tau)
+        else:
+            sol, message = self.solve_mpc([s, v, a, j], v_ref, x_dv_qp)
         t3 = time.time()
-        out = {"v_ref": float(v_ref), "v_up_raw": float(v_up), "v_pri": self.v_des, "binding": binding,
+        out = {"input": "accel" if self.accel_input else "snap",
+               "v_ref": float(v_ref), "v_up_raw": float(v_up), "v_pri": self.v_des, "binding": binding,
                "x_dv": [None if not np.isfinite(x) else float(x) for x in x_dv],
                "occupancies": occupancies, "solver_message": message,
                "timing": {"occupancy": t1 - t0, "projection": t2 - t1, "qp": t3 - t2}}
@@ -295,8 +378,13 @@ class ISAMPCPlanner:
         X, U = sol["X"], sol["U"]
         margin = x_dv - X[0, 1:] - (self.vehicle_length + self.d0) - self.time_headway * X[1, 1:]
         finite = np.isfinite(margin)
-        out.update({"accel_raw": float(a + j * tau + 0.5 * U[0] * tau ** 2),
-                    "jerk_next": self._clip_jerk(j + U[0] * tau),
+        if self.accel_input:
+            # a_0 is the command, as for the fork's controllers; no snap chain to advance
+            accel_raw, jerk_next = float(U[0]), self._clip_jerk((U[0] - a) / tau)
+        else:
+            accel_raw, jerk_next = float(a + j * tau + 0.5 * U[0] * tau ** 2), self._clip_jerk(j + U[0] * tau)
+        out.update({"accel_raw": accel_raw,
+                    "jerk_next": jerk_next,
                     "status": sol["status"], "solve_path": "isampc_gurobi_qp",
                     "feasible": sol["status"].upper() == "OPTIMAL",
                     "X": X, "U": sol["U"], "rho": sol["rho"], "cost": sol["cost"],
@@ -348,7 +436,10 @@ class ISAMPCAgent(ACCNairSMPCAgent):
     Reuses the ACC agent's lane reference, lane-keeping steering, ideal actuator,
     prediction bundle (IAIMM-KF adapter, trackings, ``stdan_debug`` logging) and
     command limiter; only the planner and the per-step log differ.  The policy
-    string is ``acc_isampc``; its predictor is always the IAIMM-KF.
+    string is ``acc_isampc``; its predictor is always the IAIMM-KF.  ``ainput``
+    selects the acceleration-input ablation QP, priced with the ``r_jerk`` /
+    ``r_move`` the parent reads into ``controller_config`` (``rjerk<w>`` /
+    ``rmove<w>``), as for D-opt.
     """
 
     def __init__(self, vehicle, goal_location, nominal_speed_mps=8.0, dt=0.2, N=8,
@@ -361,12 +452,18 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             a_min=cfg.a_min, a_max=cfg.a_max, jerk_limit=cfg.jerk_limit,
             v_min=cfg.v_min, v_max=cfg.v_max, lane_half_width=self.EGO_LANE_HALF_WIDTH_M,
             vehicle_length=cfg.vehicle_length, d0=cfg.d0, time_headway=cfg.time_headway,
-            gurobi_time_limit=cfg.gurobi_time_limit)
+            gurobi_time_limit=cfg.gurobi_time_limit,
+            accel_input=self._parse_accel_input(smpc_config), r_jerk=cfg.r_jerk, r_move=cfg.r_move)
         self._prev_command_jerk = 0.0
 
     @staticmethod
     def _parse_predictor_type(smpc_config):
         return "iaimm_kf"
+
+    @staticmethod
+    def _parse_accel_input(smpc_config):
+        """Read ``ainput`` from the config string (False = Zhou's snap input)."""
+        return "ainput" in str(smpc_config)
 
     def run_step(self, pred_dict):
         del pred_dict
@@ -469,6 +566,9 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             "vehicle_length": p.vehicle_length,
             "d0": p.d0,
             "time_headway": p.time_headway,
+            "input": "accel" if p.accel_input else "snap",
+            "r_jerk": p.weights.get("r_jerk"),
+            "r_move": p.weights.get("r_move"),
             "weights": dict(p.weights),
             "l_veh": p.l_veh,
             "w_veh": p.w_veh,
@@ -487,7 +587,7 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             u_nom = np.full((1, n), previous_accel_cmd)
         else:
             x_nom = plan["X"][:2].T[None]
-            u_nom = plan["X"][2, 1:][None]
+            u_nom = (plan["X"][2, 1:] if plan["input"] == "snap" else plan["U"])[None]
         return {
             "s_ref": x_nom[:, :, 0].round(4).tolist(),
             "v_ref": [[plan["v_ref"]] * (n + 1)],
@@ -497,8 +597,7 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             "u_nominal": u_nom.round(4).tolist(),
         }
 
-    @staticmethod
-    def _isampc_debug(plan, targets):
+    def _isampc_debug(self, plan, targets):
         occ_rows = []
         for occ in plan["occupancies"]:
             occ_rows.append({
@@ -510,7 +609,11 @@ class ISAMPCAgent(ACCNairSMPCAgent):
                 "in_ego_lane": [bool(v) for v in occ["in_ego_lane"]],
                 "included_modes": [[int(j) for j in inc] for inc in occ["included_modes"]],
             })
+        snap = plan["input"] == "snap"
         return {
+            "input": plan["input"],
+            "r_jerk": self.planner.weights.get("r_jerk"),
+            "r_move": self.planner.weights.get("r_move"),
             "v_ref": plan["v_ref"],
             "v_up_raw": plan["v_up_raw"],
             "v_pri": plan["v_pri"],
@@ -521,8 +624,8 @@ class ISAMPCAgent(ACCNairSMPCAgent):
                         for t in targets],
             "occupancies": occ_rows,
             "rho": None if plan["rho"] is None else plan["rho"].round(4).tolist(),
-            "snap": None if plan["U"] is None else plan["U"].round(4).tolist(),
+            "snap": None if plan["U"] is None or not snap else plan["U"].round(4).tolist(),
             "planned_v": None if plan["X"] is None else plan["X"][1].round(4).tolist(),
-            "planned_a": None if plan["X"] is None else plan["X"][2].round(4).tolist(),
+            "planned_a": None if plan["X"] is None else (plan["X"][2] if snap else plan["U"]).round(4).tolist(),
             "cost": plan["cost"],
         }
