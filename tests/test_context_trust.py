@@ -15,6 +15,10 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "carla"))
 
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa: E402
+    CTX_GATE_P_MIN,
+    CTX_GATE_VY_MIN_HISTORY_S,
+    CTX_GATE_VY_MIN_MPS,
+    CTX_GATE_VY_WINDOW_S,
     CTX_LATERAL_CROSSING_M,
     CTX_LATERAL_NOISE_M,
     REL_EGO_LANE,
@@ -89,7 +93,8 @@ class TestContextTrustMixing(unittest.TestCase):
         mixed, info = mix_cutin_probability(raw, REL_LEFT_ADJACENT, 0.5, 0.05)
         np.testing.assert_allclose(mixed, [0.55, 0.1, 0.35])
         self.assertAlmostEqual(float(np.sum(mixed)), 1.0)
-        self.assertEqual(info, {"lambda": 0.5, "y_v": 0.05, "o_v": 0.0, "p_raw": 0.7, "p_mixed": 0.35})
+        self.assertEqual(info, {"lambda": 0.5, "y_v": 0.05, "o_v": 0.0, "p_raw": 0.7, "p_mixed": 0.35,
+                                "v_y": None, "trigger": None, "latched": None})
         np.testing.assert_allclose(raw, [0.2, 0.1, 0.7], err_msg="the input is not modified")
         # Right-adjacent: LLC (index 1); o_v = 0.5 halfway between the two offsets.
         mid = 0.5 * (CTX_LATERAL_NOISE_M + CTX_LATERAL_CROSSING_M)
@@ -222,6 +227,201 @@ class TestContextTrustToken(unittest.TestCase):
         self.assertAlmostEqual(agent._lateral_offset_toward_ego_lane(right, lane, REL_RIGHT_ADJACENT), -1.0)
         self.assertAlmostEqual(agent._lateral_offset_toward_ego_lane(left, lane, REL_LEFT_ADJACENT), -0.4)
         self.assertAlmostEqual(agent._lateral_offset_toward_ego_lane(left, lane, REL_RIGHT_ADJACENT), 0.4)
+
+
+class TestLatchedLateralGate(unittest.TestCase):
+    """``latgate``: g_v = 1 once the vehicle is past y_0, moving toward the ego lane
+    at >= 0.2 m/s and predicted at p_S >= 0.9, held while it stays past y_0."""
+
+    RAW = np.array([0.05, 0.05, 0.9])   # left-adjacent: RLC (index 2) is the cut-in direction
+    Y_ON = CTX_LATERAL_NOISE_M + 0.05
+    Y_OFF = CTX_LATERAL_NOISE_M - 0.05
+
+    def _mix(self, raw=None, y_v=None, v_y=None, latched=False, lam=1.0, relation=REL_LEFT_ADJACENT):
+        return mix_cutin_probability(self.RAW if raw is None else raw, relation, lam,
+                                     self.Y_ON if y_v is None else y_v,
+                                     lateral_speed_mps=v_y, latched=latched, lateral_gate=True)
+
+    def test_trigger_truth_table(self):
+        p_on, p_off = CTX_GATE_P_MIN, CTX_GATE_P_MIN - 0.01
+        v_on, v_off = CTX_GATE_VY_MIN_MPS, CTX_GATE_VY_MIN_MPS - 0.01
+        for y_v in (self.Y_ON, self.Y_OFF, CTX_LATERAL_NOISE_M):
+            for v_y in (v_on, v_off, None, 1.5):
+                for p in (p_on, p_off, 0.999):
+                    raw = np.array([(1.0 - p) / 2.0, (1.0 - p) / 2.0, p])
+                    _, info = self._mix(raw, y_v=y_v, v_y=v_y)
+                    expect = (y_v > CTX_LATERAL_NOISE_M) and (v_y is not None and v_y >= CTX_GATE_VY_MIN_MPS) \
+                        and (p >= CTX_GATE_P_MIN)
+                    self.assertEqual(info["trigger"], expect, (y_v, v_y, p))
+                    self.assertEqual(info["latched"], expect)
+                    self.assertEqual(info["o_v"], 1.0 if expect else 0.0)
+                    self.assertEqual(info["v_y"], v_y)
+        # The right-adjacent vehicle's cut-in direction is LLC (index 1).
+        _, info = self._mix(np.array([0.05, 0.9, 0.05]), v_y=0.5, relation=REL_RIGHT_ADJACENT)
+        self.assertTrue(info["trigger"])
+        _, info = self._mix(np.array([0.05, 0.05, 0.9]), v_y=0.5, relation=REL_RIGHT_ADJACENT)
+        self.assertFalse(info["trigger"], "p_S is the cut-in-direction intention, not the other one")
+
+    def test_the_latch_holds_past_the_noise_offset_and_releases_below_it(self):
+        # Latched last tick, no trigger now (slow, or p dropped): still past y_0 -> held.
+        for raw, v_y in ((self.RAW, 0.0), (np.array([0.6, 0.1, 0.3]), 1.0), (self.RAW, None)):
+            mixed, info = self._mix(raw, v_y=v_y, latched=True)
+            self.assertFalse(info["trigger"])
+            self.assertTrue(info["latched"])
+            self.assertEqual(info["o_v"], 1.0)
+            np.testing.assert_allclose(mixed, raw, err_msg="lambda = 1 with g_v = 1 keeps p_S")
+        # Back inside the noise band: released even with lateral speed and a confident predictor.
+        mixed, info = self._mix(y_v=self.Y_OFF, v_y=1.0, latched=True)
+        self.assertFalse(info["latched"])
+        self.assertEqual(info["o_v"], 0.0)
+        np.testing.assert_allclose(mixed, [0.95, 0.05, 0.0])
+        # Not latched and no trigger: nothing is believed.
+        _, info = self._mix(v_y=0.0, latched=False)
+        self.assertFalse(info["latched"])
+        self.assertEqual(info["o_v"], 0.0)
+
+    def test_lambda_zero_is_unchanged_by_the_gate(self):
+        for latched in (False, True):
+            for v_y in (None, 0.0, 1.0):
+                mixed, info = self._mix(v_y=v_y, latched=latched, lam=0.0)
+                np.testing.assert_array_equal(mixed, self.RAW)
+                self.assertEqual(info["p_mixed"], info["p_raw"])
+
+    def test_the_removed_mass_goes_to_lane_keeping(self):
+        raw = np.array([0.2, 0.1, 0.7])
+        for lam in (0.3, 0.5, 1.0):
+            for latched, v_y in ((False, 0.0), (True, 0.0), (False, 1.0)):
+                mixed, info = self._mix(raw, v_y=v_y, latched=latched, lam=lam)
+                g = info["o_v"]
+                self.assertIn(g, (0.0, 1.0))
+                self.assertAlmostEqual(mixed[2], 0.7 * ((1.0 - lam) + lam * g))
+                self.assertAlmostEqual(mixed[0], 0.2 + 0.7 - mixed[2])
+                self.assertAlmostEqual(mixed[1], 0.1, msg="away-direction intention untouched")
+                self.assertAlmostEqual(float(np.sum(mixed)), 1.0)
+        np.testing.assert_allclose(raw, [0.2, 0.1, 0.7], err_msg="the input is not modified")
+
+    def test_without_latgate_the_ramp_is_bit_identical_to_the_previous_function(self):
+        def ramp(raw_probs, relation, context_trust, lateral_offset_m):
+            # mix_cutin_probability as committed before latgate (2026-10-19), verbatim.
+            probs = np.asarray(raw_probs, dtype=float).copy()
+            cutin_idx = {REL_LEFT_ADJACENT: 2, REL_RIGHT_ADJACENT: 1}.get(relation)
+            if cutin_idx is None or lateral_offset_m is None or probs.size < 3:
+                return probs
+            o_v = lateral_observation(lateral_offset_m)
+            p_raw = float(probs[cutin_idx])
+            p_mixed = p_raw * ((1.0 - float(context_trust)) + float(context_trust) * o_v)
+            probs[cutin_idx] = p_mixed
+            probs[0] += p_raw - p_mixed
+            return probs
+
+        raws = [np.array([0.2, 0.1, 0.7]), np.array([0.6, 0.3, 0.1]), np.array([1 / 3, 1 / 3, 1 / 3]),
+                np.array([0.01, 0.98, 0.01])]
+        n = 0
+        for relation in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT, REL_EGO_LANE):
+            for lam in (0.0, 0.1, 0.3, 0.5, 0.6, 0.8, 1.0):
+                for y_v in list(np.linspace(-0.5, 1.5, 41)) + [None, CTX_LATERAL_NOISE_M, CTX_LATERAL_CROSSING_M]:
+                    for raw in raws:
+                        expected = ramp(raw, relation, lam, y_v)
+                        # The gate inputs are ignored while the gate is off.
+                        for kwargs in ({}, {"lateral_speed_mps": 1.0, "latched": True, "lateral_gate": False}):
+                            mixed, info = mix_cutin_probability(raw, relation, lam, y_v, **kwargs)
+                            np.testing.assert_array_equal(mixed, expected)
+                            self.assertIsNone(info["trigger"])
+                            self.assertIsNone(info["latched"])
+                            n += 1
+        self.assertGreater(n, 5000)
+
+    def test_the_gate_reaches_the_processed_prediction(self):
+        raw = TestContextTrustMixing._raw([0.05, 0.05, 0.9])
+        process = TestContextTrustMixing()._process
+        common = dict(cutin_probability_threshold=0.1, cutin_chance_ref=0.6, context_trust=1.0,
+                      lateral_offset_m=self.Y_ON, lateral_gate=True)
+        unlatched = process(raw, lateral_speed_mps=0.0, **common)
+        self.assertIsNone(TestContextTrustMixing._mode(unlatched, "cutin"))
+        self.assertAlmostEqual(unlatched.raw_mode_prob["LK"], 0.95)
+        info = unlatched.branch_info["context_trust"]
+        self.assertEqual((info["v_y"], info["trigger"], info["latched"], info["o_v"]), (0.0, False, False, 0.0))
+        triggered = process(raw, lateral_speed_mps=0.5, **common)
+        self.assertAlmostEqual(TestContextTrustMixing._mode(triggered, "cutin").probability, 0.9)
+        self.assertTrue(triggered.branch_info["context_trust"]["trigger"])
+        held = process(raw, lateral_speed_mps=0.0, lateral_latched=True, **common)
+        self.assertAlmostEqual(TestContextTrustMixing._mode(held, "cutin").probability, 0.9)
+        info = held.branch_info["context_trust"]
+        self.assertEqual((info["trigger"], info["latched"]), (False, True))
+
+    def test_the_agent_reads_latgate_as_a_whole_token_that_needs_ctx(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent
+        agent = ACCNairSMPCAgent
+        base = TestContextTrustToken.BASE
+        self.assertTrue(agent._parse_lateral_gate(base + "_ctx1_latgate_rmove1000"))
+        self.assertTrue(agent._parse_lateral_gate(base + "_ctx0.5_latgate"))
+        self.assertFalse(agent._parse_lateral_gate(base + "_ctx1_rmove1000"))
+        self.assertFalse(agent._parse_lateral_gate(base + "_ctx1_latgate2_rmove1000"))
+        self.assertFalse(agent._parse_lateral_gate(base + "_ctx1_xlatgate_rmove1000"))
+        self.assertFalse(agent._parse_lateral_gate(base + "_ctx1_latgatex_rmove1000"))
+        # Every other parser reads the same with and without the token.
+        plain, with_gate = base + "_ctx0.5_rmove1000", base + "_ctx0.5_latgate_rmove1000"
+        for name in dir(agent):
+            if name.startswith("_parse_") and name not in ("_parse_lateral_gate", "_parse_controller_num_modes"):
+                self.assertEqual(getattr(agent, name)(plain), getattr(agent, name)(with_gate), name)
+
+        class _Vehicle:  # the check runs before anything else touches the vehicle
+            def get_world(self):
+                return None
+
+        with self.assertRaisesRegex(ValueError, "ctx<lambda>"):
+            ACCNairSMPCAgent(_Vehicle(), None, smpc_config=base + "_latgate_rmove1000")
+        with self.assertRaisesRegex(ValueError, "stdan_3int"):
+            ACCNairSMPCAgent(_Vehicle(), None,
+                             smpc_config="acc_nair_smpc_lstm_fixed_risk_nominal_safe_distance_ctx1_latgate_rmove1000")
+
+    def test_a_lane_flip_does_not_create_lateral_speed(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent
+
+        class _Vec:
+            def __init__(self, x, y):
+                self.x, self.y = x, y
+
+        class _Waypoint:
+            def __init__(self, x, y, yaw_deg):
+                self.transform = type("Transform", (), {})()
+                self.transform.location = _Vec(x, y)
+                self.transform.rotation = type("Rotation", (), {})()
+                self.transform.rotation.yaw = yaw_deg
+
+        # CARLA frame: a lane heading +y (yaw 90 deg) has the driver's right at -x.
+        lane_a, lane_b = _Waypoint(10.0, 0.0, 90.0), _Waypoint(6.5, 0.0, 90.0)   # 3.5 m apart
+        dt = 0.05
+        # Drifting right at 0.3 m/s while driving at 10 m/s; the lane assignment
+        # flips from lane_a to lane_b halfway through the window.
+        samples, offsets = [], []
+        for k in range(12):
+            t = 100.0 + k * dt
+            wp = lane_a if k < 6 else lane_b
+            loc = _Vec(10.0 - 0.3 * k * dt, 10.0 * k * dt)
+            samples.append((t, agent._lateral_speed_left(_Vec(-0.3, 10.0), wp)))
+            offsets.append(agent._lateral_offset_toward_ego_lane(loc, wp, REL_LEFT_ADJACENT))
+        self.assertTrue(all(abs(v + 0.3) < 1e-9 for _, v in samples), "left speed is -0.3 at every tick")
+        # A left-adjacent vehicle going right moves toward the ego lane: +0.3 m/s ...
+        v_y = agent._lateral_speed_toward_ego_lane(samples, samples[-1][0], REL_LEFT_ADJACENT)
+        self.assertAlmostEqual(v_y, 0.3)
+        self.assertAlmostEqual(agent._lateral_speed_toward_ego_lane(samples, samples[-1][0], REL_RIGHT_ADJACENT), -0.3)
+        # ... while the offset difference across the flip would read 3.5 m / 0.05 s = 70 m/s.
+        jumps = np.diff(offsets) / dt
+        self.assertGreater(np.abs(jumps).max(), 60.0)
+        # Only the samples in (t - window, t] count; fewer than the minimum history gives None.
+        n_min = int(round(CTX_GATE_VY_MIN_HISTORY_S / dt)) + 1
+        self.assertIsNone(agent._lateral_speed_toward_ego_lane(samples[:n_min - 1], samples[n_min - 2][0],
+                                                               REL_LEFT_ADJACENT))
+        self.assertAlmostEqual(agent._lateral_speed_toward_ego_lane(samples[:n_min], samples[n_min - 1][0],
+                                                                    REL_LEFT_ADJACENT), 0.3)
+        # Stale samples outside the window are ignored, even if they are the only ones.
+        later = samples[-1][0] + CTX_GATE_VY_WINDOW_S + 1.0
+        self.assertIsNone(agent._lateral_speed_toward_ego_lane(samples, later, REL_LEFT_ADJACENT))
+        # A speed-up lateral burst averaged over the window.
+        burst = [(100.0 + k * dt, -1.0 if k >= 6 else 0.0) for k in range(12)]
+        self.assertAlmostEqual(agent._lateral_speed_toward_ego_lane(burst, burst[-1][0], REL_LEFT_ADJACENT),
+                               6.0 / 10.0)
 
 
 class TestContextTrustLossEvents(unittest.TestCase):

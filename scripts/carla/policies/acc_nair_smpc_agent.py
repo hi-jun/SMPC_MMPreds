@@ -47,6 +47,8 @@ from utils.synthetic_lk_cutin_prediction import (
 from predictor.stdan_3int_signed_tcross_velint.acc_adapter import STDAN3IntACCAdapter
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import relation_from_waypoints
 from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
+    CTX_GATE_VY_MIN_HISTORY_S,
+    CTX_GATE_VY_WINDOW_S,
     INTENTION_NAMES,
     REL_EGO_LANE,
     REL_LEFT_ADJACENT,
@@ -133,6 +135,9 @@ class ACCNairSMPCAgent(object):
                 raise ValueError("ctx needs the stdan_3int predictor")
             if not 0.0 <= self.context_trust <= 1.0:
                 raise ValueError("ctx<lambda> takes lambda in [0, 1]")
+        self.lateral_gate = self._parse_lateral_gate(smpc_config)
+        if self.lateral_gate and self.context_trust is None:
+            raise ValueError("latgate replaces ctx<lambda>'s offset ramp; add ctx<lambda>")
         self.cutin_clearance_tlc_ref = self._parse_cutin_clearance_tlc_ref(smpc_config)
         self.gap_recovery_s = self._parse_gap_recovery_s(smpc_config)
         # Drive the ego as the exact double integrator the MPC models.  The
@@ -151,6 +156,12 @@ class ACCNairSMPCAgent(object):
         # previous cycle.  Read one step late because the recovery scale has to be
         # decided before the predictor that produces it runs.
         self._predicted_lane_entry_s = {}
+        # latgate: vehicle id -> [(time_s, lateral speed along its lane's left
+        # normal)] over the last CTX_GATE_VY_WINDOW_S, for every target; and
+        # vehicle id -> whether its lateral gate was latched at the previous tick
+        # (only vehicles processed as adjacent targets at that tick).
+        self._ctx_lateral_speed_samples = {}
+        self._ctx_latched = {}
         self.enable_wandb_logging = os.getenv("ACC_NAIR_WANDB", "0") == "1"
         self._wandb = None
         self.goal_location = goal_location
@@ -723,6 +734,10 @@ class ACCNairSMPCAgent(object):
         # Adjacent targets' measured lateral offset toward the ego lane, for
         # the context trust mixing (``ctx<lambda>``); empty when the token is off.
         target_lateral = {}
+        # latgate: their lateral speed toward the ego lane (None = too little
+        # history), from samples recorded for every target whatever its relation.
+        target_lateral_speed = {}
+        now = self._elapsed_seconds() if self.lateral_gate else None
         nearest_target = None
         carla_map = self.world.get_map()
         ego_wp = self.world.get_map().get_waypoint(
@@ -761,12 +776,23 @@ class ACCNairSMPCAgent(object):
             if relation != REL_EGO_LANE:
                 relation = self._relation_from_frenet_offset(d_tv)
             target_relations[actor.id] = relation
+            if now is not None and target_wp is not None:
+                self._record_lateral_speed_sample(
+                    actor.id, now, self._lateral_speed_left(actor.get_velocity(), target_wp))
             if (self.context_trust is not None and target_wp is not None
                     and relation in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT)):
                 target_lateral[actor.id] = self._lateral_offset_toward_ego_lane(
                     actor.get_location(), target_wp, relation)
+                if now is not None:
+                    target_lateral_speed[actor.id] = self._lateral_speed_toward_ego_lane(
+                        self._ctx_lateral_speed_samples.get(actor.id, []), now, relation)
             if nearest_target is None or s_tv - s_ego < nearest_target[0]:
                 nearest_target = (s_tv - s_ego, target_states[actor.id])
+        if now is not None:
+            # A target that left the loop (behind the ego, gone) starts over.
+            for vehicle_id in list(self._ctx_lateral_speed_samples):
+                if vehicle_id not in target_states:
+                    del self._ctx_lateral_speed_samples[vehicle_id]
 
         if not target_states:
             return None
@@ -808,6 +834,9 @@ class ACCNairSMPCAgent(object):
                 branch_floor_by_vehicle=branch_floor_by_vehicle,
                 context_trust=self.context_trust,
                 lateral_offsets=target_lateral,
+                lateral_speeds=target_lateral_speed,
+                lateral_latched=self._ctx_latched,
+                lateral_gate=self.lateral_gate,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -826,6 +855,8 @@ class ACCNairSMPCAgent(object):
         selected_target_state = nearest_target[1] if nearest_target is not None else np.array([s_ego, 0.0, speed])
         result["selected_target_state"] = selected_target_state
         self._cache_predicted_lane_entry(result.get("processed_targets", []))
+        if self.lateral_gate:
+            self._update_lateral_latch(result.get("processed_targets", []))
         result["debug"] = {
             "num_targets": len(target_states),
             "relations": target_relations,
@@ -1060,6 +1091,11 @@ class ACCNairSMPCAgent(object):
                     "ctx_o_v": ctx["o_v"],
                     "ctx_p_raw": ctx["p_raw"],
                     "ctx_p_mixed": ctx["p_mixed"],
+                    # latgate: lateral speed toward the ego lane, the trigger
+                    # and the latch (None without the token).
+                    "ctx_v_y": ctx["v_y"],
+                    "ctx_trigger": ctx["trigger"],
+                    "ctx_latched": ctx["latched"],
                 })
         return summaries
 
@@ -1150,6 +1186,23 @@ class ACCNairSMPCAgent(object):
                         np.clip(gap / max(full, 1.0e-6), 0.0, 1.0))
             elapsed[vehicle_id] = max(0.0, now - self._ego_lane_entry_time[vehicle_id])
         return elapsed, dict(self._gap_recovery_start_scale)
+
+    def _record_lateral_speed_sample(self, vehicle_id, time_s, lateral_speed_left):
+        """Append a target's left-normal lateral speed and drop samples older
+        than the ``latgate`` window."""
+        samples = self._ctx_lateral_speed_samples.setdefault(vehicle_id, [])
+        samples[:] = [(t, v) for t, v in samples if t > float(time_s) - CTX_GATE_VY_WINDOW_S]
+        samples.append((float(time_s), float(lateral_speed_left)))
+
+    def _update_lateral_latch(self, processed_targets):
+        """``latgate``: keep the latch of every target processed as adjacent this
+        tick; any other vehicle starts unlatched when it becomes adjacent again."""
+        latched = {}
+        for target in processed_targets:
+            ctx = target.branch_info.get("context_trust")
+            if ctx is not None and ctx.get("latched") is not None:
+                latched[int(target.vehicle_id)] = bool(ctx["latched"])
+        self._ctx_latched = latched
 
     def _update_agent_history(self):
         if self.agent_history is None:
@@ -1537,6 +1590,19 @@ class ACCNairSMPCAgent(object):
         return float(match.group(1)) if match else None
 
     @staticmethod
+    def _parse_lateral_gate(smpc_config):
+        """Read ``latgate`` from the config string (False = ``ctx``'s offset ramp).
+
+        With it ``ctx<lambda>`` reads a latched lateral gate instead of the
+        offset ramp: a vehicle counts as moving laterally once it is past the
+        noise offset, moving toward the ego lane at >= 0.2 m/s over the last
+        0.5 s and predicted to cut in with p_S >= 0.9, and stays so while it is
+        past the noise offset.  Whole token only, like ``ctx<lambda>``.  See
+        ``acc_postprocess.mix_cutin_probability``.
+        """
+        return re.search(r"(?:^|_)latgate(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
     def _parse_lk_entry_as_cutin(smpc_config):
         """Read ``trajcutin`` from the config string (False = map by label).
 
@@ -1605,6 +1671,36 @@ class ACCNairSMPCAgent(object):
         dy = -float(location.y) + float(centre.y)
         d_left = -np.sin(psi) * dx + np.cos(psi) * dy
         return float(-d_left if relation == REL_LEFT_ADJACENT else d_left)
+
+    @staticmethod
+    def _lateral_speed_left(velocity, waypoint):
+        """A vehicle's velocity [m/s] along the left normal of its own lane's
+        heading, in the right-handed frame of ``_lateral_offset_toward_ego_lane``.
+
+        The projection reads only the lane heading, so it is continuous when
+        the lane assignment flips; differencing the offset from the lane centre
+        would jump by a lane width there.  The ego path's Frenet d is not used
+        either: near the Town04 segment boundary it shifts ~1.5 m against the
+        adjacent lanes, and a position chord on a curve would add R(1 - cos).
+        """
+        psi = -fth.fix_angle(np.radians(waypoint.transform.rotation.yaw))
+        vx = float(velocity.x)
+        vy = -float(velocity.y)
+        return float(-np.sin(psi) * vx + np.cos(psi) * vy)
+
+    @staticmethod
+    def _lateral_speed_toward_ego_lane(samples, time_s, relation):
+        """``latgate``'s v_y: the mean of the ``(time_s, left-normal speed)``
+        samples in the last ``CTX_GATE_VY_WINDOW_S``, signed toward the ego lane
+        like ``_lateral_offset_toward_ego_lane``; None with less than
+        ``CTX_GATE_VY_MIN_HISTORY_S`` of history.
+        """
+        window = [(t, v) for t, v in samples
+                  if float(time_s) - CTX_GATE_VY_WINDOW_S < t <= float(time_s)]
+        if not window or float(time_s) - window[0][0] < CTX_GATE_VY_MIN_HISTORY_S - 1.0e-6:
+            return None
+        v_left = float(np.mean([v for _, v in window]))
+        return float(-v_left if relation == REL_LEFT_ADJACENT else v_left)
 
     @staticmethod
     def _lane_keeping_steer(ey, epsi):

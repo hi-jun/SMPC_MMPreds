@@ -293,6 +293,14 @@ CTX_LATERAL_NOISE_M = 0.10
 #: Lateral offset at which the body starts crossing the lane line (o_v = 1): lane
 #: half-width 1.75 m minus half a car width ~0.9 m.
 CTX_LATERAL_CROSSING_M = 0.85
+#: ``latgate``: raw cut-in-direction intention p_S at or above which the lateral gate can trigger.
+CTX_GATE_P_MIN = 0.9
+#: ``latgate``: lateral speed toward the ego lane [m/s] at or above which the gate can trigger.
+CTX_GATE_VY_MIN_MPS = 0.2
+#: ``latgate``: the lateral speed is averaged over this long [s] (5 frames at 10 Hz).
+CTX_GATE_VY_WINDOW_S = 0.5
+#: ``latgate``: with less history [s] than this the lateral speed is unknown and the gate cannot trigger.
+CTX_GATE_VY_MIN_HISTORY_S = 0.45
 
 
 def lateral_observation(lateral_offset_m: float) -> float:
@@ -310,6 +318,9 @@ def mix_cutin_probability(
     relation: str,
     context_trust: float,
     lateral_offset_m: Optional[float],
+    lateral_speed_mps: Optional[float] = None,
+    latched: bool = False,
+    lateral_gate: bool = False,
 ) -> tuple[np.ndarray, Dict[str, object]]:
     """Context trust ``lambda`` (token ``ctx<lambda>``): trust the predictor's
     interaction context less, the measured lateral motion more.
@@ -326,18 +337,38 @@ def mix_cutin_probability(
     ``branchdec`` all read the mixed value.  Vehicles off the adjacent lanes, and
     an adjacent vehicle without a measured offset, are untouched.
 
+    With ``lateral_gate`` (token ``latgate``) the ramp is replaced by a latched
+    gate ``g_v`` in {0, 1}: the vehicle triggers when it is past ``y_0`` toward
+    the ego lane, its lateral speed toward it (``lateral_speed_mps``, averaged
+    over ``CTX_GATE_VY_WINDOW_S``; ``None`` = unknown, never triggers) is at
+    least ``CTX_GATE_VY_MIN_MPS`` and ``p_S`` is at least ``CTX_GATE_P_MIN``;
+    it stays latched (``latched`` is the previous tick's value, which the caller
+    keeps) while it is past ``y_0``.  On NGSIM the offset ramp alone fired on
+    many vehicles that never cut in; the gate asks for lateral motion and a
+    confident predictor at the same time (2026-10-21).
+
     Returns ``(probs, info)``; ``info`` holds what the log records (``lambda``,
-    ``y_v``, ``o_v``, ``p_raw``, ``p_mixed``; the last four ``None`` when nothing
-    was mixed).
+    ``y_v``, ``o_v``, ``p_raw``, ``p_mixed``, and with the gate ``v_y``,
+    ``trigger``, ``latched``; ``None`` when nothing was mixed).  ``o_v`` is the
+    factor actually used: the ramp value, or the gate's 0 / 1.
     """
     probs = np.asarray(raw_probs, dtype=float).copy()
     info = {"lambda": float(context_trust), "y_v": None, "o_v": None,
-            "p_raw": None, "p_mixed": None}
+            "p_raw": None, "p_mixed": None, "v_y": None, "trigger": None, "latched": None}
     cutin_idx = _labelled_cutin_index(relation)
     if cutin_idx is None or lateral_offset_m is None or probs.size < 3:
         return probs, info
-    o_v = lateral_observation(lateral_offset_m)
     p_raw = float(probs[cutin_idx])
+    if lateral_gate:
+        v_y = None if lateral_speed_mps is None else float(lateral_speed_mps)
+        past_noise = float(lateral_offset_m) > CTX_LATERAL_NOISE_M
+        trigger = bool(past_noise and v_y is not None and v_y >= CTX_GATE_VY_MIN_MPS
+                       and p_raw >= CTX_GATE_P_MIN)
+        latched = bool((bool(latched) or trigger) and past_noise)
+        o_v = 1.0 if latched else 0.0
+        info.update({"v_y": v_y, "trigger": trigger, "latched": latched})
+    else:
+        o_v = lateral_observation(lateral_offset_m)
     p_mixed = p_raw * ((1.0 - float(context_trust)) + float(context_trust) * o_v)
     probs[cutin_idx] = p_mixed
     probs[0] += p_raw - p_mixed
@@ -841,13 +872,18 @@ def process_vehicle_prediction(
     lk_entry_as_cutin: bool = False,
     context_trust: Optional[float] = None,
     lateral_offset_m: Optional[float] = None,
+    lateral_speed_mps: Optional[float] = None,
+    lateral_latched: bool = False,
+    lateral_gate: bool = False,
 ) -> ACCProcessedPrediction:
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     context_trust_info = None
     if context_trust is not None:
         # Before the mode mapping: everything below reads the mixed value.
         raw_probs, context_trust_info = mix_cutin_probability(
-            raw_probs, relation_to_ego_lane, context_trust, lateral_offset_m)
+            raw_probs, relation_to_ego_lane, context_trust, lateral_offset_m,
+            lateral_speed_mps=lateral_speed_mps, latched=lateral_latched,
+            lateral_gate=lateral_gate)
     raw_map = {name: float(raw_probs[idx]) for idx, name in enumerate(INTENTION_NAMES)}
     traj_frenet = np.asarray(raw_prediction["pred_traj_frenet"], dtype=float)
     raw_vel = np.asarray(raw_prediction.get("raw_pred_vel", np.zeros_like(traj_frenet)), dtype=float)

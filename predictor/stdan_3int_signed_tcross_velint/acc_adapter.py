@@ -504,6 +504,9 @@ class STDAN3IntACCAdapter:
         branch_floor_by_vehicle: Optional[Dict[int, int]] = None,
         context_trust: Optional[float] = None,
         lateral_offsets: Optional[Dict[int, float]] = None,
+        lateral_speeds: Optional[Dict[int, float]] = None,
+        lateral_latched: Optional[Dict[int, bool]] = None,
+        lateral_gate: bool = False,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -570,6 +573,12 @@ class STDAN3IntACCAdapter:
                     context_trust=context_trust,
                     lateral_offset_m=(
                         None if lateral_offsets is None else lateral_offsets.get(target_id)),
+                    lateral_speed_mps=(
+                        None if lateral_speeds is None else lateral_speeds.get(target_id)),
+                    lateral_latched=(
+                        False if lateral_latched is None
+                        else bool(lateral_latched.get(target_id, False))),
+                    lateral_gate=lateral_gate,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(
