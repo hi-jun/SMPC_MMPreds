@@ -121,6 +121,10 @@ cut-in 응답
    (acc_mode_prob)에서 cutin 이 다른 모드 이상인지, cut-in 라벨이 없는 단일 모드
    LSTM 은 그 궤적이 지평선 끝 3 스텝 ego 차선 안인지로 본다. 진입 직전에 cut-in 이
    가장 큰 모드가 아니면 None. 진입이 없는 런(무컷인)도 None.
+   예측기가 없는 PC-ACC(acc_pcacc, 2026-10-21)는 자기 차선 소속 규칙(Def. II.3: 횡 오프셋과
+   헤딩)이 TV 를 ego 차선 차량으로 셈한 상태(policy_log 의 pcacc.vehicles[*].member, 역할
+   target_cutin)를 "cut-in 이 가장 큰 모드"로 읽는다 — 그 규칙이 넘어오기 전에 TV 에 반응하기
+   시작한 시점부터 진입까지다. 옆 차선 여부는 그 행의 same_lane 이 아닌 틱.
    옛 판정 — 지평선 끝 3 스텝이 ego 차선 안인 모드들의 확률합이 0.5 이상인 상태가
    1.0 s 이상 이어지는 **첫** 시점 — 은 t_pred_call / dt_ant_call 로 남긴다. 옛 판정은
    일찍 잠깐 올랐다 떨어진 구간도 잡았다. cut-out 의 t_pred 는 바꾸지 않았다.
@@ -541,6 +545,16 @@ def _target_cutin_max(steps, s_target, d_target):
     adjacent = np.zeros(len(steps), dtype=bool)
     is_max = np.zeros(len(steps), dtype=bool)
     for i, step in enumerate(steps):
+        pcacc = step.get("pcacc")
+        if pcacc is not None:
+            # PC-ACC has no predictor: its own lane-membership rule is the cut-in call.
+            row = next((r for r in pcacc.get("vehicles") or []
+                        if str(r.get("role", "")).startswith("target_cutin")), None)
+            if row is None or row.get("same_lane"):
+                continue
+            adjacent[i] = True
+            is_max[i] = bool(row.get("member"))
+            continue
         target = _nearest_target(step, s_target[i], d_target[i])
         if target is None or target.get("relation_to_ego_lane") == "ego_lane":
             continue
