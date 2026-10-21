@@ -108,7 +108,7 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
     def __init__(self, history=3.0, future=3.0, dt=0.1, call_dt=0.05, lane_width=3.5,
                  params_path=None, k_sampling=30, seed=0, l_veh=4.3, w_veh=1.8, kf_dt=0.3,
                  lat_speedup=1.0, q_lat_scale=1.0, weight=(0.1, 0.3, 0.1, 0.5), trans_eps=0.25,
-                 proj_horizon_s=None):
+                 proj_horizon_s=None, lane_geometry=None):
         """Tuning knobs (defaults = Zhou's values):
         lat_speedup   time-scales the lane-change models (k0, k1, k2 -> a^3 k0, a^2 k1, a k2), so a
                       lane change takes 1/a of the highD-identified duration;
@@ -116,7 +116,13 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
         weight        manoeuvre-cost weights on ax^2, ay^2, (v_ref - v)^2, (y_ref - y)^2;
         trans_eps     per-0.32 s probability of switching manoeuvre;
         proj_horizon_s horizon of the collision-free speed projection and manoeuvre cost
-                      (Zhou: 8 s); the output trajectories keep ``future``."""
+                      (Zhou: 8 s); the output trajectories keep ``future``.
+        lane_geometry optional road model: a callable ``(s, d) -> (lane, centres)`` giving, for a
+                      vehicle at Frenet ``(s, d)``, its lane index and a dict of the lateral
+                      centres ``d`` of the lanes at offsets -1, 0, +1 from it (+1 = the lane on the
+                      +d side).  Default None: uniform lanes of ``lane_width`` centred at its
+                      multiples, i.e. ``lane = round(d / w)`` and ``(lane + k) w``, as on CARLA's
+                      Town04."""
         super().__init__(history=history, future=future, dt=dt, device="cpu", load_model=False, call_dt=call_dt)
         self.ckpt_path = Path(params_path) if params_path is not None else DEFAULT_PARAMS
         self.params = load_zhou_parameters(self.ckpt_path)
@@ -128,6 +134,7 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
                 if pr["kset_lat"] is not None:
                     pr["kset_lat"] = pr["kset_lat"] * np.array([a ** 3, a ** 2, a])
         self.lane_width = float(lane_width)
+        self.lane_geometry = lane_geometry
         self.k_sampling = int(k_sampling)
         self.l_veh = float(l_veh)
         self.w_veh = float(w_veh)
@@ -202,7 +209,7 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
         one ending furthest back gets the lowest remaining rank."""
         lanes = {}
         for cid, (s, v, d) in cars.items():
-            lanes.setdefault(int(round(d / self.lane_width)), []).append((s, s + v * horizon_s, cid))
+            lanes.setdefault(self._lane_of(s, d)[0], []).append((s, s + v * horizon_s, cid))
         ranked = []                                       # lowest priority first
         while any(lanes.values()):
             laggards = [min(entries) for entries in lanes.values() if entries]
@@ -213,6 +220,15 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
             ranked.append(pick[2])
         return ranked[::-1]
 
+    def _lane_of(self, s, d):
+        """Lane index of a vehicle at Frenet (s, d) and the lateral centres of the lanes at offsets
+        -1, 0, +1 from it (``lane_geometry``, or uniform lanes of ``lane_width``)."""
+        if self.lane_geometry is None:
+            lane = int(round(d / self.lane_width))
+            return lane, {k: (lane + k) * self.lane_width for k in (-1, 0, 1)}
+        lane, centres = self.lane_geometry(float(s), float(d))
+        return int(lane), {k: float(centres[k]) for k in (-1, 0, 1)}
+
     # ------------------------------------------------------------------ filter
     def _lateral_speed(self, history, fh):
         pts = np.asarray(history, dtype=float)[-2:]
@@ -220,8 +236,8 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
         return (d[-1] - d[0]) / self.dt if len(d) == 2 else 0.0
 
     def _step_vehicle(self, tid, y, history, fh, leaders):
-        n, tp, dt, w = self.n_proj, self.dt, self.kf_dt, self.lane_width
-        lane = int(round(y[2] / w))
+        n, tp, dt = self.n_proj, self.dt, self.kf_dt
+        lane, centres = self._lane_of(y[0], y[2])
         f = self._filters.get(tid)
         if f is None or f["lane"] != lane:
             x0 = f["fused"].copy() if f is not None else np.array([y[0], y[1], 0.0, y[2], self._lateral_speed(history, fh), 0.0])
@@ -230,7 +246,7 @@ class IAIMMKFACCAdapter(STDAN3IntACCAdapter):
                  "P": [np.eye(6) * 1e-6 for _ in range(3)], "lane": lane, "fused": x0.copy(),
                  "calls": self.kf_every}                     # force an update on the first call
         v_pri = float(y[1])                                  # free-flow reference: keep the present speed
-        y_ref = [(lane + LANE_OFFSET[i]) * w for i in range(3)]
+        y_ref = [centres[LANE_OFFSET[i]] for i in range(3)]
         f["calls"] += 1
         update = f["calls"] >= self.kf_every
         if update:

@@ -192,8 +192,9 @@ class ISAMPCPlanner:
             self._build_qp()
 
     # ------------------------------------------------------------------ occupancy
-    def target_occupancy(self, target):
-        """Per-step box of one target: dict of arrays over steps 1..N."""
+    def target_occupancy(self, target, ego_lane_bounds=None):
+        """Per-step box of one target: dict of arrays over steps 1..N.  ``ego_lane_bounds``
+        = (lo, hi) of the ego lane in d for the lane test (default +-lane_half_width)."""
         probs = np.asarray(target["probs"], dtype=float)
         s, d = np.asarray(target["s"], dtype=float), np.asarray(target["d"], dtype=float)
         var_s, var_d = np.asarray(target["var_s"], dtype=float), np.asarray(target["var_d"], dtype=float)
@@ -205,7 +206,9 @@ class ISAMPCPlanner:
             dx[k] = hs + self.zeta_l * self.l_veh
             dy[k] = hd + self.zeta_w * self.w_veh
             included.append(inc)
-        in_ego_lane = (y_bar - dy <= self.lane_half_width) & (y_bar + dy >= -self.lane_half_width)
+        lo, hi = ((-self.lane_half_width, self.lane_half_width) if ego_lane_bounds is None
+                  else (float(ego_lane_bounds[0]), float(ego_lane_bounds[1])))
+        in_ego_lane = (y_bar - dy <= hi) & (y_bar + dy >= lo)
         return {"vehicle_id": target.get("vehicle_id"), "x_bar": x_bar, "y_bar": y_bar,
                 "dx": dx, "dy": dy, "in_ego_lane": in_ego_lane, "included_modes": included}
 
@@ -337,7 +340,7 @@ class ISAMPCPlanner:
                 "gurobi_return_status=%s" % status)
 
     # ------------------------------------------------------------------ one tick
-    def plan(self, s, v, a, j, d_ego, targets, command_dt=None):
+    def plan(self, s, v, a, j, d_ego, targets, command_dt=None, ego_lane_bounds=None):
         """targets: dicts with s0, probs (M,), s/d/var_s/var_d (M, N) over steps 1..N.
 
         ``accel_raw`` is the planned acceleration ``command_dt`` (default: one MPC
@@ -345,10 +348,11 @@ class ISAMPCPlanner:
         feeds both back as the next solve's (a, j).  With ``accel_input`` ``a`` is
         the issued command the plan continues from (clipped to the bounds, as
         ``NairACCSMPC._set_command_context`` does), ``j`` is unused and
-        ``accel_raw`` is the first planned acceleration a_0."""
+        ``accel_raw`` is the first planned acceleration a_0.  ``ego_lane_bounds``
+        = (lo, hi) of the ego lane in d (default +-lane_half_width)."""
         tau = self.dt if command_dt is None else max(float(command_dt), 1.0e-6)
         t0 = time.time()
-        occupancies = [self.target_occupancy(t) for t in targets if float(t["s0"]) >= float(s)]
+        occupancies = [self.target_occupancy(t, ego_lane_bounds) for t in targets if float(t["s0"]) >= float(s)]
         x_dv = np.full(self.N, np.inf)
         for occ in occupancies:
             rear = occ["x_bar"] - occ["dx"]
