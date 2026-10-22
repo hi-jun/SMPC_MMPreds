@@ -159,6 +159,11 @@ cut-in 응답
            더 뺀다: 그 틱 뒤 3 s 안에 다른 차가 ego 차선의 30 m 앞(뒷범퍼 기준) 또는 ego 와 겹친
            자리로 들어오면 그 틱은 헛제동이 아니다. CARLA 무컷인 그룹에서는 차선 내 차량이 한 번도
            없어서(ctxcal_carla_20261020 무컷인 288 런 모두 has_inlane_lead 0) 두 정의의 값이 같다.
+  t_comp_ms (2026-10-22) = 제어 한 스텝의 계산 시간 [ms]: policy_log 스텝마다 solve_time +
+           predictor_time(예측기가 없는 PC-ACC 는 solve_time 만 -- 차선 판정 규칙 포함)을 더하고, 런의
+           전체 스텝에 대한 중앙값을 낸다. 평균이 아닌 이유: 캐시 QP 를 처음 만드는 스텝(시나리오 수마다
+           한 번, ~1 s)이 평균을 끌어올린다. 배치 실행(CARLA 네 줄 병렬) 중에 잰 값이라 단독 실행보다
+           크고, 같은 조건으로 돈 런끼리만 비교한다.
 
 03_no_cutin_decel (TV가 인접 차선에서 감속만 함) 추가 지표
   v_avg = 창 내 ego_v 평균, v_min, a_min, passed = 창 끝에서 s_ego > s_TV,
@@ -422,7 +427,7 @@ AGG_METRICS = ("a_avg", "a_avg_cmd", "a_min", "a_min_filt", "a_min_cmd",
                "delta_max_ev", "delta_avg_ev", "min_bumper_gap_ev", "v_avg_ev", "v_min_ev",
                "j_avg_filt_ev", "j_max_filt_ev", "T_rec_ev",
                "j_at_limit", "j_at_limit_ev", "ctx_miss", "ctx_unnec",
-               "floor_breach", "phantom_brake")
+               "floor_breach", "phantom_brake", "t_comp_ms")
 AGG_METRICS_CUTOUT = AGG_METRICS + (
     "gap_err_signed_avg", "gap_err_short_max", "gap_err_excess_max",
     "t_out_minus_trigger", "v_avg_window", "v_avg_post", "gap_at_trigger",
@@ -1032,6 +1037,9 @@ def collect_run(policy, group, run_dir, window_s=None, window_start_s=None,
         sum(1 for d in debug if d.get("fallback")) / float(len(steps)), 4)
     row["pred_error_steps"] = sum(1 for d in debug if d.get("reason"))
     row["slack_steps"] = sum(1 for s in steps if not s.get("feasible"))
+    comp = [float(s["solve_time"]) + float(s.get("predictor_time") or 0.0) for s in steps
+            if s.get("solve_time") is not None and np.isfinite(float(s["solve_time"]))]
+    row["t_comp_ms"] = round(1e3 * float(np.median(comp)), 2) if comp else None
     pairs = set()
     ego_hit = False
     for e in data.get("_collision_log", []):
