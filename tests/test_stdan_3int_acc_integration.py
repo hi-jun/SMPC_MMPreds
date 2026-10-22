@@ -1196,6 +1196,15 @@ class TestDecisionPointBranch(unittest.TestCase):
         other, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={1: 3}, **common)
         self.assertEqual(other.policy_tree.policy_split_steps, (6,))
 
+    def test_the_agent_reads_the_jlim_token(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent
+        base = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin"
+        self.assertIsNone(agent._parse_jerk_limit(base + "_rmove1000"))
+        policy = base + "_ctx0.4_latgate_rmove0_jlim1.5"
+        self.assertEqual(agent._parse_jerk_limit(policy), 1.5)
+        self.assertEqual(agent._parse_r_move(policy), 0.0)
+        self.assertIsNone(agent._parse_r_jerk(policy))
+
     def test_the_agent_reads_the_branchdec_token(self):
         from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent
         base = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6"

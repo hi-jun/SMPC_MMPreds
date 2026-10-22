@@ -190,6 +190,9 @@ class ACCNairSMPCAgent(object):
         r_move = self._parse_r_move(smpc_config)
         if r_move is not None:
             self.controller_config.r_move = r_move
+        jerk_limit = self._parse_jerk_limit(smpc_config)
+        if jerk_limit is not None:
+            self.controller_config.jerk_limit = jerk_limit
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -1492,6 +1495,18 @@ class ACCNairSMPCAgent(object):
         and costs the cut-out cells their anticipation.
         """
         match = re.search(r"rjerk([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_jerk_limit(smpc_config):
+        """Read ``jlim<value>`` from the config string (None = keep the default 5 m/s³).
+
+        The hard jerk bound [m/s³] on the first input (over the command
+        period), on every planned input change and on the issued command.
+        ``rmove0_jlim1.5`` replaces the step-0 move cost with upstream Nair's
+        ±1.5 m/s³ rate bound (hard here, soft upstream), 2026-10-22.
+        """
+        match = re.search(r"jlim([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else None
 
     @staticmethod
