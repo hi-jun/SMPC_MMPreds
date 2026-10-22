@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sys
 import time
 
@@ -443,7 +444,8 @@ class ISAMPCAgent(ACCNairSMPCAgent):
     string is ``acc_isampc``; its predictor is always the IAIMM-KF.  ``ainput``
     selects the acceleration-input ablation QP, priced with the ``r_jerk`` /
     ``r_move`` the parent reads into ``controller_config`` (``rjerk<w>`` /
-    ``rmove<w>``), as for D-opt.
+    ``rmove<w>``), as for D-opt.  ``qslack<w>`` (2026-10-22) sets the standoff
+    slack weight in place of Zhou's 0.055 (the NGSIM lab table uses 5).
     """
 
     def __init__(self, vehicle, goal_location, nominal_speed_mps=8.0, dt=0.2, N=8,
@@ -457,7 +459,8 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             v_min=cfg.v_min, v_max=cfg.v_max, lane_half_width=self.EGO_LANE_HALF_WIDTH_M,
             vehicle_length=cfg.vehicle_length, d0=cfg.d0, time_headway=cfg.time_headway,
             gurobi_time_limit=cfg.gurobi_time_limit,
-            accel_input=self._parse_accel_input(smpc_config), r_jerk=cfg.r_jerk, r_move=cfg.r_move)
+            accel_input=self._parse_accel_input(smpc_config), r_jerk=cfg.r_jerk, r_move=cfg.r_move,
+            q_slack=self._parse_q_slack(smpc_config))
         self._prev_command_jerk = 0.0
 
     @staticmethod
@@ -468,6 +471,12 @@ class ISAMPCAgent(ACCNairSMPCAgent):
     def _parse_accel_input(smpc_config):
         """Read ``ainput`` from the config string (False = Zhou's snap input)."""
         return "ainput" in str(smpc_config)
+
+    @staticmethod
+    def _parse_q_slack(smpc_config):
+        """Read ``qslack<w>`` from the config string (default: Zhou's 0.055)."""
+        match = re.search(r"qslack(\d+(?:\.\d+)?)", str(smpc_config))
+        return float(match.group(1)) if match else ZHOU_Q_SLACK
 
     def run_step(self, pred_dict):
         del pred_dict

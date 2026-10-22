@@ -361,6 +361,12 @@ class TestPolicyString(unittest.TestCase):
         self.assertEqual(cfg.r_jerk, 10.0)
         self.assertAlmostEqual(cfg.r_move, 250.0)
 
+    def test_qslack_sets_the_standoff_slack_weight(self):
+        self.assertEqual(ISAMPCAgent._parse_q_slack("acc_isampc"), 0.055)
+        self.assertEqual(ISAMPCAgent._parse_q_slack("acc_isampc_qslack5"), 5.0)
+        self.assertEqual(ISAMPCAgent._parse_q_slack("acc_isampc_ainput_qslack0.5_rmove1000"), 0.5)
+        self.assertEqual(ISAMPCPlanner(horizon=N, dt=DT, v_des=17.0, q_slack=5.0).weights["q_slack"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()
