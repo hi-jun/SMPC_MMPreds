@@ -1127,6 +1127,7 @@ def build_multitarget_lead_prediction(
             chance_confidence=np.full((1, horizon + 1), np.nan),
             lead_mode_lk=np.zeros((1, horizon + 1), dtype=bool),
             lead_vehicle_ids=np.full((1, horizon + 1), -1, dtype=int),
+            lead_mode_probability=np.zeros((1, horizon + 1)),
         )
         return prediction, []
 
@@ -1145,6 +1146,7 @@ def build_multitarget_lead_prediction(
     chance_confidence = np.full((len(scenarios), horizon + 1), np.nan)
     lead_mode_lk = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     lead_vehicle_ids = np.full((len(scenarios), horizon + 1), -1, dtype=int)
+    lead_mode_probability = np.zeros((len(scenarios), horizon + 1), dtype=float)
     mode_names = []
     probabilities = []
     metadata = []
@@ -1208,6 +1210,7 @@ def build_multitarget_lead_prediction(
             chance_confidence[scenario_out_idx, step], clearance_scale[scenario_out_idx, step] = cell
             lead_mode_lk[scenario_out_idx, step] = selected.mode_name == "lk"
             lead_vehicle_ids[scenario_out_idx, step] = int(selected.vehicle_id)
+            lead_mode_probability[scenario_out_idx, step] = float(selected.probability)
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
             effective_lead_keys.append((int(selected.vehicle_id), str(selected.scenario_label)) + decided)
@@ -1250,6 +1253,7 @@ def build_multitarget_lead_prediction(
         chance_confidence=chance_confidence,
         lead_mode_lk=lead_mode_lk,
         lead_vehicle_ids=lead_vehicle_ids,
+        lead_mode_probability=lead_mode_probability,
         k_group_map=k_group_map,
         k_group_names=k_group_names,
     )

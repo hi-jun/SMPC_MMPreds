@@ -166,6 +166,15 @@ class NairACCConfig:
     #: shortened standoff and nothing pushes the gap back out.  Needs
     #: ``MultimodalLeadPrediction.lead_vehicle_ids``.
     standoff_shortfall_lk_cutin_only: bool = False
+    #: ``pricep2``: with ``standoff_shortfall_weight``, price a cell's shortfall
+    #: ``w * P_j * p_cell * short^2``, ``p_cell`` the probability of the cell's
+    #: lead mode for its own vehicle (``MultimodalLeadPrediction.lead_mode_probability``),
+    #: instead of ``w * P_j * short^2`` (2026-10-23).  ``P_j`` weights the
+    #: scenario's tracking and jerk terms too, so without ``p_cell`` it cancels
+    #: inside the scenario and a cut-in branch plans the same standoff however
+    #: unlikely the cut-in is; with it the branch trades ``w * p_cell`` against
+    #: its jerk terms.  With one multi-mode target this is ``w * P_j^2``.
+    standoff_shortfall_cell_price: bool = False
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -230,6 +239,8 @@ class NairACCConfig:
             raise ValueError("standoff_shortfall_on_lk (dopt<w>lk) needs standoff_shortfall_weight")
         if self.standoff_shortfall_lk_cutin_only and not self.standoff_shortfall_on_lk:
             raise ValueError("standoff_shortfall_lk_cutin_only (dopt<w>lkr) needs standoff_shortfall_on_lk")
+        if self.standoff_shortfall_cell_price and self.standoff_shortfall_weight is None:
+            raise ValueError("standoff_shortfall_cell_price (pricep2) needs standoff_shortfall_weight")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -461,6 +472,9 @@ class MultimodalLeadPrediction:
     # ``dopt<w>lkr`` needs to price one vehicle and not another; None when the
     # predictor does not say.
     lead_vehicle_ids: Optional[np.ndarray] = None
+    # The probability of the cell's lead mode for its own vehicle, before the
+    # product over targets (``pricep2``); None when the predictor does not say.
+    lead_mode_probability: Optional[np.ndarray] = None
     k_group_map: Optional[np.ndarray] = None
     k_group_names: Optional[List[str]] = None
 
@@ -546,6 +560,11 @@ class MultimodalLeadPrediction:
             expected = (self.num_modes, horizon + 1)
             if self.lead_vehicle_ids.shape != expected:
                 raise ValueError("lead_vehicle_ids must have shape %s" % (expected,))
+        if self.lead_mode_probability is not None:
+            self.lead_mode_probability = np.asarray(self.lead_mode_probability, dtype=float)
+            expected = (self.num_modes, horizon + 1)
+            if self.lead_mode_probability.shape != expected:
+                raise ValueError("lead_mode_probability must have shape %s" % (expected,))
         if self.k_group_map is not None:
             self.k_group_map = np.asarray(self.k_group_map, dtype=int)
             expected = (self.num_modes, horizon)
@@ -746,6 +765,7 @@ class CachedFeedbackScalarChanceQP:
     optimize_k: bool
     short_var: Any = None
     shortfall_mask_param: Any = None
+    shortfall_price_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -1178,6 +1198,10 @@ class NairACCSMPC:
             lead_vehicle_ids=(
                 None if prediction.lead_vehicle_ids is None
                 else prediction.lead_vehicle_ids[:, :self.config.horizon + 1]
+            ),
+            lead_mode_probability=(
+                None if prediction.lead_mode_probability is None
+                else prediction.lead_mode_probability[:, :self.config.horizon + 1]
             ),
             k_group_map=k_group_map,
             k_group_names=prediction.k_group_names,
@@ -1885,6 +1909,7 @@ class NairACCSMPC:
             None if self.config.gurobi_time_limit is None else float(self.config.gurobi_time_limit),
             None if self.config.standoff_shortfall_weight is None
             else float(self.config.standoff_shortfall_weight),
+            bool(self.config.standoff_shortfall_cell_price),
         )
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -1948,6 +1973,11 @@ class NairACCSMPC:
         if problem.short_var is not None:
             shortfall_mask = standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
             opti.set_value(problem.shortfall_mask_param, shortfall_mask.astype(float))
+        if problem.shortfall_price_param is not None:
+            # pricep2: a prediction that does not give the cell probability prices as plain dopt<w>
+            opti.set_value(problem.shortfall_price_param, (
+                np.ones((num_modes, horizon + 1)) if prediction.lead_mode_probability is None
+                else prediction.lead_mode_probability))
         k_slot_by_step = []
         if problem.optimize_k:
             for step in range(horizon):
@@ -2133,6 +2163,9 @@ class NairACCSMPC:
         lead_dev_v_params = [opti.parameter(num_modes, horizon) for _ in range(3)]
         shortfall_mask_param = (
             opti.parameter(num_modes, horizon + 1) if shortfall_weight is not None else None)
+        shortfall_price_param = (
+            opti.parameter(num_modes, horizon + 1)
+            if shortfall_weight is not None and self.config.standoff_shortfall_cell_price else None)
         sharing_params = []
 
         opti.subject_to(ca.vec(slack_var) >= 0.0)
@@ -2273,7 +2306,10 @@ class NairACCSMPC:
         if short_var is not None:
             for mode in range(num_modes):
                 for step in range(horizon + 1):
-                    objective += shortfall_weight * probability_param[mode] * short_var[mode, step] ** 2
+                    price = shortfall_weight * probability_param[mode]
+                    if shortfall_price_param is not None:
+                        price = price * shortfall_price_param[mode, step]
+                    objective += price * short_var[mode, step] ** 2
 
         opti.minimize(objective)
         p_opts, s_opts = self._gurobi_options()
@@ -2313,6 +2349,7 @@ class NairACCSMPC:
             optimize_k=optimize_k,
             short_var=short_var,
             shortfall_mask_param=shortfall_mask_param,
+            shortfall_price_param=shortfall_price_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem

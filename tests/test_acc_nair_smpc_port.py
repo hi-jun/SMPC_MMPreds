@@ -1043,6 +1043,22 @@ class TestOptimizedStandoff(unittest.TestCase):
         np.testing.assert_allclose(heavy.planned_standoff[1], top, atol=0.05)
         self.assertTrue(np.all(heavy.planned_standoff[1] > 15.0))
 
+    def test_cell_price_on_the_only_target_is_dopt_with_the_weight_times_its_probability(self):
+        # pricep2: w * P_j * p_cell * short^2.  With the cut-in the only target,
+        # p_cell = P_j = 0.2, which is dopt<0.2 w>; with the cheaper shortfall the
+        # ego brakes less and gives up more of the time gap than under dopt<w>.
+        prediction = self._prediction(15.0, 14.0, (0.8, 0.2))
+        prediction.lead_mode_probability = np.where(prediction.active_mask, 0.2, 0.0)
+        _, cell = self._solve(100.0, prediction, standoff_shortfall_cell_price=True)
+        _, scaled = self._solve(20.0, prediction)
+        _, plain = self._solve(100.0, prediction)
+        self.assertAlmostEqual(cell.action, scaled.action, places=6)
+        np.testing.assert_allclose(cell.planned_standoff[1], scaled.planned_standoff[1], atol=1.0e-4)
+        self.assertGreater(cell.action, plain.action + 0.1)
+        self.assertGreater(self._shortfall(cell, 1)[5], self._shortfall(plain, 1)[5] + 0.2)
+        with self.assertRaisesRegex(ValueError, "pricep2"):
+            self._config(None, standoff_shortfall_cell_price=True)
+
     def test_the_qp_has_shortfall_variables_only_with_dopt(self):
         prediction = self._prediction(15.0, 14.0, (0.8, 0.2))
         off, plain = self._solve(None, prediction)

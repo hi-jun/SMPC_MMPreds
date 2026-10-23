@@ -115,6 +115,7 @@ class ACCNairSMPCAgent(object):
         self.standoff_shortfall_weight = self._parse_standoff_shortfall_weight(smpc_config)
         self.standoff_shortfall_on_lk = self._parse_standoff_shortfall_on_lk(smpc_config)
         self.standoff_shortfall_lk_cutin_only = self._parse_standoff_shortfall_lk_cutin_only(smpc_config)
+        self.standoff_shortfall_cell_price = self._parse_standoff_shortfall_cell_price(smpc_config)
         if self.cutin_chance_ref <= 0.0 and (
                 self.chance_sigma_cap is not None or self.standoff_shortfall_weight is not None):
             raise ValueError(
@@ -123,6 +124,10 @@ class ACCNairSMPCAgent(object):
             # Only the stdan_3int joint prediction marks lane-keeping cells; any
             # other predictor would silently price cut-in cells only.
             raise ValueError("dopt<w>lk needs the stdan_3int predictor")
+        if self.standoff_shortfall_cell_price and self.predictor_type != "stdan_3int":
+            # Only the stdan_3int joint prediction gives the cell probability; any
+            # other predictor would silently price as plain dopt<w>.
+            raise ValueError("pricep2 needs the stdan_3int predictor")
         self.lk_entry_as_cutin = self._parse_lk_entry_as_cutin(smpc_config)
         if self.lk_entry_as_cutin and self.predictor_type != "stdan_3int":
             raise ValueError("trajcutin needs the stdan_3int predictor")
@@ -196,6 +201,7 @@ class ACCNairSMPCAgent(object):
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
+        self.controller_config.standoff_shortfall_cell_price = self.standoff_shortfall_cell_price
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -1576,6 +1582,16 @@ class ACCNairSMPCAgent(object):
         ``NairACCConfig.standoff_shortfall_lk_cutin_only``.
         """
         return re.search(r"dopt[0-9]*\.?[0-9]+lkr", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_standoff_shortfall_cell_price(smpc_config):
+        """Read ``pricep2`` (False = off).
+
+        With it a ``dopt<w>`` cell's shortfall costs ``w * P_j * p_cell * short^2``,
+        ``p_cell`` the cell's own mode probability, so an unlikely cut-in plans a
+        shorter standoff.  See ``NairACCConfig.standoff_shortfall_cell_price``.
+        """
+        return "pricep2" in str(smpc_config)
 
     @staticmethod
     def _parse_branch_decision_brake(smpc_config):
