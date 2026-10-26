@@ -133,6 +133,7 @@ class ACCNairSMPCAgent(object):
         if self.lk_entry_as_cutin and self.predictor_type != "stdan_3int":
             raise ValueError("trajcutin needs the stdan_3int predictor")
         self.entry_pass = self._parse_entry_pass(smpc_config)
+        self.entry_pass_margin = self._parse_entry_pass_margin(smpc_config)
         if self.entry_pass and self.predictor_type != "stdan_3int":
             raise ValueError("entrypass needs the stdan_3int predictor")
         # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
@@ -864,8 +865,8 @@ class ACCNairSMPCAgent(object):
                 lateral_speeds=target_lateral_speed,
                 lateral_latched=self._ctx_latched,
                 lateral_gate=self.lateral_gate,
-                **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length}
-                   if entry_plan is not None else {}),
+                **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
+                    "entry_margin": self.entry_pass_margin} if entry_plan is not None else {}),
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -1664,6 +1665,17 @@ class ACCNairSMPCAgent(object):
         ``build_multitarget_lead_prediction``.
         """
         return "entrypass" in str(smpc_config)
+
+    @staticmethod
+    def _parse_entry_pass_margin(smpc_config):
+        """Read the margin [m] of ``entrypass<m>`` (``entrypass`` alone: 0).
+
+        A cut-in hypothesis is dropped only when its entry bumper gap to the
+        planned ego is below ``-m``; ``entrypass9`` asks for the whole vehicle
+        (4.5 m) behind the ego's rear.
+        """
+        match = re.search(r"entrypass([0-9]+(?:\.[0-9]+)?)", str(smpc_config))
+        return float(match.group(1)) if match else 0.0
 
     @staticmethod
     def _parse_lk_entry_as_cutin(smpc_config):

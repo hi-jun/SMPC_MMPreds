@@ -1130,6 +1130,7 @@ def build_multitarget_lead_prediction(
     branch_floor_by_vehicle: Optional[Dict[int, int]] = None,
     entry_plan: Optional[Dict[int, np.ndarray]] = None,
     entry_clearance: float = 0.0,
+    entry_margin: float = 0.0,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
 
@@ -1141,12 +1142,14 @@ def build_multitarget_lead_prediction(
     before it enters the ego lane (``decision_point_branch_step``); the
     constraint cells are unchanged.  ``entry_plan`` (``entrypass``) maps a
     vehicle id to the ego's planned displacement over the steps
-    (``entry_ego_displacement``): a cut-in mode whose lead position at its first
-    in-lane step is less than ``entry_clearance`` (the vehicle length, i.e. a
-    negative bumper gap) ahead of the planned ego enters beside or behind it and
-    never leads -- the current-position filter alone keeps it whenever it is
-    ahead of the ego now.  Every scenario's metadata then lists the decisions
-    under ``entry_pass``.
+    (``entry_ego_displacement``): a cut-in mode whose bumper gap to the planned
+    ego front at its first in-lane step -- lead position minus planned ego
+    position minus ``entry_clearance``, the vehicle length -- is below
+    ``-entry_margin`` enters beside or behind the ego and never leads (margin 0:
+    any negative gap; the vehicle length twice: the whole vehicle behind the
+    ego) -- the current-position filter alone keeps it whenever it is ahead of
+    the ego now.  Every scenario's metadata then lists the decisions under
+    ``entry_pass``.
     """
     targets = [pred for pred in processed_predictions if pred.mode_predictions]
     horizon = int(horizon)
@@ -1188,10 +1191,11 @@ def build_multitarget_lead_prediction(
                     continue
                 entry = int(in_lane[0])
                 gap = float(mode.frenet[entry, 0]) - (ego_s + float(displacement[entry])) - float(entry_clearance)
-                if gap < 0.0:
+                excluded = gap < -float(entry_margin)
+                if excluded:
                     entry_excluded.add(id(mode))
                 entry_decisions.append({"vehicle_id": int(mode.vehicle_id), "label": str(mode.scenario_label),
-                                        "entry_step": entry, "entry_gap_m": gap, "excluded": gap < 0.0})
+                                        "entry_step": entry, "entry_gap_m": gap, "excluded": excluded})
 
     combos = list(itertools.product(*[target.mode_predictions for target in targets]))
     scenarios = []

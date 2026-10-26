@@ -1265,6 +1265,19 @@ class TestEntryPass(unittest.TestCase):
         # Without a plan nothing is evaluated or added to the metadata.
         self.assertNotIn("entry_pass", plain_meta[0])
 
+    def test_a_margin_drops_only_a_vehicle_entering_wholly_behind_the_ego(self):
+        horizon = 10
+        common = dict(ego_state=np.array([0.0, 10.0]), horizon=horizon, desired_speed=10.0, num_modes=4,
+                      entry_plan={2: 2.0 * np.arange(horizon + 1)}, entry_clearance=4.5, entry_margin=9.0)
+        # Bumper gap -5.5 m at entry: beside the ego, kept under a 9 m margin.
+        beside, meta = build_multitarget_lead_prediction(self._targets(5.0, horizon), **common)
+        self.assertTrue(beside.active_mask[:, 6:].any())
+        self.assertFalse(meta[0]["entry_pass"][0]["excluded"])
+        # Bumper gap 6 - 12 - 4.5 = -10.5 m: the whole vehicle behind the ego, dropped.
+        behind, meta = build_multitarget_lead_prediction(self._targets(0.0, horizon), **common)
+        self.assertFalse(behind.active_mask.any())
+        self.assertTrue(meta[0]["entry_pass"][0]["excluded"])
+
     def test_the_displacement_reads_the_previous_plan_without_the_vehicles_cutin(self):
         horizon, dt = 5, 0.2
         steps = np.arange(horizon + 1) * dt
@@ -1288,6 +1301,9 @@ class TestEntryPass(unittest.TestCase):
         base = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin"
         self.assertFalse(agent._parse_entry_pass(base + "_ctx0.4_latgate_rmove1000_rjerk40"))
         self.assertTrue(agent._parse_entry_pass(base + "_ctx0.4_latgate_entrypass_rmove1000_rjerk40"))
+        self.assertEqual(agent._parse_entry_pass_margin(base + "_ctx0.4_latgate_entrypass_rmove1000_rjerk40"), 0.0)
+        self.assertEqual(agent._parse_entry_pass_margin(base + "_ctx0.4_latgate_entrypass9_rmove1000_rjerk40"), 9.0)
+        self.assertTrue(agent._parse_entry_pass(base + "_entrypass9_rmove1000"))
 
         class _Vehicle:
             def get_world(self):

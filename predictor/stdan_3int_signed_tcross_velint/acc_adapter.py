@@ -509,6 +509,7 @@ class STDAN3IntACCAdapter:
         lateral_gate: bool = False,
         entry_plan: Optional[Dict[int, np.ndarray]] = None,
         entry_clearance: float = 0.0,
+        entry_margin: float = 0.0,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -595,6 +596,7 @@ class STDAN3IntACCAdapter:
             branch_floor_by_vehicle=branch_floor_by_vehicle,
             entry_plan=entry_plan,
             entry_clearance=entry_clearance,
+            entry_margin=entry_margin,
         )
         return {
             "prediction": prediction,
