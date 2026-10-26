@@ -2207,10 +2207,16 @@ class NairACCSMPC:
             opti.subject_to(total_safe_probability >= optimized_eta_target_probability(self.config))
 
         objective = self.config.slack_weight * ca.sumsqr(slack_var)
+        # The tracking and input costs are summed over three rollouts, the
+        # nominal lead and its +-1 sigma samples, which differ only through the
+        # K-feedback.  Without it they coincide: one rollout whose costs count
+        # three times is the same QP without the duplicated bound and jerk rows.
+        num_samples = 3 if optimize_k else 1
+        sample_weight = 3.0 / num_samples
         mean_states_by_mode = []
         for mode in range(num_modes):
             sample_states = []
-            for sample_idx in range(3):
+            for sample_idx in range(num_samples):
                 state_s = x0_param[0]
                 state_v = x0_param[1]
                 states_s = [state_s]
@@ -2254,7 +2260,7 @@ class NairACCSMPC:
                 for step in range(horizon + 1):
                     s_error = states_s[step] - x_ref_s_param[mode, step]
                     v_error = states_v[step] - x_ref_v_param[mode, step]
-                    objective += probability_param[mode] * (
+                    objective += sample_weight * probability_param[mode] * (
                         self.config.q_s * s_error ** 2 + self.config.q_v * v_error ** 2
                     )
                     if step < horizon:
@@ -2263,7 +2269,7 @@ class NairACCSMPC:
                         move = control - previous_input
                         smooth = (self.config.r_move * move ** 2 if step == 0
                                   else self.config.r_jerk * (move / self.config.dt) ** 2)
-                        objective += probability_param[mode] * (
+                        objective += sample_weight * probability_param[mode] * (
                             self.config.r_a * input_error ** 2 + smooth
                         )
                         previous_input = control
