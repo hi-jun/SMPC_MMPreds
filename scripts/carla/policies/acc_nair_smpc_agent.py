@@ -55,6 +55,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
     REL_OTHER,
     REL_RIGHT_ADJACENT,
     decision_point_branch_step,
+    entry_ego_displacement,
 )
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 from predictor.lstm.acc_adapter import LSTMACCAdapter
@@ -131,6 +132,11 @@ class ACCNairSMPCAgent(object):
         self.lk_entry_as_cutin = self._parse_lk_entry_as_cutin(smpc_config)
         if self.lk_entry_as_cutin and self.predictor_type != "stdan_3int":
             raise ValueError("trajcutin needs the stdan_3int predictor")
+        self.entry_pass = self._parse_entry_pass(smpc_config)
+        if self.entry_pass and self.predictor_type != "stdan_3int":
+            raise ValueError("entrypass needs the stdan_3int predictor")
+        # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
+        self._entry_previous_plan = None
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
         if self.branch_decision_brake is not None and self.predictor_type != "stdan_3int":
             raise ValueError("branchdec needs the stdan_3int predictor")
@@ -528,6 +534,11 @@ class ACCNairSMPCAgent(object):
                 command_dt=command_dt,
             )
             solve_time = time.time() - start
+            if self.entry_pass and time_s is not None:
+                planned = prediction_bundle["prediction"]
+                self._entry_previous_plan = (
+                    time_s, list(planned.mode_names or []), np.asarray(planned.probabilities, dtype=float),
+                    np.asarray(solution.x_nominal, dtype=float)[:, :, 1])
             raw_action = float(solution.action)
             action = self._limit_accel_command(raw_action, previous_accel_cmd, command_dt)
             df_des = self._lane_keeping_steer(ey, epsi)
@@ -817,6 +828,13 @@ class ACCNairSMPCAgent(object):
             target_relations, target_states, np.array([s_ego, speed]))
         branch_floor_by_vehicle, branch_decision_debug = self._decision_point_branch_floors(
             target_states, target_relations, other_states)
+        entry_plan = None
+        if self.entry_pass:
+            now_s = self._elapsed_seconds()
+            previous = self._entry_previous_plan
+            entry_plan = entry_ego_displacement(
+                target_states.keys(), self.N, self.DT, speed,
+                None if previous is None or now_s is None else previous[1:] + (now_s - previous[0],))
         predictor_start = time.time()
         try:
             result = self.stdan_predictor.predict_acc(
@@ -846,6 +864,8 @@ class ACCNairSMPCAgent(object):
                 lateral_speeds=target_lateral_speed,
                 lateral_latched=self._ctx_latched,
                 lateral_gate=self.lateral_gate,
+                **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length}
+                   if entry_plan is not None else {}),
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -1632,6 +1652,18 @@ class ACCNairSMPCAgent(object):
         ``acc_postprocess.mix_cutin_probability``.
         """
         return re.search(r"(?:^|_)latgate(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_entry_pass(smpc_config):
+        """Read ``entrypass`` from the config string (False = the current-position lead filter only).
+
+        With it a cut-in hypothesis whose vehicle enters the ego lane beside or
+        behind the ego's position planned at the previous tick (negative bumper
+        gap at its first in-lane step) never leads.  See
+        ``acc_postprocess.entry_ego_displacement`` and
+        ``build_multitarget_lead_prediction``.
+        """
+        return "entrypass" in str(smpc_config)
 
     @staticmethod
     def _parse_lk_entry_as_cutin(smpc_config):

@@ -1082,6 +1082,40 @@ def _inherit_vacating_confidence(cell, vacating, reference_beta, vanish_threshol
     return confidence, scale
 
 
+def entry_ego_displacement(vehicle_ids, horizon, dt, ego_speed, previous_plan=None, resolution=0.01):
+    """``entrypass``: the ego's planned displacement [m] from now to each step
+    ``k * dt`` (k = 0..horizon), per vehicle id.
+
+    ``previous_plan = (scenario_names, probabilities, planned_speed, lag_s)`` is
+    the previous tick's plan: its scenarios' names (``"<vehicle>:<label>+..."``),
+    probabilities, planned speeds at ``k * dt`` (scenarios x steps) and the time
+    since it was made.  A vehicle takes the most likely scenario in which it was
+    not a cut-in (any scenario if none qualifies, e.g. it had no mode then):
+    that plan's speed read from ``lag_s`` on, held at its last value past the
+    plan's end, integrated from now.  Without a previous plan the current speed
+    is held.
+    """
+    steps = np.arange(int(horizon) + 1) * float(dt)
+    if previous_plan is None:
+        return {int(v): float(ego_speed) * steps for v in vehicle_ids}
+    names, probabilities, planned_speed, lag_s = previous_plan
+    planned_speed = np.asarray(planned_speed, dtype=float)
+    plan_t = np.arange(planned_speed.shape[1]) * float(dt)
+    grid = float(lag_s) + np.arange(0.0, steps[-1] + 0.5 * resolution, resolution)
+    order = np.argsort(-np.asarray(probabilities, dtype=float), kind="stable")
+    names = [str(name) for name in (names if names is not None else [""] * len(order))]
+    out = {}
+    for vehicle_id in vehicle_ids:
+        prefix = "%d:" % int(vehicle_id)
+        scenario = next((j for j in order if not any(
+            part.startswith(prefix) and part[len(prefix):].startswith("cutin")
+            for part in names[j].split("+"))), order[0])
+        speed = np.interp(grid, plan_t, planned_speed[scenario])
+        travelled = np.concatenate(([0.0], np.cumsum(0.5 * (speed[1:] + speed[:-1]) * np.diff(grid))))
+        out[int(vehicle_id)] = np.interp(float(lag_s) + steps, grid, travelled)
+    return out
+
+
 def build_multitarget_lead_prediction(
     processed_predictions: Iterable[ACCProcessedPrediction],
     ego_state: Sequence[float],
@@ -1094,6 +1128,8 @@ def build_multitarget_lead_prediction(
     vanish_threshold: float = 0.0,
     sigma_cap: Optional[float] = None,
     branch_floor_by_vehicle: Optional[Dict[int, int]] = None,
+    entry_plan: Optional[Dict[int, np.ndarray]] = None,
+    entry_clearance: float = 0.0,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
 
@@ -1103,7 +1139,14 @@ def build_multitarget_lead_prediction(
     ``chance_cutin_clearance``'s.  ``branch_floor_by_vehicle`` maps a vehicle id
     to the step from which its cut-in hypothesis is its own policy branch even
     before it enters the ego lane (``decision_point_branch_step``); the
-    constraint cells are unchanged.
+    constraint cells are unchanged.  ``entry_plan`` (``entrypass``) maps a
+    vehicle id to the ego's planned displacement over the steps
+    (``entry_ego_displacement``): a cut-in mode whose lead position at its first
+    in-lane step is less than ``entry_clearance`` (the vehicle length, i.e. a
+    negative bumper gap) ahead of the planned ego enters beside or behind it and
+    never leads -- the current-position filter alone keeps it whenever it is
+    ahead of the ego now.  Every scenario's metadata then lists the decisions
+    under ``entry_pass``.
     """
     targets = [pred for pred in processed_predictions if pred.mode_predictions]
     horizon = int(horizon)
@@ -1130,6 +1173,25 @@ def build_multitarget_lead_prediction(
             lead_mode_probability=np.zeros((1, horizon + 1)),
         )
         return prediction, []
+
+    entry_excluded = set()
+    entry_decisions = []
+    if entry_plan is not None:
+        for target in targets:
+            for mode in target.mode_predictions:
+                displacement = entry_plan.get(int(mode.vehicle_id))
+                if mode.mode_name != "cutin" or displacement is None:
+                    continue
+                steps = min(horizon + 1, mode.frenet.shape[0])
+                in_lane = np.flatnonzero(np.asarray(mode.active_mask, dtype=bool)[:steps])
+                if in_lane.size == 0:
+                    continue
+                entry = int(in_lane[0])
+                gap = float(mode.frenet[entry, 0]) - (ego_s + float(displacement[entry])) - float(entry_clearance)
+                if gap < 0.0:
+                    entry_excluded.add(id(mode))
+                entry_decisions.append({"vehicle_id": int(mode.vehicle_id), "label": str(mode.scenario_label),
+                                        "entry_step": entry, "entry_gap_m": gap, "excluded": gap < 0.0})
 
     combos = list(itertools.product(*[target.mode_predictions for target in targets]))
     scenarios = []
@@ -1165,7 +1227,7 @@ def build_multitarget_lead_prediction(
         for step in range(horizon + 1):
             candidates = []
             for mode in combo:
-                if step >= mode.frenet.shape[0] or not mode.active_mask[step]:
+                if step >= mode.frenet.shape[0] or not mode.active_mask[step] or id(mode) in entry_excluded:
                     continue
                 s_val = float(mode.frenet[step, 0])
                 if s_val < ego_s:
@@ -1226,6 +1288,8 @@ def build_multitarget_lead_prediction(
                 "vacated_lane_steps": vacated_lane_steps,
             }
         )
+        if entry_plan is not None:
+            metadata[-1]["entry_pass"] = entry_decisions
 
     policy_tree = build_policy_sharing_tree_from_effective_leads(
         effective_lead_keys_by_scenario,

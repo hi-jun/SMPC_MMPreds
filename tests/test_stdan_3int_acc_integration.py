@@ -25,6 +25,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (  # noqa:
     decision_point_branch_step,
     ego_lane_membership_split_step_from_mask,
     ego_pose_relative_frenet,
+    entry_ego_displacement,
     process_vehicle_prediction,
     reconstruct_acc_probabilities,
 )
@@ -1222,6 +1223,78 @@ class TestDecisionPointBranch(unittest.TestCase):
 
         lstm = "acc_nair_smpc_lstm_fixed_risk_nominal_safe_distance_branchdec7_rmove1000"
         with self.assertRaisesRegex(ValueError, "stdan_3int"):
+            agent(_Vehicle(), None, smpc_config=lstm)
+
+
+class TestEntryPass(unittest.TestCase):
+    """``entrypass``: a cut-in hypothesis entering beside or behind the planned ego never leads."""
+
+    _mode = staticmethod(TestDecisionPointBranch._mode)
+
+    def _targets(self, entry_s, horizon):
+        from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import ACCProcessedPrediction
+        # Target 2 keeps lane (never a lead) or enters the ego lane at step 6,
+        # entry_s + 6 m ahead of the ego's current position.
+        lk = self._mode(2, "lk", 0.6, [[entry_s + k, 3.5, 5.0] for k in range(horizon + 1)])
+        lk.active_mask[:] = False
+        cutin = self._mode(2, "cutin", 0.4, [[entry_s + k, 0.0, 5.0] for k in range(horizon + 1)])
+        cutin.active_mask[:6] = False
+        return [ACCProcessedPrediction(2, REL_LEFT_ADJACENT, [lk, cutin], {}, {}, {})]
+
+    def test_a_cutin_entering_behind_the_planned_ego_never_leads(self):
+        horizon = 10
+        common = dict(ego_state=np.array([0.0, 10.0]), horizon=horizon, desired_speed=10.0, num_modes=4)
+        plan = {2: 2.0 * np.arange(horizon + 1)}   # 10 m/s at dt 0.2: the ego plans to be 12 m on at step 6
+        # Entering 11 m ahead of the ego now -- kept by the current-position
+        # filter -- but behind its planned front: bumper gap 11 - 12 - 4.5 < 0.
+        behind = self._targets(5.0, horizon)
+        plain, _ = build_multitarget_lead_prediction(behind, **common)
+        self.assertTrue(plain.active_mask[:, 6:].any())
+        passed, meta = build_multitarget_lead_prediction(behind, entry_plan=plan, entry_clearance=4.5, **common)
+        self.assertFalse(passed.active_mask.any())
+        decisions = meta[0]["entry_pass"]
+        self.assertEqual([(d["vehicle_id"], d["entry_step"], d["excluded"]) for d in decisions], [(2, 6, True)])
+        self.assertAlmostEqual(decisions[0]["entry_gap_m"], 11.0 - 12.0 - 4.5)
+        # Entering 9.5 m ahead of the planned front: nothing changes.
+        ahead = self._targets(20.0, horizon)
+        plain, plain_meta = build_multitarget_lead_prediction(ahead, **common)
+        kept, meta = build_multitarget_lead_prediction(ahead, entry_plan=plan, entry_clearance=4.5, **common)
+        np.testing.assert_array_equal(kept.active_mask, plain.active_mask)
+        np.testing.assert_array_equal(kept.means, plain.means)
+        self.assertFalse(meta[0]["entry_pass"][0]["excluded"])
+        # Without a plan nothing is evaluated or added to the metadata.
+        self.assertNotIn("entry_pass", plain_meta[0])
+
+    def test_the_displacement_reads_the_previous_plan_without_the_vehicles_cutin(self):
+        horizon, dt = 5, 0.2
+        steps = np.arange(horizon + 1) * dt
+        # No previous plan: the current speed held.
+        np.testing.assert_allclose(entry_ego_displacement([2], horizon, dt, 8.0)[2], 8.0 * steps)
+        # The likelier scenario has vehicle 2 cutting in and brakes at 2 m/s^2;
+        # the other accelerates at 1 m/s^2 from 10 m/s.  The plan was made
+        # 0.1 s ago and ends 0.9 s from now; its last speed (11 m/s) is held.
+        speeds = np.array([10.0 - 2.0 * steps, 10.0 + 1.0 * steps])
+        for label in ("cutin", "cutin/LK"):
+            names = ["2:%s+5:lk" % label, "2:lk+5:lk"]
+            plan = entry_ego_displacement([2, 7], horizon, dt, 10.0, (names, [0.7, 0.3], speeds, 0.1))
+            planned = np.minimum(steps, 0.9)
+            np.testing.assert_allclose(
+                plan[2], 10.1 * planned + 0.5 * planned ** 2 + (steps - planned) * 11.0, atol=1e-6)
+            # Vehicle 7 has no mode in that plan: the likeliest scenario.
+            np.testing.assert_allclose(plan[7][:5], 9.8 * steps[:5] - steps[:5] ** 2, atol=1e-6)
+
+    def test_the_agent_reads_the_entrypass_token(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent
+        base = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin"
+        self.assertFalse(agent._parse_entry_pass(base + "_ctx0.4_latgate_rmove1000_rjerk40"))
+        self.assertTrue(agent._parse_entry_pass(base + "_ctx0.4_latgate_entrypass_rmove1000_rjerk40"))
+
+        class _Vehicle:
+            def get_world(self):
+                return None
+
+        lstm = "acc_nair_smpc_lstm_fixed_risk_nominal_safe_distance_entrypass_rmove1000"
+        with self.assertRaisesRegex(ValueError, "entrypass needs the stdan_3int"):
             agent(_Vehicle(), None, smpc_config=lstm)
 
 
