@@ -113,7 +113,9 @@ def load_pickle(path):
 
 def find_run_dirs(sweep_root):
     sweep_root = Path(sweep_root)
-    return sorted({path.parent for path in sweep_root.rglob("summary.json")})
+    # Runs made before 2026-10-27 no longer carry summary.json.
+    return sorted({path.parent for name in ("summary.json", "metrics.json")
+                   for path in sweep_root.rglob(name)})
 
 
 def first_actor_key(result, prefix):
@@ -921,7 +923,7 @@ def prefix_dict(prefix, values):
 
 def analyze_run(run_dir, sweep_root, event_window_s, warmup_exclude_s):
     run_dir = Path(run_dir)
-    summary = read_json(run_dir / "summary.json")
+    summary = read_json(run_dir / "summary.json") or read_json(run_dir / "metrics.json")
     resolved = read_json(run_dir / "resolved_config.json")
     result = load_pickle(run_dir / "scenario_result.pkl")
     kind = scenario_kind(resolved, run_dir)
@@ -1050,7 +1052,7 @@ def completion_report(run_dirs, sweep_root):
     reason_counts = Counter()
     grouped = defaultdict(lambda: {"total": 0, "success": 0, "fail": 0, "failure_reasons": Counter()})
     for run_dir in run_dirs:
-        summary = read_json(run_dir / "summary.json")
+        summary = read_json(run_dir / "summary.json") or read_json(run_dir / "metrics.json")
         resolved = read_json(run_dir / "resolved_config.json")
         kind = scenario_kind(resolved, run_dir)
         label = scenario_label(resolved, run_dir, sweep_root)

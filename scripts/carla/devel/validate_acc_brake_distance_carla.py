@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from analyze_acc_scenario_result import load_summary  # noqa: E402
 
 
 def _ego_steps(summary):
@@ -45,10 +49,9 @@ def _solver_failure_reasons(step):
     return reasons
 
 
-def _run_row(summary_path):
-    with summary_path.open("r") as file_obj:
-        summary = json.load(file_obj)
-    resolved_path = summary_path.parent / "resolved_config.json"
+def _run_row(run_dir):
+    summary = load_summary(run_dir)
+    resolved_path = run_dir / "resolved_config.json"
     resolved = {}
     if resolved_path.exists():
         with resolved_path.open("r") as file_obj:
@@ -68,7 +71,7 @@ def _run_row(summary_path):
             solver_failures.append((step_idx, step, solver_reasons))
 
     row = {
-        "run_dir": str(summary_path.parent),
+        "run_dir": str(run_dir),
         "ego_policy": resolved.get("ego_policy"),
         "ran_successfully": bool(summary.get("ran_successfully")),
         "num_controller_steps": len(_ego_steps(summary)),
@@ -132,14 +135,16 @@ def main():
     args = parser.parse_args()
 
     input_path = Path(args.input)
-    if (input_path / "summary.json").exists():
-        summary_paths = [input_path / "summary.json"]
+    # Runs made before 2026-10-27 no longer carry summary.json.
+    run_names = ("summary.json", "metrics.json")
+    if any((input_path / name).exists() for name in run_names):
+        run_dirs = [input_path]
     else:
-        summary_paths = sorted(input_path.rglob("summary.json"))
-    if not summary_paths:
-        raise RuntimeError(f"No summary.json found below {input_path}")
+        run_dirs = sorted({path.parent for name in run_names for path in input_path.rglob(name)})
+    if not run_dirs:
+        raise RuntimeError(f"No summary.json or metrics.json found below {input_path}")
 
-    rows = [_run_row(path) for path in summary_paths]
+    rows = [_run_row(path) for path in run_dirs]
     output_dir = Path(args.output_dir) if args.output_dir else input_path
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "carla_brake_distance_validation.json"

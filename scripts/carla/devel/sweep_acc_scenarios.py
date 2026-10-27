@@ -187,11 +187,14 @@ def _successful_run_dir_row(output_root, kind, run_idx, params):
     metrics_path = run_dir / "metrics.json"
     pkl_path = run_dir / "scenario_result.pkl"
     if not (
-            summary_path.exists()
-            and resolved_path.exists()
+            resolved_path.exists()
             and metrics_path.exists()
             and pkl_path.exists()):
         return None
+    # Runs made before 2026-10-27 no longer carry summary.json; metrics.json
+    # holds the same two flags and is written last, after the pickle.
+    if not summary_path.exists():
+        summary_path = metrics_path
     try:
         with summary_path.open("r") as f:
             summary = json.load(f)

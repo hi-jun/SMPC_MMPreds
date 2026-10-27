@@ -4,15 +4,41 @@ import argparse
 import csv
 import json
 import math
+import pickle
 from pathlib import Path
 
 
-def _load_summary(path):
+def load_summary(path):
+    """The run's summary.json, or the same dict rebuilt from scenario_result.pkl
+    and metrics.json: runs made before 2026-10-27 no longer carry summary.json."""
     path = Path(path)
     if path.is_dir():
+        if not (path / "summary.json").exists():
+            return _summary_from_run_dir(path)
         path = path / "summary.json"
     with path.open("r") as f:
         return json.load(f)
+
+
+def _summary_from_run_dir(run_dir):
+    metrics = {}
+    if (run_dir / "metrics.json").exists():
+        with (run_dir / "metrics.json").open("r") as f:
+            metrics = json.load(f)
+    policy_logs = {}
+    if (run_dir / "scenario_result.pkl").exists():
+        with (run_dir / "scenario_result.pkl").open("rb") as f:
+            result = pickle.load(f)
+        for actor_key, actor_result in result.items():
+            if isinstance(actor_result, dict) and "policy_log" in actor_result:
+                policy_logs[actor_key] = actor_result["policy_log"]
+    return {
+        "ran_successfully": metrics.get("ran_successfully"),
+        "error": metrics.get("error"),
+        # summary.json went through json.dump, so the round trip makes the
+        # rebuilt logs identical to what the file held (tuples become lists).
+        "policy_logs": json.loads(json.dumps(policy_logs)),
+    }
 
 
 def _iter_ego_steps(summary):
@@ -261,7 +287,7 @@ def _jerk_from_accel_steps(steps, actual_accel):
 
 
 def analyze_path(path):
-    summary = _load_summary(path)
+    summary = load_summary(path)
     metrics = analyze_summary(summary)
     metrics["path"] = str(path)
     return metrics

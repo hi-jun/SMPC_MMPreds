@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import json
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -9,19 +9,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from analyze_acc_scenario_result import load_summary as _load_summary  # noqa: E402
+
 
 INTENTION_COLORS = {
     "LK": "#7b2cbf",
     "LLC": "#1f77b4",
     "RLC": "#ff7f0e",
 }
-
-
-def _load_summary(path: Path) -> dict:
-    if path.is_dir():
-        path = path / "summary.json"
-    with path.open("r") as f:
-        return json.load(f)
 
 
 def _ego_steps(summary: dict) -> list[dict]:
