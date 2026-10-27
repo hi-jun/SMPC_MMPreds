@@ -278,6 +278,8 @@ results/acc_scenario_sweep/<sweep>/<policy>/<group>/
         carla_server.log                     # only with --fresh-server-per-run
 ```
 
+Runs made before 2026-10-27 no longer carry `summary.json` (deleted on 2026-10-27 to free disk, 94 GiB; it was `{error, ran_successfully, policy_logs}`, i.e. the pickle's per-actor `policy_log` after a JSON round trip plus the two flags that `metrics.json` also holds; 4 spawn-failure runs without a pickle keep theirs). The tools read `scenario_result.pkl` + `metrics.json` instead: `analyze_acc_scenario_result.load_summary` rebuilds the same dict, the animation tool and the older devel readers go through it, and `sweep_acc_scenarios.py --resume` counts a run with `resolved_config.json` + `metrics.json` + `scenario_result.pkl` as finished (38ed197). New runs still write `summary.json`; the watchdog keeps it as a live activity marker.
+
 `scenario_result.pkl` is a dict.
 
 - **Per-actor keys:** `ego_<i>`, `target_cutin_<i>`, `traffic_cutin_lane_lead_<i>` and so on.
@@ -335,6 +337,7 @@ Inside it:
   - Keep one-off analysis scripts out of the repository.
 - **Claims.** Report only improvements that were measured. Before comparing with an older sweep, re-aggregate both with the current script, because metric definitions have changed over time.
 - **Changes.** Keep them surgical: touch only what the task needs, and match the existing style.
+- **Sweep roots deleted on 2026-10-27 to free disk.** 88 of the 120 roots under `results/acc_scenario_sweep/` (every superseded, invalid, aborted or uncited root of the inventory, 112 GiB) and the `summary.json` of the 32 remaining roots (94 GiB) were deleted; the disk went from 98 % to 74 %. The numbers quoted in this file stay as text; the list of what was deleted and what was kept, and why, is in `results/acc_scenario_sweep/CLEANUP_PLAN_20261027.md` (§8, with `cleanup_executed_20261027.sh`). `cutin_final_20260905` and `cutout_baselines_20260905` were kept because `overleaf/자소서_연구경력.md` cites them.
 
 ## 10. Open items (2026-10-20)
 
