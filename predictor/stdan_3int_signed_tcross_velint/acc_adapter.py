@@ -510,6 +510,8 @@ class STDAN3IntACCAdapter:
         entry_plan: Optional[Dict[int, np.ndarray]] = None,
         entry_clearance: float = 0.0,
         entry_margin: float = 0.0,
+        no_cutout: bool = False,
+        lk_sigma: bool = False,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -582,6 +584,8 @@ class STDAN3IntACCAdapter:
                         False if lateral_latched is None
                         else bool(lateral_latched.get(target_id, False))),
                     lateral_gate=lateral_gate,
+                    no_cutout=no_cutout,
+                    lk_sigma=lk_sigma,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

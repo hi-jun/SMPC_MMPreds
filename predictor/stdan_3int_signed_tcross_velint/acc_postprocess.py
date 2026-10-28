@@ -33,6 +33,9 @@ class ACCModePrediction:
     lead_covariance: Optional[np.ndarray] = None
     clearance_scale: float | np.ndarray = 1.0  # per-step array once gap recovery applies
     chance_confidence: float = float("nan")  # Benciolini beta_j; NaN = deterministic mode
+    # ``lksigma``: beta for the sigma term alone on an ego-lane lane-keeping mode
+    # (its standoff stays a hard constraint); NaN = no sigma term.
+    sigma_confidence: float = float("nan")
     # Name under which the mode enters joint-scenario names and effective-lead
     # keys: ``mode_name`` unless set.  ``trajcutin`` labels the cut-in mode made
     # from an entering lane-keeping trajectory ``cutin/LK`` so that two cut-in
@@ -382,6 +385,7 @@ def _mode_specs_for_relation(
     raw_probs: np.ndarray,
     memberships: Optional[np.ndarray] = None,
     lk_entry_as_cutin: bool = False,
+    no_cutout: bool = False,
 ) -> List[tuple[str, List[int], float]]:
     """Mapping of the raw LK/LLC/RLC modes onto the ACC modes.
 
@@ -419,6 +423,13 @@ def _mode_specs_for_relation(
     ``memberships`` is the per-mode ego-lane occupancy the constraints use, one
     row per raw mode.  Without it there is no trajectory to consult and the
     ego-lane mapping falls back to the label.
+
+    With ``no_cutout`` (``nocutout``, 2026-10-28) an ego-lane vehicle gets no
+    ``cutout`` mode: its departing trajectories are dropped, so its lane-keeping
+    mode, renormalised to probability 1 by the caller, keeps the most likely
+    trajectory that stays in the lane and its full standoff.  The paper treats
+    cut-in scenarios only; a cut-out hypothesis relaxed the standoff of a lead
+    that then stayed (NGSIM no-cut-in hard brakes, 2026-10-28).
     """
     if relation in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT):
         cutin_idx = _labelled_cutin_index(relation)
@@ -434,17 +445,15 @@ def _mode_specs_for_relation(
         )
     if relation == REL_EGO_LANE:
         if memberships is None:
-            return [
-                ("lk", [0], float(raw_probs[0])),
-                ("cutout", [1, 2], float(raw_probs[1] + raw_probs[2])),
-            ]
+            return [("lk", [0], float(raw_probs[0]))] + (
+                [] if no_cutout else [("cutout", [1, 2], float(raw_probs[1] + raw_probs[2]))])
         indices = list(range(min(3, int(raw_probs.size))))
         cutout_indices = [
             idx for idx in indices[1:] if ends_outside_ego_lane(memberships[idx])
         ]
         lk_indices = [idx for idx in indices if idx not in cutout_indices]
         specs = [("lk", lk_indices, float(np.sum(raw_probs[lk_indices])))]
-        if cutout_indices:
+        if cutout_indices and not no_cutout:
             specs.append(
                 ("cutout", cutout_indices, float(np.sum(raw_probs[cutout_indices])))
             )
@@ -648,6 +657,7 @@ def chance_cutout_clearance(
     relation_to_ego_lane: str,
     reference_beta: float,
     vanish_threshold: float,
+    lk_sigma: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     """Turn an ego-lane vehicle's lane-keeping mode into a confidence chance constraint.
 
@@ -682,6 +692,13 @@ def chance_cutout_clearance(
     hypothesis that is unlikely keeps its (already small) scale rather than
     disappearing, so the vehicle is never left unconstrained.  Adjacent-lane
     vehicles are untouched.
+
+    With ``lk_sigma`` (``lksigma``, 2026-10-28) the ``lk`` mode also records its
+    ``beta_j`` as ``sigma_confidence``, so the controller adds the sigma term
+    ``q(beta_j) * sigma`` to its cells the way it does on a cut-in cell.  The
+    cell's standoff stays a hard constraint: ``chance_confidence`` stays NaN,
+    which is what keeps it out of the ``dopt`` cells.  A lead predicted to speed
+    up without reason is then held back by the spread of its own prediction.
     """
     reference_beta = float(reference_beta)
     vanish_threshold = float(vanish_threshold)
@@ -727,6 +744,8 @@ def chance_cutout_clearance(
                 scale = max(scale, CUTOUT_CLEARANCE_FLOOR)
             mode.clearance_scale = np.minimum(
                 np.asarray(mode.clearance_scale, dtype=float), scale)
+            if lk_sigma and mode.mode_name == "lk":
+                mode.sigma_confidence = beta
         if mode.mode_name == "lk" and mode.probability < vanish_threshold:
             mode.active_mask[:] = False
         result[mode.mode_name] = {"confidence": beta, "scale": float(np.asarray(mode.clearance_scale).ravel()[0])}
@@ -875,7 +894,11 @@ def process_vehicle_prediction(
     lateral_speed_mps: Optional[float] = None,
     lateral_latched: bool = False,
     lateral_gate: bool = False,
+    no_cutout: bool = False,
+    lk_sigma: bool = False,
 ) -> ACCProcessedPrediction:
+    if no_cutout and use_trajectory_aware_cutin_mapping:
+        raise ValueError("nocutout acts on the default mapping, not the trajectory-aware one")
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     context_trust_info = None
     if context_trust is not None:
@@ -942,7 +965,7 @@ def process_vehicle_prediction(
     mode_specs = (
         trajectory_mode_specs
         if use_trajectory_aware_cutin_mapping
-        else _mode_specs_for_relation(relation_to_ego_lane, raw_probs, memberships, lk_entry_as_cutin)
+        else _mode_specs_for_relation(relation_to_ego_lane, raw_probs, memberships, lk_entry_as_cutin, no_cutout)
     )
     prob_maps = _acc_probabilities_from_mode_specs(raw_probs, raw_map, mode_specs)
     mode_predictions = []
@@ -992,7 +1015,8 @@ def process_vehicle_prediction(
         sigma_cap=cutin_chance_sigma_cap,
     )
     cutin_chance_confidences.update(chance_cutout_clearance(
-        mode_predictions, relation_to_ego_lane, cutin_chance_ref, cutin_probability_threshold
+        mode_predictions, relation_to_ego_lane, cutin_chance_ref, cutin_probability_threshold,
+        lk_sigma=lk_sigma,
     ))
     tlc_clearance_scales = tlc_cutin_clearance(
         mode_predictions, cutin_clearance_tlc_ref, dt
@@ -1020,6 +1044,8 @@ def process_vehicle_prediction(
             "trajectory_suggested_cutin_raw_idx": trajectory_cutin_raw_idx,
             "used_trajectory_aware_cutin_mapping": bool(use_trajectory_aware_cutin_mapping),
             "lk_entry_as_cutin": bool(lk_entry_as_cutin),
+            "no_cutout": bool(no_cutout),
+            "lk_sigma": bool(lk_sigma),
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),
@@ -1210,6 +1236,7 @@ def build_multitarget_lead_prediction(
     active_mask = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     clearance_scale = np.ones((len(scenarios), horizon + 1), dtype=float)
     chance_confidence = np.full((len(scenarios), horizon + 1), np.nan)
+    sigma_confidence = np.full((len(scenarios), horizon + 1), np.nan)
     lead_mode_lk = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     lead_vehicle_ids = np.full((len(scenarios), horizon + 1), -1, dtype=int)
     lead_mode_probability = np.zeros((len(scenarios), horizon + 1), dtype=float)
@@ -1274,6 +1301,7 @@ def build_multitarget_lead_prediction(
                 covariances[scenario_out_idx, step] = base_cov
             active_mask[scenario_out_idx, step] = True
             chance_confidence[scenario_out_idx, step], clearance_scale[scenario_out_idx, step] = cell
+            sigma_confidence[scenario_out_idx, step] = float(selected.sigma_confidence)
             lead_mode_lk[scenario_out_idx, step] = selected.mode_name == "lk"
             lead_vehicle_ids[scenario_out_idx, step] = int(selected.vehicle_id)
             lead_mode_probability[scenario_out_idx, step] = float(selected.probability)
@@ -1319,6 +1347,7 @@ def build_multitarget_lead_prediction(
         active_mask=active_mask,
         clearance_scale=clearance_scale,
         chance_confidence=chance_confidence,
+        sigma_confidence=sigma_confidence,
         lead_mode_lk=lead_mode_lk,
         lead_vehicle_ids=lead_vehicle_ids,
         lead_mode_probability=lead_mode_probability,

@@ -132,6 +132,13 @@ class ACCNairSMPCAgent(object):
         self.lk_entry_as_cutin = self._parse_lk_entry_as_cutin(smpc_config)
         if self.lk_entry_as_cutin and self.predictor_type != "stdan_3int":
             raise ValueError("trajcutin needs the stdan_3int predictor")
+        self.no_cutout = self._parse_no_cutout(smpc_config)
+        self.lk_sigma = self._parse_lk_sigma(smpc_config)
+        if (self.no_cutout or self.lk_sigma) and self.predictor_type != "stdan_3int":
+            raise ValueError("nocutout and lksigma need the stdan_3int predictor")
+        if self.lk_sigma and not self.cutin_chance_ref:
+            # The sigma term takes beta_j = min(p, beta_ref) from cutin_chance.
+            raise ValueError("lksigma needs cutin_chance<beta_ref>")
         self.entry_pass = self._parse_entry_pass(smpc_config)
         self.entry_pass_margin = self._parse_entry_pass_margin(smpc_config)
         if self.entry_pass and self.predictor_type != "stdan_3int":
@@ -865,6 +872,8 @@ class ACCNairSMPCAgent(object):
                 lateral_speeds=target_lateral_speed,
                 lateral_latched=self._ctx_latched,
                 lateral_gate=self.lateral_gate,
+                no_cutout=self.no_cutout,
+                lk_sigma=self.lk_sigma,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
                     "entry_margin": self.entry_pass_margin} if entry_plan is not None else {}),
             )
@@ -1686,6 +1695,26 @@ class ACCNairSMPCAgent(object):
         ``acc_postprocess._mode_specs_for_relation``.
         """
         return "trajcutin" in str(smpc_config)
+
+    @staticmethod
+    def _parse_no_cutout(smpc_config):
+        """Read ``nocutout`` from the config string (2026-10-28).
+
+        With it an ego-lane vehicle gets no cut-out mode: it keeps its lane with
+        probability 1 and its full standoff.  See
+        ``acc_postprocess._mode_specs_for_relation``.
+        """
+        return "nocutout" in str(smpc_config)
+
+    @staticmethod
+    def _parse_lk_sigma(smpc_config):
+        """Read ``lksigma`` from the config string (2026-10-28).
+
+        With it the ego-lane lead's lane-keeping cells also get the confidence
+        chance constraint's sigma term, ``q(min(p_lk, beta_ref)) * sigma``; the
+        standoff stays hard.  See ``acc_postprocess.chance_cutout_clearance``.
+        """
+        return "lksigma" in str(smpc_config)
 
     @staticmethod
     def _parse_cutin_clearance_tlc_ref(smpc_config):

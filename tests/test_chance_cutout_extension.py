@@ -404,5 +404,78 @@ class TestSigmaCapOnVacatedCells(unittest.TestCase):
         np.testing.assert_array_equal(capped.active_mask, default.active_mask)
 
 
+class TestNoCutoutAndLkSigma(unittest.TestCase):
+    """``nocutout`` and ``lksigma`` (2026-10-28).
+
+    ``nocutout``: an ego-lane vehicle gets no cut-out mode, so a lead believed to
+    be leaving keeps its lane at probability 1 and its full standoff.
+    ``lksigma``: the ego-lane lead's lane-keeping cells get the sigma term
+    ``q(min(p, beta_ref)) * sigma`` without becoming ``dopt`` cells.
+    """
+
+    HORIZON = 6
+
+    def _lead(self, lk_prob, cutout_prob, **kwargs):
+        raw = ego_lane_raw(1, 20.0, 10.0, lk_prob, cutout_prob, self.HORIZON, leave_step=4)
+        return process(raw, REL_EGO_LANE, 20.0, 0.0, 10.0, self.HORIZON,
+                       cutin_chance_ref=REF, cutin_probability_threshold=VANISH, **kwargs)
+
+    def _build(self, processed):
+        return build_multitarget_lead_prediction(
+            [processed], ego_state=np.array([0.0, 10.0]), horizon=self.HORIZON, desired_speed=15.0,
+            num_modes=4, reference_beta=REF, vanish_threshold=VANISH)
+
+    def test_nocutout_keeps_a_leaving_lead_whole(self):
+        default = modes_by_name(self._lead(0.3, 0.7))
+        self.assertIn("cutout", default)
+        self.assertLess(default["lk"].clearance_scale, 1.0)
+        by_name = modes_by_name(self._lead(0.3, 0.7, no_cutout=True))
+        self.assertEqual(list(by_name), ["lk"])
+        lk = by_name["lk"]
+        self.assertAlmostEqual(lk.probability, 1.0, places=12)
+        self.assertAlmostEqual(lk.clearance_scale, 1.0, places=12)
+        self.assertTrue(lk.active_mask.all())
+        self.assertNotIn(1, list(lk.raw_mode_indices))     # the departing trajectory is dropped
+        np.testing.assert_array_equal(lk.frenet[:, 1], 0.0)   # and the lead keeps a staying one
+
+    def test_nocutout_without_trajectories_maps_by_label(self):
+        from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import _mode_specs_for_relation
+        probs = np.array([0.2, 0.5, 0.3])
+        self.assertEqual(_mode_specs_for_relation(REL_EGO_LANE, probs, None, no_cutout=True), [("lk", [0], 0.2)])
+        self.assertEqual([name for name, _, _ in _mode_specs_for_relation(REL_EGO_LANE, probs, None)],
+                         ["lk", "cutout"])
+
+    def test_lksigma_marks_the_lane_keeping_mode_only(self):
+        self.assertTrue(np.isnan(modes_by_name(self._lead(0.4, 0.6))["lk"].sigma_confidence))
+        by_name = modes_by_name(self._lead(0.4, 0.6, lk_sigma=True))
+        self.assertAlmostEqual(by_name["lk"].sigma_confidence, 0.4, places=12)
+        self.assertTrue(np.isnan(by_name["lk"].chance_confidence))
+        self.assertTrue(np.isnan(by_name["cutout"].sigma_confidence))
+        lk = modes_by_name(self._lead(0.4, 0.6, no_cutout=True, lk_sigma=True))["lk"]
+        self.assertAlmostEqual(lk.sigma_confidence, REF, places=12)    # p = 1, capped at beta_ref
+
+    def test_lksigma_cells_get_the_sigma_term_but_stay_hard(self):
+        from dataclasses import replace
+        from utils.acc_nair_smpc import (
+            NairACCSMPC, SAFETY_CONFIDENCE_CHANCE, cell_sigma_confidence, original_nair_acc_config,
+            safety_std, standoff_shortfall_mask)
+        prediction, _ = self._build(self._lead(0.3, 0.7, no_cutout=True, lk_sigma=True))
+        plain, _ = self._build(self._lead(0.3, 0.7, no_cutout=True))
+        active = prediction.active_mask
+        self.assertTrue(active[0].all())
+        np.testing.assert_allclose(prediction.sigma_confidence[active], REF)
+        self.assertTrue(np.isnan(prediction.chance_confidence).all())
+        self.assertFalse(standoff_shortfall_mask(prediction, include_lk=False).any())
+        self.assertTrue(np.isnan(plain.sigma_confidence).all())
+        config = replace(original_nair_acc_config(), safety_constraint_mode=SAFETY_CONFIDENCE_CHANCE)
+        stub = type("Stub", (), {"config": config})()
+        for step in range(self.HORIZON + 1):
+            self.assertEqual(cell_sigma_confidence(prediction, 0, step), REF)
+            self.assertAlmostEqual(
+                NairACCSMPC._cell_tightening(stub, prediction, None, 0, step),
+                confidence_quantile(REF) * safety_std(prediction.covariances[0, step], config), places=12)
+            self.assertEqual(NairACCSMPC._cell_tightening(stub, plain, None, 0, step), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

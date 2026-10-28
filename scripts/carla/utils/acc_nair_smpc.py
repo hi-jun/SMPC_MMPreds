@@ -464,6 +464,10 @@ class MultimodalLeadPrediction:
     # Benciolini confidence beta_j per (mode, step); NaN marks a deterministic
     # cell (ego-lane lead) that gets no sigma-based tightening.
     chance_confidence: Optional[np.ndarray] = None
+    # ``lksigma``: beta for the sigma term alone where ``chance_confidence`` is
+    # NaN (the ego-lane lead's lane-keeping cells), so those cells get
+    # q(beta) * sigma without becoming ``dopt`` cells; NaN or None = none.
+    sigma_confidence: Optional[np.ndarray] = None
     # True where the cell's lead is an ego-lane vehicle in its lane-keeping
     # mode, the cells ``dopt<w>lk`` prices as well; None when the predictor
     # does not say (then only cut-in cells are priced).
@@ -550,6 +554,14 @@ class MultimodalLeadPrediction:
             finite = self.chance_confidence[np.isfinite(self.chance_confidence)]
             if np.any(finite < 0.0) or np.any(finite > 1.0):
                 raise ValueError("finite chance_confidence entries must lie in [0, 1]")
+        if self.sigma_confidence is not None:
+            self.sigma_confidence = np.asarray(self.sigma_confidence, dtype=float)
+            expected = (self.num_modes, horizon + 1)
+            if self.sigma_confidence.shape != expected:
+                raise ValueError("sigma_confidence must have shape %s" % (expected,))
+            finite = self.sigma_confidence[np.isfinite(self.sigma_confidence)]
+            if np.any(finite < 0.0) or np.any(finite > 1.0):
+                raise ValueError("finite sigma_confidence entries must lie in [0, 1]")
         if self.lead_mode_lk is not None:
             self.lead_mode_lk = np.asarray(self.lead_mode_lk, dtype=bool)
             expected = (self.num_modes, horizon + 1)
@@ -854,7 +866,7 @@ class OldACCReferenceAdapter:
                 if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
                     safe_gap += confidence_tightening(
                         lead_prediction.covariances[mode, step],
-                        lead_prediction.chance_confidence[mode, step],
+                        cell_sigma_confidence(lead_prediction, mode, step),
                         self.config,
                     )
                 target_s = lead_s - safe_gap
@@ -1191,6 +1203,10 @@ class NairACCSMPC:
             active_mask=prediction.active_mask[:, :self.config.horizon + 1],
             clearance_scale=prediction.clearance_scale[:, :self.config.horizon + 1],
             chance_confidence=prediction.chance_confidence[:, :self.config.horizon + 1],
+            sigma_confidence=(
+                None if prediction.sigma_confidence is None
+                else prediction.sigma_confidence[:, :self.config.horizon + 1]
+            ),
             lead_mode_lk=(
                 None if prediction.lead_mode_lk is None
                 else prediction.lead_mode_lk[:, :self.config.horizon + 1]
@@ -1587,7 +1603,7 @@ class NairACCSMPC:
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
             return confidence_tightening(
                 prediction.covariances[mode, step],
-                prediction.chance_confidence[mode, step],
+                cell_sigma_confidence(prediction, mode, step),
                 self.config,
             )
         return 0.0
@@ -3071,6 +3087,19 @@ def confidence_quantile(beta):
     """
     beta = float(np.clip(beta, 0.0, 1.0 - 1.0e-9))
     return float(norm.ppf(0.5 * (1.0 + beta)))
+
+
+def cell_sigma_confidence(prediction, mode, step):
+    """The confidence the sigma term of cell (mode, step) uses.
+
+    ``chance_confidence`` where it is finite (cut-in cells); otherwise, with
+    ``lksigma``, the cell's ``sigma_confidence`` (the ego-lane lead's lane-keeping
+    cells); NaN when neither applies.
+    """
+    beta = prediction.chance_confidence[mode, step]
+    if not np.isfinite(beta) and prediction.sigma_confidence is not None:
+        beta = prediction.sigma_confidence[mode, step]
+    return beta
 
 
 def confidence_tightening(lead_covariance, beta, config):
