@@ -175,6 +175,16 @@ class NairACCConfig:
     #: unlikely the cut-in is; with it the branch trades ``w * p_cell`` against
     #: its jerk terms.  With one multi-mode target this is ``w * P_j^2``.
     standoff_shortfall_cell_price: bool = False
+    #: ``alag<tau>``: a first-order lag from the commanded to the actual
+    #: acceleration in the prediction model, ``tau * da/dt + a = u`` (Yoon et
+    #: al., IEEE Access 2021, eq. 25; 2026-10-29).  The QP then propagates
+    #: [s, v, a]: ``a`` starts at the ego's actual acceleration
+    #: (``NairACCSMPC.solve(ego_accel=)``; without it the previous command,
+    #: exact for an ideal actuator) and follows the exact zero-order-hold
+    #: discretisation over ``dt`` (``acc_lag_coefficients``); the bounds, the
+    #: jerk rows and the costs stay on the command ``u``.  ``None`` is the
+    #: double integrator.  Cached feedback QP only.
+    accel_lag_tau: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -241,6 +251,11 @@ class NairACCConfig:
             raise ValueError("standoff_shortfall_lk_cutin_only (dopt<w>lkr) needs standoff_shortfall_on_lk")
         if self.standoff_shortfall_cell_price and self.standoff_shortfall_weight is None:
             raise ValueError("standoff_shortfall_cell_price (pricep2) needs standoff_shortfall_weight")
+        if self.accel_lag_tau is not None:
+            if not self.accel_lag_tau > 0.0:
+                raise ValueError("accel_lag_tau (alag<tau>) must be positive")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("accel_lag_tau (alag<tau>) is implemented only in the cached feedback QP")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -778,6 +793,7 @@ class CachedFeedbackScalarChanceQP:
     short_var: Any = None
     shortfall_mask_param: Any = None
     shortfall_price_param: Any = None
+    a0_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -961,6 +977,7 @@ class NairACCSMPC:
         self.reference_adapter = OldACCReferenceAdapter(self.config)
         self.last_solution = None
         self._previous_accel_cmd = 0.0
+        self._ego_accel = 0.0  # alag<tau>: the actual acceleration the lagged model starts from
         self._command_dt = float(self.config.dt)
         self._open_loop_fixed_qp_cache = {}
         self._feedback_scalar_chance_qp_cache = {}
@@ -991,10 +1008,11 @@ class NairACCSMPC:
             lead_prediction,
             warm_start=None,
             previous_accel_cmd=None,
-            command_dt=None):
+            command_dt=None,
+            ego_accel=None):
         solve_start = time.perf_counter()
         timing_breakdown = {}
-        self._set_command_context(previous_accel_cmd, command_dt)
+        self._set_command_context(previous_accel_cmd, command_dt, ego_accel)
 
         phase_start = time.perf_counter()
         prediction = self._trim_prediction(lead_prediction)
@@ -1041,7 +1059,7 @@ class NairACCSMPC:
     def compute_acceleration(self, ego_state, lead_prediction):
         return float(self.solve(ego_state, lead_prediction).action)
 
-    def _set_command_context(self, previous_accel_cmd, command_dt):
+    def _set_command_context(self, previous_accel_cmd, command_dt, ego_accel=None):
         if previous_accel_cmd is None:
             previous_accel_cmd = 0.0
         previous_accel_cmd = float(previous_accel_cmd)
@@ -1052,6 +1070,10 @@ class NairACCSMPC:
             self.config.a_min,
             self.config.a_max,
         ))
+        # alag<tau>: without a measured acceleration the previous command, which
+        # an ideal actuator (CARLA's) has already reached.
+        ego_accel = self._previous_accel_cmd if ego_accel is None else float(ego_accel)
+        self._ego_accel = ego_accel if np.isfinite(ego_accel) else self._previous_accel_cmd
 
         if command_dt is None:
             command_dt = self.config.dt
@@ -1291,6 +1313,11 @@ class NairACCSMPC:
             raise ValueError(
                 "standoff_shortfall_weight (dopt<w>) is implemented only in the cached feedback "
                 "confidence_chance QP, and this configuration would solve elsewhere")
+        if self.config.accel_lag_tau is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "accel_lag_tau (alag<tau>) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1926,6 +1953,7 @@ class NairACCSMPC:
             None if self.config.standoff_shortfall_weight is None
             else float(self.config.standoff_shortfall_weight),
             bool(self.config.standoff_shortfall_cell_price),
+            None if self.config.accel_lag_tau is None else float(self.config.accel_lag_tau),
         )
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -1966,6 +1994,8 @@ class NairACCSMPC:
             self._brake_distance_bound_data(x0, num_modes)
         )
         opti.set_value(problem.x0_param, np.asarray(x0, dtype=float).reshape((NX, 1)))
+        if problem.a0_param is not None:
+            opti.set_value(problem.a0_param, self._ego_accel)
         opti.set_value(problem.prev_u_param, np.asarray(reference.prev_u, dtype=float))
         opti.set_value(problem.previous_accel_param, previous_accel_cmd)
         opti.set_value(problem.command_dt_param, command_dt)
@@ -2159,6 +2189,9 @@ class NairACCSMPC:
         shortfall_weight = self.config.standoff_shortfall_weight
         short_var = opti.variable(num_modes, horizon + 1) if shortfall_weight is not None else None
         x0_param = opti.parameter(NX)
+        accel_lag = (acc_lag_coefficients(self.config.dt, self.config.accel_lag_tau)
+                     if self.config.accel_lag_tau is not None else None)
+        a0_param = opti.parameter() if accel_lag is not None else None
         prev_u_param = opti.parameter(num_modes, horizon)
         previous_accel_param = opti.parameter()
         command_dt_param = opti.parameter()
@@ -2235,6 +2268,7 @@ class NairACCSMPC:
             for sample_idx in range(num_samples):
                 state_s = x0_param[0]
                 state_v = x0_param[1]
+                state_a = a0_param
                 states_s = [state_s]
                 states_v = [state_v]
                 inputs = []
@@ -2264,8 +2298,16 @@ class NairACCSMPC:
                             inputs[step - 1],
                             self.config.dt,
                         )
-                    state_s = state_s + self.config.dt * state_v + 0.5 * self.config.dt ** 2 * control
-                    state_v = state_v + self.config.dt * control
+                    if accel_lag is None:
+                        state_s = state_s + self.config.dt * state_v + 0.5 * self.config.dt ** 2 * control
+                        state_v = state_v + self.config.dt * control
+                    else:
+                        # alag<tau>: s and v move with the actual acceleration, which lags the command
+                        c_sa, c_va, decay = accel_lag
+                        state_s = (state_s + self.config.dt * state_v + c_sa * state_a
+                                   + (0.5 * self.config.dt ** 2 - c_sa) * control)
+                        state_v = state_v + c_va * state_a + (self.config.dt - c_va) * control
+                        state_a = decay * state_a + (1.0 - decay) * control
                     states_s.append(state_s)
                     states_v.append(state_v)
                     opti.subject_to(state_v >= self.config.v_min)
@@ -2372,6 +2414,7 @@ class NairACCSMPC:
             short_var=short_var,
             shortfall_mask_param=shortfall_mask_param,
             shortfall_price_param=shortfall_price_param,
+            a0_param=a0_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
@@ -2924,6 +2967,7 @@ class NairACCSMPC:
         states = np.zeros((self.config.horizon + 1, NX))
         inputs = np.zeros(self.config.horizon)
         states[0] = x0
+        accel_state = self._ego_accel
         process_history = []
         for step in range(self.config.horizon):
             lead_dev = lead_sample[step] - prediction.means[mode, step]
@@ -2931,7 +2975,12 @@ class NairACCSMPC:
             accel = reference.prev_u[mode, step] + delta_u
             accel = float(np.clip(accel, self.config.a_min, self.config.a_max))
             inputs[step] = accel
-            states[step + 1] = acc_step(states[step], accel, self.config.dt) + process_sample[step]
+            if self.config.accel_lag_tau is None:
+                states[step + 1] = acc_step(states[step], accel, self.config.dt) + process_sample[step]
+            else:
+                next_state, accel_state = acc_lag_step(
+                    states[step], accel_state, accel, self.config.dt, self.config.accel_lag_tau)
+                states[step + 1] = next_state + process_sample[step]
             process_history.append(process_sample[step])
         return states, inputs
 
@@ -2942,6 +2991,7 @@ class NairACCSMPC:
         for mode in range(prediction.num_modes):
             states = np.zeros((self.config.horizon + 1, NX))
             states[0] = x0
+            accel_state = self._ego_accel
             previous_input = previous_accel_cmd
             for step in range(self.config.horizon):
                 if prediction.active_mask[mode, step]:
@@ -2959,11 +3009,15 @@ class NairACCSMPC:
                 accel = self._rate_limited_accel(desired, previous_input, step_dt)
                 policy.h[mode, step, 0] = accel - reference.prev_u[mode, step]
                 previous_input = accel
-                states[step + 1] = acc_step(
-                    states[step],
-                    accel,
-                    self.config.dt,
-                )
+                if self.config.accel_lag_tau is None:
+                    states[step + 1] = acc_step(
+                        states[step],
+                        accel,
+                        self.config.dt,
+                    )
+                else:
+                    states[step + 1], accel_state = acc_lag_step(
+                        states[step], accel_state, accel, self.config.dt, self.config.accel_lag_tau)
             for step in range(self.config.horizon + 1):
                 if prediction.active_mask[mode, step]:
                     slack[mode, step] = max(
@@ -3002,6 +3056,29 @@ def rollout_dynamics(initial_state, accelerations, dt):
     for step, acceleration in enumerate(accelerations):
         states[step + 1] = acc_step(states[step], acceleration, dt)
     return states
+
+
+def acc_lag_coefficients(dt, tau):
+    """``alag<tau>``: exact zero-order-hold discretisation of s' = v, v' = a,
+    tau a' = u - a over ``dt``, returned as ``(c_sa, c_va, decay)``:
+    s+ = s + dt v + c_sa a + (dt^2/2 - c_sa) u, v+ = v + c_va a + (dt - c_va) u,
+    a+ = decay a + (1 - decay) u.  As tau -> 0 it becomes the double integrator."""
+    decay = float(np.exp(-float(dt) / float(tau)))
+    c_va = float(tau) * (1.0 - decay)
+    c_sa = float(tau) * (float(dt) - c_va)
+    return c_sa, c_va, decay
+
+
+def acc_lag_step(state, accel, command, dt, tau):
+    """One ``dt`` of the lagged model from [s, v] and the actual acceleration
+    ``accel`` under ``command``; returns ``([s, v], accel)`` after it."""
+    c_sa, c_va, decay = acc_lag_coefficients(dt, tau)
+    state = np.asarray(state, dtype=float)
+    next_state = np.array([
+        state[0] + dt * state[1] + c_sa * accel + (0.5 * dt ** 2 - c_sa) * command,
+        state[1] + c_va * accel + (dt - c_va) * command,
+    ])
+    return next_state, decay * accel + (1.0 - decay) * command
 
 
 def brake_deceleration(config):

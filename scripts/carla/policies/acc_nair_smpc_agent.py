@@ -212,6 +212,10 @@ class ACCNairSMPCAgent(object):
         jerk_limit = self._parse_jerk_limit(smpc_config)
         if jerk_limit is not None:
             self.controller_config.jerk_limit = jerk_limit
+        r_a = self._parse_r_a(smpc_config)
+        if r_a is not None:
+            self.controller_config.r_a = r_a
+        self.controller_config.accel_lag_tau = self._parse_accel_lag_tau(smpc_config)
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -1543,6 +1547,30 @@ class ACCNairSMPCAgent(object):
         ±1.5 m/s³ rate bound (hard here, soft upstream), 2026-10-22.
         """
         match = re.search(r"jlim([0-9]*\.?[0-9]+)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_r_a(smpc_config):
+        """Read ``ra<value>`` from the config string (None = keep the default 1).
+
+        The weight of ``r_a (u - a_ref)^2``, with ``a_ref = 0`` the only cost on
+        the command's size.  ``ra0`` drops it (2026-10-29).  Matched as a whole
+        token, so ``trajcutin`` and ``cutin_ramp`` never read as one.
+        """
+        match = re.search(r"(?:^|_)ra([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_accel_lag_tau(smpc_config):
+        """Read ``alag<tau>`` from the config string (None = the double integrator).
+
+        The time constant [s] of the first-order lag from the commanded to the
+        actual acceleration in the controller's prediction model
+        (``NairACCConfig.accel_lag_tau``), 2026-10-29.  CARLA's ideal actuator
+        has no lag; the agent passes no measured acceleration, so the model
+        starts from the previous command.
+        """
+        match = re.search(r"alag([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else None
 
     @staticmethod
