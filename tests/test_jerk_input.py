@@ -146,12 +146,11 @@ class TestJerkInput(unittest.TestCase):
         self.assertAlmostEqual(stopped.action, stopped.j_nominal[0, 0] * self.COMMAND_DT, places=9)
         self.assertAlmostEqual(stopped.u_nominal[0, 0], self.DT * stopped.j_nominal[0, 0], places=9)
         self.assertGreaterEqual(np.min(stopped.x_nominal[:, :, 1]), -1e-9)
-        # at v_max with a positive acceleration the clamp starts the plan from a_0 = 0
+        # no clamp at v_max: a car is not held there, so the plan starts from the given a_0
         config = self._config()
-        _, capped = self._solve(1.0, ego=np.array([0.0, config.v_max]), previous_accel_cmd=1.0)
+        _, capped = self._solve(0.3, ego=np.array([0.0, config.v_max]), previous_accel_cmd=0.3)
         self.assertNotEqual(capped.solve_path, "fallback")
-        self.assertAlmostEqual(capped.u_nominal[0, 0], self.DT * capped.j_nominal[0, 0], places=9)
-        self.assertLessEqual(capped.action, 1e-9)
+        self.assertAlmostEqual(capped.u_nominal[0, 0], 0.3 + self.DT * capped.j_nominal[0, 0], places=9)
         # the clamp is one-sided: a positive acceleration at standstill is kept
         _, pulling = self._solve(0.8, ego=np.array([0.0, 0.0]), previous_accel_cmd=0.8)
         self.assertAlmostEqual(pulling.u_nominal[0, 0], 0.8 + self.DT * pulling.j_nominal[0, 0], places=9)

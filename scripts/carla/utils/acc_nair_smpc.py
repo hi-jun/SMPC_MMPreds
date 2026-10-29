@@ -190,8 +190,8 @@ class NairACCConfig:
     #: ``j_k``, held over ``dt`` (exact triple-integrator discretisation,
     #: ``acc_jerk_step``); ``a`` starts at the ego's actual acceleration
     #: (``NairACCSMPC.solve(ego_accel=)``, the previous command without it),
-    #: clamped to ``>= 0`` at ``v_min`` and ``<= 0`` at ``v_max`` so a stopped
-    #: car is never asked to keep decelerating.  ``|j_k| <= jerk_limit`` replaces
+    #: clamped to ``>= 0`` at ``v_min`` so a stopped car is never asked to keep
+    #: decelerating (not at ``v_max``, where a car is not held).  ``|j_k| <= jerk_limit`` replaces
     #: the jerk rows on the input differences; the acceleration bounds become
     #: state constraints on ``a_1..a_N``; ``r_jerk j_k^2`` on every step replaces
     #: ``r_jerk ((u_k - u_{k-1})/dt)^2`` and ``r_move (u_0 - u_prev)^2`` (``r_move``
@@ -1098,14 +1098,13 @@ class NairACCSMPC:
         ego_accel = self._previous_accel_cmd if ego_accel is None else float(ego_accel)
         self._ego_accel = ego_accel if np.isfinite(ego_accel) else self._previous_accel_cmd
         if self.config.jerk_input and ego_speed is not None:
-            # Standstill clamp: at a speed bound the plant holds the speed, so the
-            # acceleration the plan starts from cannot point out of the bound
-            # (from v = 0 with a_0 < -0.5, v_1 >= 0 would need j_0 > 5).
+            # Standstill clamp: a stopped car is held, so the acceleration the plan
+            # starts from cannot be negative (from v = 0 with a_0 < -0.5, v_1 >= 0
+            # would need j_0 > 5).  Not at v_max: a car is not held at that bound
+            # (maintainer, 2026-10-29).
             ego_speed = float(ego_speed)
             if ego_speed <= self.config.v_min + 1.0e-3:
                 self._ego_accel = max(self._ego_accel, 0.0)
-            if ego_speed >= self.config.v_max - 1.0e-3:
-                self._ego_accel = min(self._ego_accel, 0.0)
 
         if command_dt is None:
             command_dt = self.config.dt
