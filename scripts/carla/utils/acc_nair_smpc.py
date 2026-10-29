@@ -200,6 +200,29 @@ class NairACCConfig:
     #: ``u_nominal`` keeps the planned accelerations; ``NairACCSolution.j_nominal``
     #: holds the jerk plan.  Cached feedback QP only; not with ``accel_lag_tau``.
     jerk_input: bool = False
+    #: ``relbrake<b>``: a relative-speed safe distance (2026-10-30, maintainer's
+    #: decision), ``b`` in m/s^2.  The required centre gap to a lead with speed
+    #: ``v_l`` is ``L + d0 + max(0, tau v + (v^2 - v_l^2) / (2 b))``: the gap at
+    #: which, if the lead brakes at ``b`` and the ego brakes at ``b`` after the
+    #: reaction time ``tau``, ``d0`` still remains (RSS with reaction time ``tau``,
+    #: no acceleration during it, equal decelerations).  At ``v = v_l`` it is the
+    #: plain ``d_safe = L + d0 + tau v``; a faster lead lowers it to the floor
+    #: ``L + d0``, a slower one raises it.  ``v_l`` is the cell's predicted lead
+    #: speed (``means[.., 1]``, clipped at 0).  It replaces ``tau v`` on every lead
+    #: cell (``speed_gap``): the safety rows, the ``dopt`` priced part (the whole
+    #: speed-dependent part ``h`` is priced; the floor ``alpha (L + d0)`` and the
+    #: price are unchanged), the reference gap, the ``lkr`` recovery test and the
+    #: numeric helpers.  In the QP ``v^2`` is replaced by its tangent at the
+    #: planned speed ``v_bar_k`` the reference uses for its time gap
+    #: (``speed_gap_tangent``; the tangent understates ``v^2`` by
+    #: ``(v - v_bar)^2``), through two per-cell parameters, and ``max(0, .)`` is a
+    #: second row per cell, ``gap >= c (L + d0) + q sigma - xi`` with the cell's
+    #: factor, tightening and slack; with ``dopt`` that row replaces the bound
+    #: ``short <= tau v`` (infeasible where ``h < 0``) and is equivalent to
+    #: ``short <= max(h, 0)`` at the optimum.  The sigma term is unchanged
+    #: (``safety_std`` keeps ``h_ego = [-1, -tau]``).  ``None`` is off.  Cached
+    #: feedback QP only; not with ``brake_distance``.
+    relative_brake_decel: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -276,6 +299,13 @@ class NairACCConfig:
                 raise ValueError("jerk_input (jinput) cannot be combined with accel_lag_tau (alag<tau>)")
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("jerk_input (jinput) is implemented only in the cached feedback QP")
+        if self.relative_brake_decel is not None:
+            if not self.relative_brake_decel > 0.0:
+                raise ValueError("relative_brake_decel (relbrake<b>) must be positive")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("relative_brake_decel (relbrake<b>) is implemented only in the cached feedback QP")
+            if self.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
+                raise ValueError("relative_brake_decel (relbrake<b>) replaces the time-gap standoff, not brake_distance")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -726,6 +756,9 @@ class NairACCSolution:
     #: ``jinput`` only: the planned jerk per (mode, step); ``u_nominal`` then holds the planned
     #: accelerations a_1..a_N and ``action`` is a_0 + j_nominal[0, 0] * command_dt.
     j_nominal: Optional[np.ndarray] = None
+    #: ``relbrake<b>`` only: the largest amount, over the active cells, by which the QP's tangent
+    #: understated the rule's ``v^2`` term at the solved plan, ``(v_k - v_bar_k)^2 / (2 b)`` [m]; 0 without it.
+    speed_gap_tangent_error_max: float = 0.0
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -817,6 +850,9 @@ class CachedFeedbackScalarChanceQP:
     shortfall_mask_param: Any = None
     shortfall_price_param: Any = None
     a0_param: Any = None
+    #: relbrake<b>: slope and intercept of the tangent of the speed-dependent gap per (mode, step); None without it
+    rel_slope_param: Any = None
+    rel_intercept_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -852,12 +888,7 @@ class OldACCReferenceAdapter:
         s_ref = np.tile(base_s_ref, (num_modes, 1))
         v_ref = np.tile(base_v_ref, (num_modes, 1))
 
-        if self.previous_planned_speed is None:
-            planned_v = np.full(horizon + 1, v_ego)
-        else:
-            planned_v = np.asarray(self.previous_planned_speed, dtype=float)
-            if planned_v.shape[0] != horizon + 1:
-                planned_v = np.full(horizon + 1, v_ego)
+        planned_v = self.planned_speed(ego_state)
 
         # Where the ego is expected to be at step k, for the blend below.  It
         # used to be ``base_s_ref``, the free-running ramp, which made the blend
@@ -887,7 +918,9 @@ class OldACCReferenceAdapter:
                 lead_s = lead_prediction.means[mode, step, 0]
                 lead_v = lead_prediction.means[mode, step, 1]
                 safe_gap = self.config.vehicle_length + self.config.d0
-                safe_gap += self.config.time_headway * planned_v[step]
+                # tau * v, or with relbrake<b> the relative-speed gap at the planned speed, where the
+                # QP's tangent is exact, so the reference and the rows ask for the same standoff
+                safe_gap += speed_gap(planned_v[step], lead_v, self.config)
                 # Relax the reference by the same probability-driven factor the
                 # collision constraint uses. Leaving it out makes the tracking
                 # cost demand the full standoff while the constraint allows a
@@ -899,7 +932,8 @@ class OldACCReferenceAdapter:
                 if dopt_cells is not None and dopt_cells[mode, step]:
                     remembered = remembered_standoff[mode, step]
                     safe_gap = (float(remembered) if np.isfinite(remembered) else optimized_standoff(
-                        float(lead_prediction.clearance_scale[mode, step]), planned_v[step], self.config))
+                        float(lead_prediction.clearance_scale[mode, step]), planned_v[step], self.config,
+                        lead_speed=lead_v))
                 # Same reasoning for the sigma term: the constraint below adds
                 # it, so the reference has to ask for it too.
                 if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
@@ -951,6 +985,20 @@ class OldACCReferenceAdapter:
         usable_gap = max((lead_s - safe_gap) - ego_s_at_step, 0.0)
         blend = float(np.clip(usable_gap / distance_to_lead, 0.0, 1.0))
         return blend * free_speed + (1.0 - blend) * lead_v
+
+    def planned_speed(self, ego_state):
+        """The ego speed the reference expects at each step: the previous solve's
+        plan (mode 0), or the measured speed held when there is none or it has
+        the wrong length.  The QP's ``relbrake<b>`` tangent is taken at the same
+        speeds (``NairACCSMPC._solve_feedback_scalar_chance_qp_cached``)."""
+        v_ego = float(ego_state[1])
+        horizon = self.config.horizon
+        if self.previous_planned_speed is None:
+            return np.full(horizon + 1, v_ego)
+        planned_v = np.asarray(self.previous_planned_speed, dtype=float)
+        if planned_v.shape[0] != horizon + 1:
+            planned_v = np.full(horizon + 1, v_ego)
+        return planned_v
 
     def remember_planned_speed(self, x_nominal):
         self.previous_planned_speed = np.asarray(x_nominal[0, :, 1], dtype=float)
@@ -1315,19 +1363,21 @@ class NairACCSMPC:
         active_ids = set(int(v) for v in np.unique(ids[active]))
         self._armed_cutin_vehicles |= set(int(v) for v in np.unique(ids[cutin_cells]))
         self._armed_cutin_vehicles &= active_ids
-        # the in-lane leads at step 0 and the (centre-to-centre) gap to each
-        leads_now = {int(ids[j, 0]): float(prediction.means[j, 0, 0])
+        # the in-lane leads at step 0 and the (centre-to-centre) position and speed of each
+        leads_now = {int(ids[j, 0]): (float(prediction.means[j, 0, 0]), float(prediction.means[j, 0, 1]))
                      for j in range(prediction.num_modes) if active[j, 0] and lk[j, 0]}
         for vid in leads_now:
             if vid in self._armed_cutin_vehicles:
                 self._priced_cutin_vehicles.setdefault(vid, 0)
-        full = required_standoff(ego_state, self.config)
         hold_ticks = max(1, int(round(self.LK_RECOVERY_HOLD_S / self._command_dt)))
         for vid in list(self._priced_cutin_vehicles):
             if vid not in active_ids:
                 released = True
             elif vid in leads_now:
-                recovered = leads_now[vid] - float(ego_state[0]) >= full
+                # the full standoff: d_safe, or with relbrake<b> the relative-speed gap to this lead
+                lead_s, lead_v = leads_now[vid]
+                full = required_standoff(ego_state, self.config, lead_speed=lead_v)
+                recovered = lead_s - float(ego_state[0]) >= full
                 self._priced_cutin_vehicles[vid] = self._priced_cutin_vehicles[vid] + 1 if recovered else 0
                 released = self._priced_cutin_vehicles[vid] >= hold_ticks
             else:  # still in the lane ahead, not at step 0 this tick: keep it, hold the count
@@ -1361,6 +1411,11 @@ class NairACCSMPC:
         if self.config.jerk_input and not self._can_use_cached_feedback_scalar_chance_qp(open_loop, prediction):
             raise ValueError(
                 "jerk_input (jinput) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
+        if self.config.relative_brake_decel is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "relative_brake_decel (relbrake<b>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
@@ -1483,21 +1538,34 @@ class NairACCSMPC:
                         # safety_function scaled the whole standoff; the time gap
                         # is asked in full on these cells (optimized_standoff).
                         scale = float(prediction.clearance_scale[mode, step])
-                        chance_margin_values[mode, step] += (
-                            shortfall[mode, step]
-                            - (1.0 - scale) * self.config.time_headway * x_nominal[mode, step, 1])
+                        if self.config.relative_brake_decel is None:
+                            chance_margin_values[mode, step] += (
+                                shortfall[mode, step]
+                                - (1.0 - scale) * self.config.time_headway * x_nominal[mode, step, 1])
+                        else:  # relbrake<b>: the whole speed-dependent part is asked in full
+                            chance_margin_values[mode, step] += (
+                                shortfall[mode, step]
+                                - (1.0 - scale) * float(speed_gap(
+                                    x_nominal[mode, step, 1], prediction.means[mode, step, 1], self.config)))
                 else:
                     safety_values[mode, step] = np.inf
                     tightening_values[mode, step] = 0.0
                     chance_margin_values[mode, step] = np.inf
         planned_standoff = None
         if self.config.standoff_shortfall_weight is not None:
-            standoff = optimized_standoff(prediction.clearance_scale, x_nominal[:, :, 1], self.config)
+            standoff = optimized_standoff(prediction.clearance_scale, x_nominal[:, :, 1], self.config,
+                                          lead_speed=prediction.means[:, :, 1])
             if shortfall is not None:  # None after a fallback, which plans no shortfall
                 standoff = standoff - shortfall
             planned_standoff = np.where(
                 standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk),
                 standoff, np.nan)
+        speed_gap_tangent_error_max = 0.0
+        if self.config.relative_brake_decel is not None and np.any(prediction.active_mask):
+            # relbrake<b>: how far below the rule's v^2 the QP's tangent sat at the solved plan
+            planned_v = self.reference_adapter.planned_speed(x0)
+            tangent_error = (x_nominal[:, :, 1] - planned_v[None, :]) ** 2 / (2.0 * self.config.relative_brake_decel)
+            speed_gap_tangent_error_max = float(np.max(tangent_error[prediction.active_mask]))
         timing_breakdown["solution_postprocess_s"] = time.perf_counter() - phase_start
 
         j_nominal = None
@@ -1572,6 +1640,7 @@ class NairACCSMPC:
             ),
             planned_standoff=planned_standoff,
             j_nominal=j_nominal,
+            speed_gap_tangent_error_max=speed_gap_tangent_error_max,
         )
 
     def _clipped_jerk(self, jerk):
@@ -1603,10 +1672,15 @@ class NairACCSMPC:
             brake_intercept=0.0,
             tightening=0.0,
             slack=0.0,
-            clearance_scale=1.0):
+            clearance_scale=1.0,
+            speed_slope=None,
+            speed_intercept=None):
         if self.config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
             d_brake = brake_slope * ego_v + brake_intercept
             clearance = self.config.d0 + d_brake
+        elif speed_slope is not None:
+            # relbrake<b>: the tangent of the relative-speed gap at the planned speed (speed_gap_tangent)
+            clearance = self.config.d0 + speed_slope * ego_v + speed_intercept
         else:
             clearance = self.config.d0 + self.config.time_headway * ego_v
         # ``clearance_scale`` multiplies the whole deterministic standoff, footprint
@@ -1647,7 +1721,9 @@ class NairACCSMPC:
             enforce_brake_speed_band=True,
             tightening=0.0,
             slack=0.0,
-            clearance_scale=1.0):
+            clearance_scale=1.0,
+            speed_slope=None,
+            speed_intercept=None):
         opti.subject_to(
             self._symbolic_safety_margin(
                 lead_s,
@@ -1658,6 +1734,8 @@ class NairACCSMPC:
                 tightening=tightening,
                 slack=slack,
                 clearance_scale=clearance_scale,
+                speed_slope=speed_slope,
+                speed_intercept=speed_intercept,
             )
             >= 0.0
         )
@@ -2013,6 +2091,7 @@ class NairACCSMPC:
             bool(self.config.standoff_shortfall_cell_price),
             None if self.config.accel_lag_tau is None else float(self.config.accel_lag_tau),
             bool(self.config.jerk_input),
+            None if self.config.relative_brake_decel is None else float(self.config.relative_brake_decel),
         )
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -2060,6 +2139,13 @@ class NairACCSMPC:
         opti.set_value(problem.command_dt_param, command_dt)
         opti.set_value(problem.lead_s_param, self._cached_safety_lead_s(x0, prediction))
         opti.set_value(problem.lead_v_param, prediction.means[:, :, 1])
+        if problem.rel_slope_param is not None:
+            # relbrake<b>: the tangent at the planned speeds the reference used this tick
+            # (remember_planned_speed runs after the solve, so they are still the previous plan)
+            rel_slope, rel_intercept = speed_gap_tangent(
+                self.reference_adapter.planned_speed(x0)[None, :], prediction.means[:, :, 1], self.config)
+            opti.set_value(problem.rel_slope_param, rel_slope)
+            opti.set_value(problem.rel_intercept_param, rel_intercept)
         opti.set_value(problem.x_ref_s_param, reference.x_ref[:, :, 0])
         opti.set_value(problem.x_ref_v_param, reference.x_ref[:, :, 1])
         opti.set_value(problem.a_ref_param, reference.a_ref)
@@ -2275,6 +2361,14 @@ class NairACCSMPC:
         shortfall_price_param = (
             opti.parameter(num_modes, horizon + 1)
             if shortfall_weight is not None and self.config.standoff_shortfall_cell_price else None)
+        relative_brake = self.config.relative_brake_decel
+        rel_slope_param = opti.parameter(num_modes, horizon + 1) if relative_brake is not None else None
+        rel_intercept_param = opti.parameter(num_modes, horizon + 1) if relative_brake is not None else None
+        # relbrake<b> with dopt<w>: a bound on the shortfall that only switches it off on unpriced cells; it is
+        # the largest value h can take (v = v_max against a stopped lead), and the floor row below is what
+        # keeps a priced cell's shortfall within max(h, 0) (a larger one costs and relaxes nothing)
+        short_bound = (self.config.time_headway * self.config.v_max + self.config.v_max ** 2 / (2.0 * relative_brake)
+                       if relative_brake is not None else None)
         sharing_params = []
 
         opti.subject_to(ca.vec(slack_var) >= 0.0)
@@ -2430,14 +2524,23 @@ class NairACCSMPC:
                 else:
                     tightening = tightening_param[mode, step]
                 slack = slack_var[mode, step]
+                speed_slope = speed_intercept = None
+                if rel_slope_param is not None:
+                    speed_slope, speed_intercept = rel_slope_param[mode, step], rel_intercept_param[mode, step]
                 if short_var is not None:
                     # dopt<w>: on masked cells the row asks for optimized_standoff
                     # - short -- the cell's factor on L + d0 only, the time gap in
                     # full -- so the row's scaled time gap is added back, and the
                     # shortfall may then give up at most that time gap; it is
                     # priced by the scenario probability below.
-                    timegap = self.config.time_headway * states_v[step]
-                    opti.subject_to(short_var[mode, step] <= shortfall_mask_param[mode, step] * timegap)
+                    if rel_slope_param is None:
+                        timegap = self.config.time_headway * states_v[step]
+                        opti.subject_to(short_var[mode, step] <= shortfall_mask_param[mode, step] * timegap)
+                    else:
+                        # relbrake<b>: the priced part is the whole speed-dependent part h (its tangent),
+                        # and the floor row below stands in for short <= h, infeasible where h < 0
+                        timegap = speed_slope * states_v[step] + speed_intercept
+                        opti.subject_to(short_var[mode, step] <= shortfall_mask_param[mode, step] * short_bound)
                     slack = (slack + short_var[mode, step]
                              - shortfall_mask_param[mode, step]
                              * (1.0 - clearance_scale_param[mode, step]) * timegap)
@@ -2454,7 +2557,17 @@ class NairACCSMPC:
                     tightening=tightening,
                     slack=slack,
                     clearance_scale=clearance_scale_param[mode, step],
+                    speed_slope=speed_slope,
+                    speed_intercept=speed_intercept,
                 )
+                if rel_slope_param is not None:
+                    # relbrake<b>: the rule's max(0, h) as a second row, the footprint with the cell's
+                    # factor, the same tightening and the emergency slack alone (no shortfall)
+                    opti.subject_to(
+                        self._symbolic_min_clearance_margin(
+                            lead_s_param[mode, step], states_s[step], slack=slack_var[mode, step],
+                            clearance_scale=clearance_scale_param[mode, step])
+                        - tightening >= 0.0)
 
         if short_var is not None:
             for mode in range(num_modes):
@@ -2504,6 +2617,8 @@ class NairACCSMPC:
             shortfall_mask_param=shortfall_mask_param,
             shortfall_price_param=shortfall_price_param,
             a0_param=a0_param,
+            rel_slope_param=rel_slope_param,
+            rel_intercept_param=rel_intercept_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
@@ -3237,13 +3352,48 @@ def clearance_gap(ego_state, lead_state, config):
     )
 
 
-def required_standoff(ego_state, config):
-    """Deterministic distance the ego must keep behind the lead, footprint included."""
+def speed_gap(speed, lead_speed, config):
+    """The speed-dependent part of the deterministic standoff.
+
+    ``tau * v``; with ``relbrake<b>`` (``NairACCConfig.relative_brake_decel``) and a
+    lead speed, ``max(0, tau v + (v^2 - v_l^2) / (2 b))`` with ``v_l`` clipped at 0,
+    the exact rule (the QP uses its tangent, ``speed_gap_tangent``).  Without a
+    lead speed the plain ``tau * v``, the rule's value at ``v_l = v``.  Array-safe.
+    """
+    b = config.relative_brake_decel
+    if b is None or lead_speed is None:
+        return config.time_headway * speed
+    speed = np.asarray(speed, dtype=float)
+    lead_speed = np.maximum(np.asarray(lead_speed, dtype=float), 0.0)
+    return np.maximum(0.0, config.time_headway * speed + (speed ** 2 - lead_speed ** 2) / (2.0 * b))
+
+
+def speed_gap_tangent(planned_speed, lead_speed, config):
+    """``relbrake<b>``: slope and intercept of the tangent, at the planned speed
+    ``v_bar``, of ``h = tau v + (v^2 - v_l^2) / (2 b)``, the one nonlinear term
+    replaced by ``v^2 ~ 2 v_bar v - v_bar^2``: ``h ~ (tau + v_bar / b) v -
+    (v_bar^2 + v_l^2) / (2 b)``.  Exact at ``v = v_bar`` and below ``h`` by
+    ``(v - v_bar)^2 / (2 b)`` elsewhere.  ``v_l`` is clipped at 0.  The inputs
+    broadcast; both outputs take the broadcast shape.
+    """
+    b = float(config.relative_brake_decel)
+    v_bar = np.asarray(planned_speed, dtype=float)
+    lead_speed = np.maximum(np.asarray(lead_speed, dtype=float), 0.0)
+    slope, intercept = np.broadcast_arrays(
+        config.time_headway + v_bar / b, -(v_bar ** 2 + lead_speed ** 2) / (2.0 * b))
+    return np.array(slope, dtype=float), np.array(intercept, dtype=float)
+
+
+def required_standoff(ego_state, config, lead_speed=None):
+    """Deterministic distance the ego must keep behind the lead, footprint included.
+
+    With ``relbrake<b>`` the relative-speed rule needs the lead's speed; without
+    one it gives the plain ``d_safe`` (``speed_gap``)."""
     ego_state = np.asarray(ego_state, dtype=float)
     if config.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
         clearance = config.d0 + exact_brake_distance(ego_state[1], config)
     else:
-        clearance = config.d0 + config.time_headway * ego_state[1]
+        clearance = config.d0 + speed_gap(ego_state[1], lead_speed, config)
     return float(config.vehicle_length + clearance)
 
 
@@ -3254,11 +3404,12 @@ def safety_function(ego_state, lead_state, config, linearization_speed=None, cle
     return float(
         lead_state[0]
         - ego_state[0]
-        - float(clearance_scale) * required_standoff(ego_state, config)
+        - float(clearance_scale) * required_standoff(ego_state, config, lead_speed=lead_state[1])
     )
 
 
 def safety_std(lead_covariance, config):
+    """The sigma of the safety margin; unchanged by ``relbrake<b>`` (``h_ego`` keeps ``[-1, -tau]``)."""
     lead_covariance = np.asarray(lead_covariance, dtype=float)
     process_covariance = np.asarray(config.process_noise_cov, dtype=float)
     h_lead = np.array([1.0, 0.0])
@@ -3329,14 +3480,15 @@ def standoff_shortfall_mask(prediction, include_lk=False):
     return mask
 
 
-def optimized_standoff(clearance_scale, speed, config):
+def optimized_standoff(clearance_scale, speed, config, lead_speed=None):
     """``dopt<w>``: the most a cut-in chance cell asks for, before any shortfall.
 
     The probability factor on the footprint ``L + d0`` and the time gap
-    ``tau * v`` in full; the optimizer may give up the time gap at a price.
+    ``tau * v`` in full (with ``relbrake<b>`` the relative-speed gap to
+    ``lead_speed``, ``speed_gap``); the optimizer may give up that part at a price.
     """
     return (clearance_scale * (config.vehicle_length + config.d0)
-            + config.time_headway * speed)
+            + speed_gap(speed, lead_speed, config))
 
 
 def _scenario_names(prediction):

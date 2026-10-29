@@ -224,6 +224,7 @@ class ACCNairSMPCAgent(object):
             self.controller_config.r_a = r_a
         self.controller_config.accel_lag_tau = self._parse_accel_lag_tau(smpc_config)
         self.controller_config.jerk_input = self._parse_jerk_input(smpc_config)
+        self.controller_config.relative_brake_decel = self._parse_relative_brake_decel(smpc_config)
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -1597,6 +1598,17 @@ class ACCNairSMPCAgent(object):
         role with it.  Not with ``alag<tau>``.
         """
         return re.search(r"(?:^|_)jinput(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_relative_brake_decel(smpc_config):
+        """Read ``relbrake<b>`` from the config string (None = the plain ``tau * v``).
+
+        The deceleration ``b`` [m/s^2] of the relative-speed safe distance
+        ``L + d0 + max(0, tau v + (v^2 - v_l^2) / (2 b))`` on every lead cell
+        (``NairACCConfig.relative_brake_decel``), 2026-10-30.  Whole-token match.
+        """
+        match = re.search(r"(?:^|_)relbrake([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):
