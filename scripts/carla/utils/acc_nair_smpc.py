@@ -185,6 +185,21 @@ class NairACCConfig:
     #: jerk rows and the costs stay on the command ``u``.  ``None`` is the
     #: double integrator.  Cached feedback QP only.
     accel_lag_tau: Optional[float] = None
+    #: ``jinput``: the jerk as the MPC input (2026-10-29).  The state is
+    #: [s, v, a] and the decision variable per step and scenario is the jerk
+    #: ``j_k``, held over ``dt`` (exact triple-integrator discretisation,
+    #: ``acc_jerk_step``); ``a`` starts at the ego's actual acceleration
+    #: (``NairACCSMPC.solve(ego_accel=)``, the previous command without it),
+    #: clamped to ``>= 0`` at ``v_min`` and ``<= 0`` at ``v_max`` so a stopped
+    #: car is never asked to keep decelerating.  ``|j_k| <= jerk_limit`` replaces
+    #: the jerk rows on the input differences; the acceleration bounds become
+    #: state constraints on ``a_1..a_N``; ``r_jerk j_k^2`` on every step replaces
+    #: ``r_jerk ((u_k - u_{k-1})/dt)^2`` and ``r_move (u_0 - u_prev)^2`` (``r_move``
+    #: has no role); ``r_a (a_k - a_ref)^2`` is on the planned accelerations.  The
+    #: issued command is ``a_0 + j_0 * command_dt`` (PC-ACC's ``_command_from_jerk``).
+    #: ``u_nominal`` keeps the planned accelerations; ``NairACCSolution.j_nominal``
+    #: holds the jerk plan.  Cached feedback QP only; not with ``accel_lag_tau``.
+    jerk_input: bool = False
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -256,6 +271,11 @@ class NairACCConfig:
                 raise ValueError("accel_lag_tau (alag<tau>) must be positive")
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("accel_lag_tau (alag<tau>) is implemented only in the cached feedback QP")
+        if self.jerk_input:
+            if self.accel_lag_tau is not None:
+                raise ValueError("jerk_input (jinput) cannot be combined with accel_lag_tau (alag<tau>)")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("jerk_input (jinput) is implemented only in the cached feedback QP")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -703,6 +723,9 @@ class NairACCSolution:
     slack_max: float = 0.0
     #: ``dopt<w>`` only: the standoff the solve allowed per (mode, step), NaN off the dopt cells.
     planned_standoff: Optional[np.ndarray] = None
+    #: ``jinput`` only: the planned jerk per (mode, step); ``u_nominal`` then holds the planned
+    #: accelerations a_1..a_N and ``action`` is a_0 + j_nominal[0, 0] * command_dt.
+    j_nominal: Optional[np.ndarray] = None
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -1012,7 +1035,7 @@ class NairACCSMPC:
             ego_accel=None):
         solve_start = time.perf_counter()
         timing_breakdown = {}
-        self._set_command_context(previous_accel_cmd, command_dt, ego_accel)
+        self._set_command_context(previous_accel_cmd, command_dt, ego_accel, ego_speed=ego_state[1])
 
         phase_start = time.perf_counter()
         prediction = self._trim_prediction(lead_prediction)
@@ -1059,7 +1082,7 @@ class NairACCSMPC:
     def compute_acceleration(self, ego_state, lead_prediction):
         return float(self.solve(ego_state, lead_prediction).action)
 
-    def _set_command_context(self, previous_accel_cmd, command_dt, ego_accel=None):
+    def _set_command_context(self, previous_accel_cmd, command_dt, ego_accel=None, ego_speed=None):
         if previous_accel_cmd is None:
             previous_accel_cmd = 0.0
         previous_accel_cmd = float(previous_accel_cmd)
@@ -1070,10 +1093,19 @@ class NairACCSMPC:
             self.config.a_min,
             self.config.a_max,
         ))
-        # alag<tau>: without a measured acceleration the previous command, which
-        # an ideal actuator (CARLA's) has already reached.
+        # alag<tau> / jinput: without a measured acceleration the previous command,
+        # which an ideal actuator (CARLA's) has already reached.
         ego_accel = self._previous_accel_cmd if ego_accel is None else float(ego_accel)
         self._ego_accel = ego_accel if np.isfinite(ego_accel) else self._previous_accel_cmd
+        if self.config.jerk_input and ego_speed is not None:
+            # Standstill clamp: at a speed bound the plant holds the speed, so the
+            # acceleration the plan starts from cannot point out of the bound
+            # (from v = 0 with a_0 < -0.5, v_1 >= 0 would need j_0 > 5).
+            ego_speed = float(ego_speed)
+            if ego_speed <= self.config.v_min + 1.0e-3:
+                self._ego_accel = max(self._ego_accel, 0.0)
+            if ego_speed >= self.config.v_max - 1.0e-3:
+                self._ego_accel = min(self._ego_accel, 0.0)
 
         if command_dt is None:
             command_dt = self.config.dt
@@ -1158,11 +1190,17 @@ class NairACCSMPC:
         if prev_u is None:
             base = np.asarray(reference.a_ref[0], dtype=float).reshape((1, self.config.horizon))
             prev_u = np.tile(base, (prediction.num_modes, 1))
+        if self.config.jerk_input:
+            # jinput: the warm start is the shifted previous jerk plan (a_ref is 0 either way)
+            jerk_limit = self._jerk_limit_value()
+            prev_u = prev_u if jerk_limit is None else np.clip(prev_u, -jerk_limit, jerk_limit)
+        else:
+            prev_u = np.clip(prev_u, self.config.a_min, self.config.a_max)
         return ACCReference(
             s_ref=reference.s_ref,
             v_ref=reference.v_ref,
             a_ref=reference.a_ref,
-            prev_u=np.clip(prev_u, self.config.a_min, self.config.a_max),
+            prev_u=prev_u,
         )
 
     def _shifted_previous_input(self, num_modes, horizon):
@@ -1171,7 +1209,10 @@ class NairACCSMPC:
                 or not self.last_solution.feasible
                 or self.last_solution.status != "optimal"):
             return None
-        previous = np.asarray(self.last_solution.u_nominal, dtype=float)
+        previous = self.last_solution.j_nominal if self.config.jerk_input else self.last_solution.u_nominal
+        if previous is None:
+            return None
+        previous = np.asarray(previous, dtype=float)
         if previous.ndim != 2 or previous.shape[1] != horizon:
             return None
         base = previous[0]
@@ -1318,6 +1359,10 @@ class NairACCSMPC:
             raise ValueError(
                 "accel_lag_tau (alag<tau>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.jerk_input and not self._can_use_cached_feedback_scalar_chance_qp(open_loop, prediction):
+            raise ValueError(
+                "jerk_input (jinput) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1456,7 +1501,14 @@ class NairACCSMPC:
                 standoff, np.nan)
         timing_breakdown["solution_postprocess_s"] = time.perf_counter() - phase_start
 
-        first_accel = reference.prev_u[0, 0] + policy.h[0, 0, 0]
+        j_nominal = None
+        if self.config.jerk_input:
+            # jinput: the policy is in jerk units; the command is the planned
+            # acceleration one command period ahead (PC-ACC's _command_from_jerk)
+            j_nominal = self._clipped_jerk(reference.prev_u + policy.h[:, :, 0])
+            first_accel = self._ego_accel + j_nominal[0, 0] * self._command_dt
+        else:
+            first_accel = reference.prev_u[0, 0] + policy.h[0, 0, 0]
         action = float(np.clip(first_accel, self.config.a_min, self.config.a_max))
 
         if self.config.safety_constraint_mode in CHANCE_SAFETY_MODES:
@@ -1520,7 +1572,14 @@ class NairACCSMPC:
                 if np.any(prediction.active_mask) else 0.0
             ),
             planned_standoff=planned_standoff,
+            j_nominal=j_nominal,
         )
+
+    def _clipped_jerk(self, jerk):
+        """jinput: a jerk plan within ``[-jerk_limit, jerk_limit]`` (unbounded with ``jerk_limit`` None)."""
+        jerk = np.asarray(jerk, dtype=float)
+        jerk_limit = self._jerk_limit_value()
+        return jerk if jerk_limit is None else np.clip(jerk, -jerk_limit, jerk_limit)
 
     @staticmethod
     def _timings_from_solver_message(message):
@@ -1954,6 +2013,7 @@ class NairACCSMPC:
             else float(self.config.standoff_shortfall_weight),
             bool(self.config.standoff_shortfall_cell_price),
             None if self.config.accel_lag_tau is None else float(self.config.accel_lag_tau),
+            bool(self.config.jerk_input),
         )
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -2191,7 +2251,8 @@ class NairACCSMPC:
         x0_param = opti.parameter(NX)
         accel_lag = (acc_lag_coefficients(self.config.dt, self.config.accel_lag_tau)
                      if self.config.accel_lag_tau is not None else None)
-        a0_param = opti.parameter() if accel_lag is not None else None
+        jerk_input = bool(self.config.jerk_input)
+        a0_param = opti.parameter() if accel_lag is not None or jerk_input else None
         prev_u_param = opti.parameter(num_modes, horizon)
         previous_accel_param = opti.parameter()
         command_dt_param = opti.parameter()
@@ -2226,8 +2287,15 @@ class NairACCSMPC:
                     opti.subject_to(k_var[group_id][step] <= self.config.feedback_bound)
                     opti.subject_to(k_var[group_id][step] >= -self.config.feedback_bound)
 
+        jerk_limit = self._jerk_limit_value()
         for mode in range(num_modes):
             for step in range(horizon):
+                if jerk_input:
+                    # jinput: the input is the jerk, |j_k| <= jerk_limit
+                    if jerk_limit is not None:
+                        opti.subject_to(h_var[mode, step] >= -jerk_limit - prev_u_param[mode, step])
+                        opti.subject_to(h_var[mode, step] <= jerk_limit - prev_u_param[mode, step])
+                    continue
                 opti.subject_to(h_var[mode, step] >= self.config.a_min - prev_u_param[mode, step])
                 opti.subject_to(h_var[mode, step] <= self.config.a_max - prev_u_param[mode, step])
 
@@ -2281,6 +2349,22 @@ class NairACCSMPC:
                         delta_u += k_feedback[0] * lead_dev_s_params[sample_idx][mode, step]
                         delta_u += k_feedback[1] * lead_dev_v_params[sample_idx][mode, step]
                     control = prev_u_param[mode, step] + delta_u
+                    if jerk_input:
+                        # jinput: control is the jerk; the triple integrator from (s, v, a_0),
+                        # the acceleration bounds on the planned a_{k+1}; the jerk bound is on h_var
+                        dt = self.config.dt
+                        state_s = (state_s + dt * state_v + 0.5 * dt ** 2 * state_a
+                                   + dt ** 3 / 6.0 * control)
+                        state_v = state_v + dt * state_a + 0.5 * dt ** 2 * control
+                        state_a = state_a + dt * control
+                        inputs.append(state_a)
+                        opti.subject_to(state_a >= self.config.a_min)
+                        opti.subject_to(state_a <= self.config.a_max)
+                        states_s.append(state_s)
+                        states_v.append(state_v)
+                        opti.subject_to(state_v >= self.config.v_min)
+                        opti.subject_to(state_v <= self.config.v_max)
+                        continue
                     inputs.append(control)
                     opti.subject_to(control >= self.config.a_min)
                     opti.subject_to(control <= self.config.a_max)
@@ -2324,9 +2408,15 @@ class NairACCSMPC:
                     if step < horizon:
                         control = inputs[step]
                         input_error = control - a_ref_param[mode, step]
-                        move = control - previous_input
-                        smooth = (self.config.r_move * move ** 2 if step == 0
-                                  else self.config.r_jerk * (move / self.config.dt) ** 2)
+                        if jerk_input:
+                            # jinput: inputs[step] is the planned a_{k+1}; r_jerk j_k^2 on
+                            # every step, r_move has no role
+                            jerk = prev_u_param[mode, step] + h_var[mode, step]
+                            smooth = self.config.r_jerk * jerk ** 2
+                        else:
+                            move = control - previous_input
+                            smooth = (self.config.r_move * move ** 2 if step == 0
+                                      else self.config.r_jerk * (move / self.config.dt) ** 2)
                         objective += sample_weight * probability_param[mode] * (
                             self.config.r_a * input_error ** 2 + smooth
                         )
@@ -2972,6 +3062,14 @@ class NairACCSMPC:
         for step in range(self.config.horizon):
             lead_dev = lead_sample[step] - prediction.means[mode, step]
             delta_u = policy.acceleration_deviation(mode, step, lead_dev, process_history)
+            if self.config.jerk_input:
+                # jinput: the policy is the jerk; inputs are the planned accelerations
+                jerk = float(self._clipped_jerk(reference.prev_u[mode, step] + delta_u))
+                next_state, accel_state = acc_jerk_step(states[step], accel_state, jerk, self.config.dt)
+                states[step + 1] = next_state + process_sample[step]
+                inputs[step] = accel_state
+                process_history.append(process_sample[step])
+                continue
             accel = reference.prev_u[mode, step] + delta_u
             accel = float(np.clip(accel, self.config.a_min, self.config.a_max))
             inputs[step] = accel
@@ -3005,6 +3103,18 @@ class NairACCSMPC:
                     desired = reference.a_ref[mode, step] - 0.25 * min(0.0, gap)
                 else:
                     desired = reference.prev_u[mode, step]
+                if self.config.jerk_input:
+                    # jinput: prev_u and the policy are jerks; without a lead follow the
+                    # previous jerk plan, with one the jerk that reaches the desired
+                    # acceleration over dt, both within the jerk and acceleration bounds
+                    if prediction.active_mask[mode, step]:
+                        desired = (desired - accel_state) / self.config.dt
+                    jerk = float(self._clipped_jerk(desired))
+                    accel = float(np.clip(accel_state + self.config.dt * jerk, self.config.a_min, self.config.a_max))
+                    jerk = (accel - accel_state) / self.config.dt
+                    policy.h[mode, step, 0] = jerk - reference.prev_u[mode, step]
+                    states[step + 1], accel_state = acc_jerk_step(states[step], accel_state, jerk, self.config.dt)
+                    continue
                 step_dt = command_dt if step == 0 else self.config.dt
                 accel = self._rate_limited_accel(desired, previous_input, step_dt)
                 policy.h[mode, step, 0] = accel - reference.prev_u[mode, step]
@@ -3067,6 +3177,18 @@ def acc_lag_coefficients(dt, tau):
     c_va = float(tau) * (1.0 - decay)
     c_sa = float(tau) * (float(dt) - c_va)
     return c_sa, c_va, decay
+
+
+def acc_jerk_step(state, accel, jerk, dt):
+    """``jinput``: one ``dt`` of the triple integrator s' = v, v' = a, a' = j from
+    [s, v] and the acceleration ``accel`` under the jerk ``jerk`` held over ``dt``;
+    returns ``([s, v], accel)`` after it (exact for piecewise-constant jerk)."""
+    state = np.asarray(state, dtype=float)
+    next_state = np.array([
+        state[0] + dt * state[1] + 0.5 * dt ** 2 * accel + dt ** 3 / 6.0 * jerk,
+        state[1] + dt * accel + 0.5 * dt ** 2 * jerk,
+    ])
+    return next_state, accel + dt * jerk
 
 
 def acc_lag_step(state, accel, command, dt, tau):

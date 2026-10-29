@@ -216,6 +216,7 @@ class ACCNairSMPCAgent(object):
         if r_a is not None:
             self.controller_config.r_a = r_a
         self.controller_config.accel_lag_tau = self._parse_accel_lag_tau(smpc_config)
+        self.controller_config.jerk_input = self._parse_jerk_input(smpc_config)
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -575,6 +576,8 @@ class ACCNairSMPCAgent(object):
                 "command_dt": command_dt,
                 "command_jerk": command_jerk,
                 "command_jerk_limit": self.controller_config.jerk_limit,
+                # jinput: the issued jerk j_0 (the command is a_0 + j_0 * command_dt); None otherwise
+                "jerk_cmd": None if solution.j_nominal is None else float(solution.j_nominal[0, 0]),
                 "actual_accel": actual_accel,
                 "actual_jerk": actual_jerk,
                 "steer_cmd": float(df_des),
@@ -970,6 +973,9 @@ class ACCNairSMPCAgent(object):
             "prev_u": np.asarray(reference.prev_u, dtype=float).round(4).tolist(),
             "x_nominal": np.asarray(solution.x_nominal, dtype=float).round(4).tolist(),
             "u_nominal": np.asarray(solution.u_nominal, dtype=float).round(4).tolist(),
+            # jinput: the planned jerk per (mode, step); None otherwise
+            "j_nominal": (None if solution.j_nominal is None
+                          else np.asarray(solution.j_nominal, dtype=float).round(4).tolist()),
         }
 
     @staticmethod
@@ -1572,6 +1578,17 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"alag([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_jerk_input(smpc_config):
+        """Read ``jinput`` from the config string (default: off), as a whole token.
+
+        The jerk as the MPC input (``NairACCConfig.jerk_input``), 2026-10-29: the
+        state is [s, v, a], ``|j_k| <= jerk_limit``, ``r_jerk j_k^2`` on every
+        step, and the command is ``a_0 + j_0 * command_dt``.  ``rmove<w>`` has no
+        role with it.  Not with ``alag<tau>``.
+        """
+        return re.search(r"(?:^|_)jinput(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):
