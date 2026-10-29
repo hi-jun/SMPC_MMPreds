@@ -600,6 +600,7 @@ def chance_cutin_clearance(
     mode_predictions: Sequence[ACCModePrediction],
     reference_beta: float,
     sigma_cap: Optional[float] = None,
+    full_footprint: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     """Turn each cut-in mode into a Benciolini confidence chance constraint.
 
@@ -628,6 +629,13 @@ def chance_cutin_clearance(
     too; the controller applies it to the footprint only and prices the time gap
     (see ``NairACCConfig.standoff_shortfall_weight``).
 
+    ``full_footprint`` (token ``fullfoot``, with ``dopt<w>``; 2026-10-29) sets
+    the factor to 1 and keeps ``beta_j`` for the ``sigma`` term: the hard floor
+    is the whole ``L + d0`` (plus the ``sigma`` term), the priced range tops out
+    at ``d_safe(v)``, and the reference asks for the same, since the controller
+    reads this one factor in all three places.  It is ``dopt``'s form of
+    2026-10-07 to 2026-10-15.
+
     Scoped to ``cutin`` modes, so adjacent-lane vehicles only; the ego-lane
     counterpart is ``chance_cutout_clearance``.
     """
@@ -642,7 +650,7 @@ def chance_cutin_clearance(
         beta = min(float(mode.probability), reference_beta)
         mode.chance_confidence = (
             beta if sigma_cap is None else min(float(mode.probability), float(sigma_cap)))
-        mode.clearance_scale = confidence_quantile(beta) / reference_quantile
+        mode.clearance_scale = 1.0 if full_footprint else confidence_quantile(beta) / reference_quantile
         result[mode.scenario_label] = {"confidence": mode.chance_confidence, "scale": mode.clearance_scale}
     return result
 
@@ -896,6 +904,7 @@ def process_vehicle_prediction(
     lateral_gate: bool = False,
     no_cutout: bool = False,
     lk_sigma: bool = False,
+    full_footprint: bool = False,
 ) -> ACCProcessedPrediction:
     if no_cutout and use_trajectory_aware_cutin_mapping:
         raise ValueError("nocutout acts on the default mapping, not the trajectory-aware one")
@@ -1013,6 +1022,7 @@ def process_vehicle_prediction(
     cutin_chance_confidences = chance_cutin_clearance(
         mode_predictions, cutin_chance_ref,
         sigma_cap=cutin_chance_sigma_cap,
+        full_footprint=full_footprint,
     )
     cutin_chance_confidences.update(chance_cutout_clearance(
         mode_predictions, relation_to_ego_lane, cutin_chance_ref, cutin_probability_threshold,
@@ -1046,6 +1056,7 @@ def process_vehicle_prediction(
             "lk_entry_as_cutin": bool(lk_entry_as_cutin),
             "no_cutout": bool(no_cutout),
             "lk_sigma": bool(lk_sigma),
+            "full_footprint": bool(full_footprint),
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),

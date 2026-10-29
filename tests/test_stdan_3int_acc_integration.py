@@ -1122,6 +1122,175 @@ class TestChanceTokens(unittest.TestCase):
                 ACCNairSMPCAgent(_Vehicle(), None, smpc_config=no_chance + token)
 
 
+class TestFullFootprint(unittest.TestCase):
+    """``fullfoot`` (2026-10-29): under ``dopt<w>`` a cut-in chance cell keeps the
+    whole footprint L + d0 -- factor 1 in place of alpha_j = q(beta_j)/q(beta_ref)
+    -- in the hard floor, the top of the priced range and the reference alike;
+    the sigma term keeps beta_j = min(p, beta_ref)."""
+
+    REF = 0.6
+    VANISH = 0.1
+    HORIZON = TestCutInProbabilityGate.HORIZON
+    _fake_mode = staticmethod(TestCutInChanceConstraint._fake_mode)
+
+    def _alpha(self, beta):
+        return confidence_quantile(beta) / confidence_quantile(self.REF)
+
+    def _joint(self, raw, **kwargs):
+        processed = TestCutInProbabilityGate()._process(
+            raw, cutin_chance_ref=self.REF, cutin_probability_threshold=self.VANISH, **kwargs)
+        prediction, _ = build_multitarget_lead_prediction(
+            [processed], ego_state=np.array([13.0, 10.0]), horizon=self.HORIZON, desired_speed=15.0,
+            num_modes=8, reference_beta=self.REF, vanish_threshold=self.VANISH)
+        return processed, prediction
+
+    @staticmethod
+    def _dopt_config(horizon, num_modes):
+        from utils.acc_nair_smpc import original_nair_acc_config
+        config = original_nair_acc_config(
+            horizon=horizon, dt=0.2, desired_speed=15.0, num_modes=num_modes,
+            controller_variant=VARIANT_FIXED_RISK)
+        config.safety_constraint_mode = SAFETY_CONFIDENCE_CHANCE
+        config.r_move = 1000.0
+        config.standoff_shortfall_weight = 100.0
+        config.__post_init__()
+        return config
+
+    def test_the_factor_is_one_and_beta_is_kept(self):
+        probabilities = (0.95, 0.40, 0.12)
+        default = [self._fake_mode("cutin", p) for p in probabilities]
+        full = [self._fake_mode("cutin", p) for p in probabilities]
+        lane_keeping = self._fake_mode("lk", 0.5)
+        lane_keeping.clearance_scale = 0.7
+        chance_cutin_clearance(default, self.REF)
+        result = chance_cutin_clearance(full + [lane_keeping], self.REF, full_footprint=True)
+        self.assertEqual([m.clearance_scale for m in full], [1.0, 1.0, 1.0])
+        self.assertEqual(result["cutin"]["scale"], 1.0)
+        for p, mode in zip(probabilities, default):
+            self.assertAlmostEqual(mode.clearance_scale, self._alpha(min(p, self.REF)), places=12)
+        self.assertLess(default[1].clearance_scale, 0.7)
+        self.assertLess(default[2].clearance_scale, 0.2)
+        self.assertEqual([m.chance_confidence for m in full], [0.6, 0.40, 0.12])
+        self.assertEqual([m.chance_confidence for m in full], [m.chance_confidence for m in default])
+        self.assertEqual(lane_keeping.clearance_scale, 0.7)        # cut-in modes only
+        self.assertTrue(np.isnan(lane_keeping.chance_confidence))
+
+    def test_cut_in_cells_get_factor_one_and_the_same_sigma_term(self):
+        from dataclasses import replace
+        from utils.acc_nair_smpc import original_nair_acc_config
+        # Right-adjacent vehicle: LK drifts into the ego lane from step 2 (trajcutin's
+        # cutin/LK, p 0.5), LLC is the labelled cut-in (p 0.3), RLC keeps its lane.
+        s = np.array([20.0, 22.0, 24.0])
+        raw = {
+            "vehicle_id": 10,
+            "raw_intention_prob": np.array([0.5, 0.3, 0.2]),
+            "pred_traj_frenet": np.stack((
+                np.column_stack((s, [2.0, 0.4, 0.2])),
+                np.column_stack((s, [0.0, 0.0, 0.0])),
+                np.column_stack((s, [3.5, 3.5, 3.5])),
+            )),
+            "raw_pred_vel": np.ones((3, 3, 2)),
+            "signed_t_cross": 1.0,
+            "valid_mask": np.ones((3, 3), dtype=bool),
+        }
+        default_target, default = self._joint(raw, lk_entry_as_cutin=True)
+        full_target, full = self._joint(raw, lk_entry_as_cutin=True, full_footprint=True)
+        self.assertTrue(full_target.branch_info["full_footprint"])
+        self.assertFalse(default_target.branch_info["full_footprint"])
+        self.assertEqual(sorted(m.scenario_label for m in full_target.mode_predictions), ["cutin", "cutin/LK", "lk"])
+        self.assertEqual(full.mode_names, default.mode_names)
+        np.testing.assert_array_equal(full.active_mask, default.active_mask)
+        np.testing.assert_array_equal(full.means, default.means)
+        np.testing.assert_array_equal(full.covariances, default.covariances)
+        np.testing.assert_array_equal(full.chance_confidence, default.chance_confidence)
+        cut = full.active_mask & np.isfinite(full.chance_confidence)
+        self.assertEqual(int(cut.sum()), 5)                          # cutin steps 1-3, cutin/LK steps 2-3
+        np.testing.assert_array_equal(full.clearance_scale[cut], 1.0)
+        np.testing.assert_allclose(
+            default.clearance_scale[cut], [self._alpha(b) for b in default.chance_confidence[cut]], rtol=0, atol=1e-12)
+        self.assertTrue(np.all(default.clearance_scale[cut] < 0.85))
+        np.testing.assert_array_equal(full.clearance_scale[~cut], default.clearance_scale[~cut])
+        config = replace(original_nair_acc_config(), safety_constraint_mode=SAFETY_CONFIDENCE_CHANCE)
+        stub = type("Stub", (), {"config": config})()
+        for mode, step in zip(*np.nonzero(cut)):
+            sigma_term = NairACCSMPC._cell_tightening(stub, full, None, mode, step)
+            self.assertGreater(sigma_term, 0.0)
+            self.assertEqual(sigma_term, NairACCSMPC._cell_tightening(stub, default, None, mode, step))
+
+    def test_floor_top_and_reference_take_the_full_footprint(self):
+        from utils.acc_nair_smpc import confidence_tightening
+        # The labelled cut-in (p 0.3, alpha 0.46) enters at step 2, 22 m on; the
+        # ego at 13 m and 10 m/s is about 5 m behind it there: outside alpha's
+        # floor 0.46 * 7.5 + q sigma = 3.6 m, inside the full 7.5 m + q sigma.
+        raw = TestCutInProbabilityGate._raw([0.60, 0.30, 0.10], [3.5, 0.0, 0.0])
+        ego = np.array([13.0, 10.0])
+        _, default = self._joint(raw)
+        _, full = self._joint(raw, full_footprint=True)
+        mode = full.mode_names.index("10:cutin")
+        steps = np.flatnonzero(full.active_mask[mode])
+        self.assertEqual(list(steps), [2, 3])
+        alpha = self._alpha(0.3)
+        config = self._dopt_config(self.HORIZON, full.num_modes)
+        footprint = config.vehicle_length + config.d0
+        # Reference (first solve, no remembered standoff, planned speed = 10 m/s):
+        # the lead minus footprint * factor + tau * v + q sigma.
+        for prediction, factor in ((full, 1.0), (default, alpha)):
+            reference = OldACCReferenceAdapter(config).generate(ego, prediction)
+            for step in steps:
+                sigma_term = confidence_tightening(
+                    prediction.covariances[mode, step], prediction.chance_confidence[mode, step], config)
+                expected = (prediction.means[mode, step, 0]
+                            - (factor * footprint + config.time_headway * ego[1] + sigma_term))
+                self.assertAlmostEqual(reference.s_ref[mode, step], expected, places=9)
+        # Floor and top: the QP's standoff on the cut-in cells lies in
+        # [footprint * factor, footprint * factor + tau * v]; with the full
+        # footprint only the emergency slack meets step 1.
+        solutions = {}
+        for name, prediction in (("full", full), ("default", default)):
+            controller = NairACCSMPC(self._dopt_config(self.HORIZON, prediction.num_modes))
+            solutions[name] = controller.solve(ego, prediction, previous_accel_cmd=0.0, command_dt=0.05)
+        for name, factor in (("full", 1.0), ("default", alpha)):
+            solution = solutions[name]
+            standoff = solution.planned_standoff[mode, steps]
+            top = factor * footprint + config.time_headway * solution.x_nominal[mode, steps, 1]
+            self.assertTrue(np.all(standoff >= factor * footprint - 1.0e-3), (name, standoff))
+            self.assertTrue(np.all(standoff <= top + 1.0e-3), (name, standoff, top))
+        # The full floor L + d0 + q sigma is met by the emergency slack alone at
+        # step 2 (the ego brakes at the jerk limit); alpha's floor leaves room.
+        full_plan = solutions["full"]
+        gap = full.means[mode, 2, 0] - full_plan.x_nominal[mode, 2, 0]
+        sigma_term = confidence_tightening(full.covariances[mode, 2], full.chance_confidence[mode, 2], config)
+        self.assertAlmostEqual(full_plan.slack_max, footprint + sigma_term - gap, places=3)
+        self.assertGreater(full_plan.slack_max, 2.0)
+        self.assertLess(solutions["default"].slack_max, 0.1)
+        self.assertLess(np.min(solutions["default"].planned_standoff[mode, steps]), footprint)
+
+    def test_the_agent_reads_the_token_and_needs_cutin_chance_and_dopt(self):
+        from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent
+        design = ("acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr"
+                  "_trajcutin_ctx0_latgate_entrypass0_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0")
+        self.assertFalse(agent._parse_full_footprint(design))
+        self.assertTrue(agent._parse_full_footprint(design + "_fullfoot"))
+        self.assertTrue(agent._parse_full_footprint(design.replace("_rmove", "_fullfoot_rmove")))
+        self.assertFalse(agent._parse_full_footprint(design + "_fullfoot2"))
+        self.assertEqual(agent._parse_standoff_shortfall_weight(design + "_fullfoot"), 100.0)
+        self.assertEqual(agent._parse_variant(design + "_fullfoot"), VARIANT_FIXED_RISK)   # no "_ol" read
+        self.assertEqual(agent._parse_controller_num_modes(design + "_fullfoot", 2), 8)
+
+        class _Vehicle:  # the check runs before anything else touches the vehicle
+            def get_world(self):
+                return None
+
+        base = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8"
+        for policy, message in (
+                (base + "_cutin_chance0.6_fullfoot_rmove1000", "fullfoot needs cutin_chance"),
+                (base + "_fullfoot_rmove1000", "fullfoot needs cutin_chance"),
+                ("acc_nair_smpc_lstm_fixed_risk_nominal_safe_distance_cutin_chance0.6_dopt100_fullfoot_rmove1000",
+                 "fullfoot needs the stdan_3int")):
+            with self.assertRaisesRegex(ValueError, message, msg=policy):
+                agent(_Vehicle(), None, smpc_config=policy)
+
+
 class TestDecisionPointBranch(unittest.TestCase):
     """``branchdec<a>``: the policy tree splits a cut-in hypothesis at the
     target's decision point (Nair et al.'s traffic-light rule), not at the

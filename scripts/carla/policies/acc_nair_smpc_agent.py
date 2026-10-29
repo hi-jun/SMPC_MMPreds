@@ -139,6 +139,13 @@ class ACCNairSMPCAgent(object):
         if self.lk_sigma and not self.cutin_chance_ref:
             # The sigma term takes beta_j = min(p, beta_ref) from cutin_chance.
             raise ValueError("lksigma needs cutin_chance<beta_ref>")
+        self.full_footprint = self._parse_full_footprint(smpc_config)
+        if self.full_footprint:
+            if self.predictor_type != "stdan_3int":
+                raise ValueError("fullfoot needs the stdan_3int predictor")
+            if not self.cutin_chance_ref or self.standoff_shortfall_weight is None:
+                # It replaces dopt's alpha_j on the footprint of cut-in chance cells.
+                raise ValueError("fullfoot needs cutin_chance<beta_ref> and dopt<w>")
         self.entry_pass = self._parse_entry_pass(smpc_config)
         self.entry_pass_margin = self._parse_entry_pass_margin(smpc_config)
         if self.entry_pass and self.predictor_type != "stdan_3int":
@@ -881,6 +888,7 @@ class ACCNairSMPCAgent(object):
                 lateral_gate=self.lateral_gate,
                 no_cutout=self.no_cutout,
                 lk_sigma=self.lk_sigma,
+                full_footprint=self.full_footprint,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
                     "entry_margin": self.entry_pass_margin} if entry_plan is not None else {}),
             )
@@ -1760,6 +1768,17 @@ class ACCNairSMPCAgent(object):
         standoff stays hard.  See ``acc_postprocess.chance_cutout_clearance``.
         """
         return "lksigma" in str(smpc_config)
+
+    @staticmethod
+    def _parse_full_footprint(smpc_config):
+        """Read ``fullfoot`` from the config string (2026-10-29).
+
+        With it a cut-in chance cell keeps the whole footprint ``L + d0`` under
+        ``dopt<w>`` (factor 1 in place of ``alpha_j``); the sigma term keeps
+        ``beta_j``.  Whole token only.  See
+        ``acc_postprocess.chance_cutin_clearance``.
+        """
+        return re.search(r"(?:^|_)fullfoot(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_cutin_clearance_tlc_ref(smpc_config):
