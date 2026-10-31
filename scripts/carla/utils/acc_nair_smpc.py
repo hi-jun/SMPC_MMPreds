@@ -138,6 +138,15 @@ class NairACCConfig:
     #: 그렇게 하니 거의 모든 열이 좋아졌다(2026-09-10). 즉 축이 둘이다: step 0 대 지평의
     #: **비율**과 저크 블록의 **전체 크기**. 한 노브로는 둘을 따로 못 고른다.
     slack_weight: float = 5000.0
+    #: ``l1slack<w>``: the emergency slack costs ``w * sum(slack)`` in place of
+    #: ``slack_weight * sum(slack^2)`` (2026-10-31, maintainer).  An exact
+    #: penalty: with ``w`` above the largest multiplier of the safety rows the
+    #: solve equals the hard-constrained one whenever that has a solution, so a
+    #: slack above the solver tolerance means that no input sequence keeps every
+    #: row.  The quadratic cost has zero slope at 0 and buys about
+    #: multiplier / (2 slack_weight) of slack on every binding row.  ``None``
+    #: keeps the quadratic cost.  Cached feedback QP only.
+    slack_l1_weight: Optional[float] = None
     #: ``dopt<w>``: the weight ``w`` of ``w * P_j * short_jk^2``.  On cut-in chance
     #: cells (``standoff_shortfall_mask``) the cell's probability factor
     #: (``clearance_scale``, ``alpha_j``) scales the footprint ``L + d0`` only, as
@@ -306,6 +315,11 @@ class NairACCConfig:
                 raise ValueError("relative_brake_decel (relbrake<b>) is implemented only in the cached feedback QP")
             if self.safety_constraint_mode == SAFETY_BRAKE_DISTANCE:
                 raise ValueError("relative_brake_decel (relbrake<b>) replaces the time-gap standoff, not brake_distance")
+        if self.slack_l1_weight is not None:
+            if not self.slack_l1_weight > 0.0:
+                raise ValueError("slack_l1_weight (l1slack<w>) must be positive")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("slack_l1_weight (l1slack<w>) is implemented only in the cached feedback QP")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -751,6 +765,8 @@ class NairACCSolution:
     timing_breakdown: Optional[Dict[str, float]] = None
     #: Largest emergency slack over the active cells.
     slack_max: float = 0.0
+    #: The emergency slack per (mode, step), 0 off the active cells.
+    slack: Optional[np.ndarray] = None
     #: ``dopt<w>`` only: the standoff the solve allowed per (mode, step), NaN off the dopt cells.
     planned_standoff: Optional[np.ndarray] = None
     #: ``jinput`` only: the planned jerk per (mode, step); ``u_nominal`` then holds the planned
@@ -1417,6 +1433,11 @@ class NairACCSMPC:
             raise ValueError(
                 "relative_brake_decel (relbrake<b>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.slack_l1_weight is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "slack_l1_weight (l1slack<w>) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1638,6 +1659,7 @@ class NairACCSMPC:
                 float(np.max(slack[prediction.active_mask]))
                 if np.any(prediction.active_mask) else 0.0
             ),
+            slack=np.where(prediction.active_mask, slack, 0.0),
             planned_standoff=planned_standoff,
             j_nominal=j_nominal,
             speed_gap_tangent_error_max=speed_gap_tangent_error_max,
@@ -2092,6 +2114,7 @@ class NairACCSMPC:
             None if self.config.accel_lag_tau is None else float(self.config.accel_lag_tau),
             bool(self.config.jerk_input),
             None if self.config.relative_brake_decel is None else float(self.config.relative_brake_decel),
+            None if self.config.slack_l1_weight is None else float(self.config.slack_l1_weight),
         )
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -2416,7 +2439,11 @@ class NairACCSMPC:
                 total_safe_probability += probability_param[mode] * rho_var[mode]
             opti.subject_to(total_safe_probability >= optimized_eta_target_probability(self.config))
 
-        objective = self.config.slack_weight * ca.sumsqr(slack_var)
+        if self.config.slack_l1_weight is not None:
+            # l1slack<w>: the exact penalty (slack >= 0, so the sum is its l1 norm)
+            objective = self.config.slack_l1_weight * ca.sum1(ca.vec(slack_var))
+        else:
+            objective = self.config.slack_weight * ca.sumsqr(slack_var)
         # The tracking and input costs are summed over three rollouts, the
         # nominal lead and its +-1 sigma samples, which differ only through the
         # K-feedback.  Without it they coincide: one rollout whose costs count

@@ -225,6 +225,7 @@ class ACCNairSMPCAgent(object):
         self.controller_config.accel_lag_tau = self._parse_accel_lag_tau(smpc_config)
         self.controller_config.jerk_input = self._parse_jerk_input(smpc_config)
         self.controller_config.relative_brake_decel = self._parse_relative_brake_decel(smpc_config)
+        self.controller_config.slack_l1_weight = self._parse_slack_l1_weight(smpc_config)
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -1608,6 +1609,17 @@ class ACCNairSMPCAgent(object):
         (``NairACCConfig.relative_brake_decel``), 2026-10-30.  Whole-token match.
         """
         match = re.search(r"(?:^|_)relbrake([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_slack_l1_weight(smpc_config):
+        """Read ``l1slack<w>`` from the config string (None = the quadratic slack cost).
+
+        The weight ``w`` of the exact emergency-slack penalty ``w * sum(slack)``
+        (``NairACCConfig.slack_l1_weight``), 2026-10-31.  Whole-token match;
+        ``l1slack1e6`` reads as 1e6.
+        """
+        match = re.search(r"(?:^|_)l1slack([0-9]*\.?[0-9]+(?:e[0-9]+)?)(?=_|$)", str(smpc_config))
         return float(match.group(1)) if match else None
 
     @staticmethod
