@@ -27,6 +27,7 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy.linalg import solve_discrete_are
 from scipy.stats import norm
 
 
@@ -147,6 +148,22 @@ class NairACCConfig:
     #: multiplier / (2 slack_weight) of slack on every binding row.  ``None``
     #: keeps the quadratic cost.  Cached feedback QP only.
     slack_l1_weight: Optional[float] = None
+    #: ``termcost<c>``: a terminal cost-to-go on the planned speed error and
+    #: acceleration at the horizon end (2026-11-02).  Per scenario ``j`` the
+    #: objective gains ``c * 3 * P_j * [e_N, a_N] (P - Q) [e_N, a_N]^T`` with
+    #: ``e_N = v_N - v_ref,N``, ``P`` the DARE solution of the unconstrained
+    #: following-error dynamics ``(e, a)`` with the jerk as input over ``dt``,
+    #: ``Q = diag(q_v, 0)`` and ``R = r_jerk`` (``terminal_cost_matrix``), and
+    #: ``P - Q`` so the stage cost at N is not counted twice; the factor 3 is
+    #: the cached QP's convention (section 3 of AGENTS.md).  Without it the
+    #: N-step plan does not account for a speed deficit beyond the horizon: on
+    #: the NGSIM final set the plan ended still braking (a_N <= -0.5 on 50-60 %
+    #: of braking ticks) and the brake was released with about half the LQR
+    #: gain (first-step gain [0.096, 0.200] against K_inf [0.149, 0.547]);
+    #: c = 1 halved the release lag after a cut-in (2026-11-01 probe).  ``None``
+    #: is off.  Cached feedback QP with ``jerk_input`` only, not with
+    #: ``optimize_k``.
+    terminal_cost_scale: Optional[float] = None
     #: ``dopt<w>``: the weight ``w`` of ``w * P_j * short_jk^2``.  On cut-in chance
     #: cells (``standoff_shortfall_mask``) the cell's probability factor
     #: (``clearance_scale``, ``alpha_j``) scales the footprint ``L + d0`` only, as
@@ -320,6 +337,15 @@ class NairACCConfig:
                 raise ValueError("slack_l1_weight (l1slack<w>) must be positive")
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("slack_l1_weight (l1slack<w>) is implemented only in the cached feedback QP")
+        if self.terminal_cost_scale is not None:
+            if not self.terminal_cost_scale > 0.0:
+                raise ValueError("terminal_cost_scale (termcost<c>) must be positive")
+            if not self.jerk_input:
+                raise ValueError("terminal_cost_scale (termcost<c>) needs jerk_input (jinput)")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("terminal_cost_scale (termcost<c>) is implemented only in the cached feedback QP")
+            if self.optimize_k:
+                raise ValueError("terminal_cost_scale (termcost<c>) is not implemented with optimize_k (with_k)")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -1438,6 +1464,11 @@ class NairACCSMPC:
             raise ValueError(
                 "slack_l1_weight (l1slack<w>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.terminal_cost_scale is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "terminal_cost_scale (termcost<c>) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -2115,6 +2146,7 @@ class NairACCSMPC:
             bool(self.config.jerk_input),
             None if self.config.relative_brake_decel is None else float(self.config.relative_brake_decel),
             None if self.config.slack_l1_weight is None else float(self.config.slack_l1_weight),
+            None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -2603,6 +2635,28 @@ class NairACCSMPC:
                     if shortfall_price_param is not None:
                         price = price * shortfall_price_param[mode, step]
                     objective += price * short_var[mode, step] ** 2
+
+        if self.config.terminal_cost_scale is not None:
+            # termcost<c>: the cost-to-go on (e_N, a_N) of each scenario's nominal
+            # rollout, rebuilt from the parameters with the recursion of the
+            # jinput rollout above (the same linear forms); the factor 3 is
+            # sample_weight without K feedback, which the config rules out.
+            terminal_scale = float(self.config.terminal_cost_scale)
+            terminal_matrix = terminal_cost_matrix(self.config)
+            dt = self.config.dt
+            terminal = 0.0
+            for mode in range(num_modes):
+                v = x0_param[1]
+                a = a0_param
+                for step in range(horizon):
+                    j = prev_u_param[mode, step] + h_var[mode, step]
+                    v = v + dt * a + 0.5 * dt ** 2 * j
+                    a = a + dt * j
+                e = v - x_ref_v_param[mode, horizon]
+                terminal = terminal + terminal_scale * 3.0 * probability_param[mode] * (
+                    terminal_matrix[0, 0] * e * e + 2.0 * terminal_matrix[0, 1] * e * a
+                    + terminal_matrix[1, 1] * a * a)
+            objective = objective + terminal
 
         opti.minimize(objective)
         p_opts, s_opts = self._gurobi_options()
@@ -3516,6 +3570,26 @@ def optimized_standoff(clearance_scale, speed, config, lead_speed=None):
     """
     return (clearance_scale * (config.vehicle_length + config.d0)
             + speed_gap(speed, lead_speed, config))
+
+
+def terminal_cost_matrix(config):
+    """``termcost<c>``: ``P - Q`` of the unconstrained following-error dynamics.
+
+    State ``(e, a)`` with ``e`` the speed error and ``a`` the acceleration, the
+    jerk as input held over ``dt``: ``A = [[1, dt], [0, 1]]``, ``B = [dt^2 / 2, dt]``,
+    stage cost ``q_v e^2 + r_jerk j^2`` (``Q = diag(q_v, 0)``, ``R = r_jerk``).
+    ``P`` solves the discrete algebraic Riccati equation, so ``x^T P x`` is the
+    infinite-horizon cost from ``x``; the stage cost at the horizon end is already
+    in the objective, hence ``P - Q`` (positive semidefinite).  For ``q_v`` 1,
+    ``r_jerk`` 40 and ``dt`` 0.2 it is ``[[17.29, 31.62], [31.62, 112.51]]``.
+    """
+    dt = float(config.dt)
+    a_mat = np.array([[1.0, dt], [0.0, 1.0]])
+    b_mat = np.array([[0.5 * dt ** 2], [dt]])
+    q_mat = np.diag([float(config.q_v), 0.0])
+    r_mat = np.array([[float(config.r_jerk)]])
+    p_mat = solve_discrete_are(a_mat, b_mat, q_mat, r_mat)
+    return p_mat - q_mat
 
 
 def _scenario_names(prediction):

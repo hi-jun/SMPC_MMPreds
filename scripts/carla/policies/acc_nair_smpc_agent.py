@@ -226,6 +226,7 @@ class ACCNairSMPCAgent(object):
         self.controller_config.jerk_input = self._parse_jerk_input(smpc_config)
         self.controller_config.relative_brake_decel = self._parse_relative_brake_decel(smpc_config)
         self.controller_config.slack_l1_weight = self._parse_slack_l1_weight(smpc_config)
+        self.controller_config.terminal_cost_scale = self._parse_terminal_cost_scale(smpc_config)
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -1620,6 +1621,18 @@ class ACCNairSMPCAgent(object):
         ``l1slack1e6`` reads as 1e6.
         """
         match = re.search(r"(?:^|_)l1slack([0-9]*\.?[0-9]+(?:e[0-9]+)?)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_terminal_cost_scale(smpc_config):
+        """Read ``termcost<c>`` from the config string (None = no terminal cost).
+
+        The scale ``c`` of the terminal cost-to-go
+        ``c * 3 * P_j * [e_N, a_N] (P - Q) [e_N, a_N]^T``
+        (``NairACCConfig.terminal_cost_scale``), 2026-11-02.  Whole-token match;
+        ``termcost0.5`` reads as 0.5.  ``jinput`` only.
+        """
+        match = re.search(r"(?:^|_)termcost([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
         return float(match.group(1)) if match else None
 
     @staticmethod
