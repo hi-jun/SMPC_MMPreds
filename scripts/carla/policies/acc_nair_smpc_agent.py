@@ -150,6 +150,9 @@ class ACCNairSMPCAgent(object):
         self.entry_pass_margin = self._parse_entry_pass_margin(smpc_config)
         if self.entry_pass and self.predictor_type != "stdan_3int":
             raise ValueError("entrypass needs the stdan_3int predictor")
+        self.lead_merge = self._parse_lead_merge(smpc_config)
+        if self.lead_merge and self.predictor_type != "stdan_3int":
+            raise ValueError("leadmerge needs the stdan_3int predictor")
         # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
         self._entry_previous_plan = None
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
@@ -926,6 +929,7 @@ class ACCNairSMPCAgent(object):
                 no_cutout=self.no_cutout,
                 lk_sigma=self.lk_sigma,
                 full_footprint=self.full_footprint,
+                lead_merge=self.lead_merge,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
                     "entry_margin": self.entry_pass_margin} if entry_plan is not None else {}),
             )
@@ -1688,6 +1692,15 @@ class ACCNairSMPCAgent(object):
         PC-ACC's safety layer (``utils/safety_layer.py``) around the MPC's command, 2026-11-02. Whole-token match.
         """
         return re.search(r"(?:^|_)safelayer(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_lead_merge(smpc_config):
+        """Read ``leadmerge`` from the config string (default: off).
+
+        One scenario per class of joint modes with the same effective lead at every step, its probability
+        summed (``acc_postprocess._merge_duplicate_scenarios``), 2026-11-03. Whole-token match.
+        """
+        return re.search(r"(?:^|_)leadmerge(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):

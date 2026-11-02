@@ -1153,6 +1153,54 @@ def entry_ego_displacement(vehicle_ids, horizon, dt, ego_speed, previous_plan=No
     return out
 
 
+def _lead_sequence_name(effective_lead_keys):
+    """``leadmerge``: a scenario class's name, its leads in order ("<vehicle>:<label>+...", the joint-mode
+    names' format that ``entry_ego_displacement`` reads; a lead is listed again when it leads again after
+    another), "none" without any lead."""
+    leads = []
+    for key in effective_lead_keys:
+        if key[0] == "inactive":
+            continue
+        part = "%d:%s" % (int(key[0]), key[1])
+        if not leads or leads[-1] != part:
+            leads.append(part)
+    return "+".join(leads) or "none"
+
+
+def _merge_duplicate_scenarios(cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario):
+    """``leadmerge`` (2026-11-03): one scenario per class of exact duplicates, with the class's probability.
+
+    In 1-D every row sees only its step's nearest lead, so joint modes that differ only in modes that never
+    lead (an adjacent lane-keeping mode, a gated, excluded or shadowed cut-in) give the same effective-lead
+    sequence, hence the same sharing group at every step, the same rows and the same costs up to the
+    probability: 82 % of the QP's scenarios on the 2026-11-01 records.  A class is the scenarios with the
+    same effective-lead keys and the same cell arrays; it keeps its most likely member's arrays and is named
+    after its leads (``_lead_sequence_name``), so the reference's remembered dopt standoff and entrypass's
+    previous-plan choice, both read by name, follow the leads rather than the modes that never lead.  If two
+    classes would share that name (told apart only by branchdec markers or by cells inherited from a
+    vacating vehicle), every class keeps its most likely member's name instead.
+    """
+    classes = {}
+    for idx, keys in enumerate(effective_lead_keys_by_scenario):
+        signature = (tuple(tuple(key) for key in keys),) + tuple(array[idx].tobytes() for array in cells)
+        classes.setdefault(signature, []).append(idx)
+    groups = list(classes.values())
+    keep = [group[0] for group in groups]
+    names = [_lead_sequence_name(effective_lead_keys_by_scenario[idx]) for idx in keep]
+    if len(set(names)) < len(names):
+        names = [mode_names[idx] for idx in keep]
+    merged_probabilities = [float(sum(probabilities[idx] for idx in group)) for group in groups]
+    merged_metadata = []
+    for name, group, probability in zip(names, groups, merged_probabilities):
+        entry = dict(metadata[group[0]])
+        entry["probability"] = probability
+        entry["mode_names"] = name
+        entry["merged_mode_names"] = [mode_names[idx] for idx in group]
+        merged_metadata.append(entry)
+    return ([array[keep] for array in cells], merged_probabilities, names, merged_metadata,
+            [effective_lead_keys_by_scenario[idx] for idx in keep])
+
+
 def build_multitarget_lead_prediction(
     processed_predictions: Iterable[ACCProcessedPrediction],
     ego_state: Sequence[float],
@@ -1168,6 +1216,7 @@ def build_multitarget_lead_prediction(
     entry_plan: Optional[Dict[int, np.ndarray]] = None,
     entry_clearance: float = 0.0,
     entry_margin: float = 0.0,
+    lead_merge: bool = False,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
 
@@ -1186,7 +1235,8 @@ def build_multitarget_lead_prediction(
     any negative gap; the vehicle length twice: the whole vehicle behind the
     ego) -- the current-position filter alone keeps it whenever it is ahead of
     the ego now.  Every scenario's metadata then lists the decisions under
-    ``entry_pass``.
+    ``entry_pass``.  ``lead_merge`` (``leadmerge``) keeps one scenario per
+    class of exact duplicates, see ``_merge_duplicate_scenarios``.
     """
     targets = [pred for pred in processed_predictions if pred.mode_predictions]
     horizon = int(horizon)
@@ -1334,12 +1384,20 @@ def build_multitarget_lead_prediction(
         if entry_plan is not None:
             metadata[-1]["entry_pass"] = entry_decisions
 
+    if lead_merge:
+        cells = [means, covariances, active_mask, clearance_scale, chance_confidence, sigma_confidence,
+                 lead_mode_lk, lead_vehicle_ids, lead_mode_probability]
+        cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario = _merge_duplicate_scenarios(
+            cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario)
+        (means, covariances, active_mask, clearance_scale, chance_confidence, sigma_confidence,
+         lead_mode_lk, lead_vehicle_ids, lead_mode_probability) = cells
+
     policy_tree = build_policy_sharing_tree_from_effective_leads(
         effective_lead_keys_by_scenario,
         horizon=horizon,
         mode_names=mode_names,
     )
-    k_group_map = np.zeros((len(scenarios), horizon), dtype=int)
+    k_group_map = np.zeros((len(effective_lead_keys_by_scenario), horizon), dtype=int)
     k_group_names = []
     k_group_lookup = {}
     for scenario_idx, effective_lead_keys in enumerate(effective_lead_keys_by_scenario):

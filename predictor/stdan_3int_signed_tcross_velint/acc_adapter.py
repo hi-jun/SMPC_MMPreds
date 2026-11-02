@@ -513,6 +513,7 @@ class STDAN3IntACCAdapter:
         no_cutout: bool = False,
         lk_sigma: bool = False,
         full_footprint: bool = False,
+        lead_merge: bool = False,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -603,6 +604,7 @@ class STDAN3IntACCAdapter:
             entry_plan=entry_plan,
             entry_clearance=entry_clearance,
             entry_margin=entry_margin,
+            lead_merge=lead_merge,
         )
         return {
             "prediction": prediction,
