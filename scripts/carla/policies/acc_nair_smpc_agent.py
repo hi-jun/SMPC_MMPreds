@@ -227,6 +227,10 @@ class ACCNairSMPCAgent(object):
         self.controller_config.relative_brake_decel = self._parse_relative_brake_decel(smpc_config)
         self.controller_config.slack_l1_weight = self._parse_slack_l1_weight(smpc_config)
         self.controller_config.terminal_cost_scale = self._parse_terminal_cost_scale(smpc_config)
+        self.controller_config.floor_risk = self._parse_floor_risk(smpc_config)
+        if self.controller_config.floor_risk is not None and not self.full_footprint:
+            # Its floor replaces the one fullfoot gives a cut-in chance cell, L + d0 + q(beta_j) sigma.
+            raise ValueError("floorrisk<eps> needs fullfoot (with cutin_chance<beta_ref> and dopt<w>)")
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -631,6 +635,13 @@ class ACCNairSMPCAgent(object):
                 ),
                 "chance_margin_min": float(solution.chance_margin_min),
                 "slack_max": float(solution.slack_max),
+                # floorrisk<eps>: the cut-in chance cells whose floor the rule removed / lowered / raised (0
+                # without it), and the plan's smallest margin to the old floor L + d0 + q(beta_j) sigma
+                # (NaN without such a cell)
+                "n_floor_free": int(solution.n_floor_free),
+                "n_floor_lowered": int(solution.n_floor_lowered),
+                "n_floor_raised": int(solution.n_floor_raised),
+                "floor_old_margin_min": float(solution.floor_old_margin_min),
                 "tightening_max": float(solution.tightening_max),
                 "clearance_scale_now": self._clearance_scale_now(prediction_bundle["prediction"]),
                 "predictor_time": prediction_bundle.get("debug", {}).get("predictor_time"),
@@ -1656,6 +1667,18 @@ class ACCNairSMPCAgent(object):
         ``termcost0.5`` reads as 0.5.  ``jinput`` only.
         """
         match = re.search(r"(?:^|_)termcost([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_floor_risk(smpc_config):
+        """Read ``floorrisk<eps>`` from the config string (None = the hard floor of the cut-in chance cells).
+
+        The risk ``eps`` of the chance constraint ``P_j P(gap_jk < L + d0) <= eps``
+        that sets a cut-in chance cell's floor, ``L + d0 + Phi^-1(1 - eps / P_j) sigma``
+        (``NairACCConfig.floor_risk``), 2026-11-02.  Whole-token match;
+        ``floorrisk0.2`` reads as 0.2.  Needs ``fullfoot``.
+        """
+        match = re.search(r"(?:^|_)floorrisk([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
         return float(match.group(1)) if match else None
 
     @staticmethod

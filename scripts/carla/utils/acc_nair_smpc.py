@@ -249,6 +249,25 @@ class NairACCConfig:
     #: (``safety_std`` keeps ``h_ego = [-1, -tau]``).  ``None`` is off.  Cached
     #: feedback QP only; not with ``brake_distance``.
     relative_brake_decel: Optional[float] = None
+    #: ``floorrisk<eps>``: the hard floor of a cut-in chance cell (``cutin`` and
+    #: ``trajcutin``'s ``cutin/LK``) relaxed by its scenario probability through
+    #: the chance constraint ``P_j P(gap_jk < L + d0) <= eps`` (2026-11-02,
+    #: maintainer's idea), ``eps`` in (0, 1).  With a Gaussian gap of std
+    #: ``sigma_jk`` (``safety_std``, the sigma of the row's sigma term) it is the
+    #: row ``gap >= L + d0 + z_j sigma_jk - xi`` with ``z_j = Phi^-1(1 - eps / P_j)``
+    #: (``floor_risk_quantile``), one-sided, sharing the cell's emergency slack;
+    #: a cell with ``P_j <= eps`` keeps no floor.  It replaces the floor
+    #: ``L + d0 + q(beta_j) sigma_jk`` that the priced row gives such a cell
+    #: with ``fullfoot`` once the shortfall sits at its cap ``tau v``: the priced
+    #: row and its price are unchanged, but the cap is lifted on these cells, so
+    #: the price keeps growing below the old floor and the new row alone bounds
+    #: the gap.  With ``z_j = q(beta_j)`` the two-row form has the feasible set
+    #: and the optimum of today's single row (the l1 slack cost is far above the
+    #: price's marginal).  Every other cell, and the reference, are unchanged.
+    #: ``None`` is off.  Needs ``standoff_shortfall_weight`` under
+    #: ``confidence_chance`` (and the agent's ``fullfoot``); cached feedback QP
+    #: only; not with ``relative_brake_decel``.
+    floor_risk: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -346,6 +365,15 @@ class NairACCConfig:
                 raise ValueError("terminal_cost_scale (termcost<c>) is implemented only in the cached feedback QP")
             if self.optimize_k:
                 raise ValueError("terminal_cost_scale (termcost<c>) is not implemented with optimize_k (with_k)")
+        if self.floor_risk is not None:
+            if not 0.0 < self.floor_risk < 1.0:
+                raise ValueError("floor_risk (floorrisk<eps>) must lie in (0, 1)")
+            if self.standoff_shortfall_weight is None or self.safety_constraint_mode != SAFETY_CONFIDENCE_CHANCE:
+                raise ValueError("floor_risk (floorrisk<eps>) needs cutin_chance<beta_ref> and dopt<w>")
+            if self.relative_brake_decel is not None:
+                raise ValueError("floor_risk (floorrisk<eps>) is not implemented with relative_brake_decel (relbrake<b>)")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("floor_risk (floorrisk<eps>) is implemented only in the cached feedback QP")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -801,6 +829,16 @@ class NairACCSolution:
     #: ``relbrake<b>`` only: the largest amount, over the active cells, by which the QP's tangent
     #: understated the rule's ``v^2`` term at the solved plan, ``(v_k - v_bar_k)^2 / (2 b)`` [m]; 0 without it.
     speed_gap_tangent_error_max: float = 0.0
+    #: ``floorrisk<eps>`` only: the cut-in chance cells whose floor the rule removed (``P_j <= eps``), lowered
+    #: (``z_j < q(beta_j)``) and raised (``z_j > q(beta_j)``) this solve; 0 without it.
+    n_floor_free: int = 0
+    n_floor_lowered: int = 0
+    n_floor_raised: int = 0
+    #: The smallest margin of the nominal plan to the floor a cut-in chance cell has under ``dopt<w>`` with
+    #: ``fullfoot`` and without ``floorrisk<eps>``, centre gap minus ``L + d0 + q(beta_j) sigma_jk`` [m]
+    #: (negative where the plan used the relaxation); NaN without such a cell.  Reported with and without
+    #: the token.
+    floor_old_margin_min: float = float("nan")
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -895,6 +933,11 @@ class CachedFeedbackScalarChanceQP:
     #: relbrake<b>: slope and intercept of the tangent of the speed-dependent gap per (mode, step); None without it
     rel_slope_param: Any = None
     rel_intercept_param: Any = None
+    #: floorrisk<eps>: per (mode, step) 1 on the cut-in chance cells (the shortfall cap is off there), 1 on those
+    #: of them that keep a floor, and that floor's sigma term z_j sigma_jk; None without it
+    floor_cell_param: Any = None
+    floor_mask_param: Any = None
+    floor_sigma_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -1469,6 +1512,11 @@ class NairACCSMPC:
             raise ValueError(
                 "terminal_cost_scale (termcost<c>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.floor_risk is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "floor_risk (floorrisk<eps>) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1542,6 +1590,9 @@ class NairACCSMPC:
         shortfall = self._standoff_shortfall
         dopt_cells = (standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
                       if shortfall is not None else None)
+        # the cut-in chance cells and, with floorrisk<eps>, the sigma term of the floor each keeps
+        cutin_cells = np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
+        floor_sigma = floor_risk_cells(prediction, self.config)[1] if self.config.floor_risk is not None else None
         if optimized_eta_data is not None:
             eta_levels = np.asarray(optimized_eta_data["eta_levels"], dtype=float).reshape(-1)
             safe_probability_levels = np.asarray(
@@ -1599,10 +1650,35 @@ class NairACCSMPC:
                                 shortfall[mode, step]
                                 - (1.0 - scale) * float(speed_gap(
                                     x_nominal[mode, step, 1], prediction.means[mode, step, 1], self.config)))
+                        if floor_sigma is not None and cutin_cells[mode, step]:
+                            # floorrisk<eps>: the margin to the floor the QP imposed on this cell,
+                            # L + d0 + z_j sigma_jk (inf where it keeps none); the priced row above
+                            # it never needs the emergency slack, its shortfall being uncapped
+                            chance_margin_values[mode, step] = (
+                                prediction.means[mode, step, 0] - x_nominal[mode, step, 0]
+                                - (self.config.vehicle_length + self.config.d0) - floor_sigma[mode, step])
                 else:
                     safety_values[mode, step] = np.inf
                     tightening_values[mode, step] = 0.0
                     chance_margin_values[mode, step] = np.inf
+        n_floor_free = n_floor_lowered = n_floor_raised = 0
+        floor_old_margin_min = float("nan")
+        if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE and np.any(cutin_cells):
+            # the plan's margin to the floor these cells have without floorrisk<eps>,
+            # L + d0 + q(beta_j) sigma_jk (tightening_values is that sigma term on them)
+            old_floor_margin = (prediction.means[:, :, 0] - x_nominal[:, :, 0]
+                                - (self.config.vehicle_length + self.config.d0) - tightening_values)
+            floor_old_margin_min = float(np.min(old_floor_margin[cutin_cells]))
+            if floor_sigma is not None:
+                z = floor_risk_quantile(prediction.probabilities, self.config.floor_risk)
+                for mode, step in zip(*np.nonzero(cutin_cells)):
+                    q = confidence_quantile(prediction.chance_confidence[mode, step])
+                    if not np.isfinite(z[mode]):
+                        n_floor_free += 1
+                    elif z[mode] < q:
+                        n_floor_lowered += 1
+                    elif z[mode] > q:
+                        n_floor_raised += 1
         planned_standoff = None
         if self.config.standoff_shortfall_weight is not None:
             standoff = optimized_standoff(prediction.clearance_scale, x_nominal[:, :, 1], self.config,
@@ -1694,6 +1770,10 @@ class NairACCSMPC:
             planned_standoff=planned_standoff,
             j_nominal=j_nominal,
             speed_gap_tangent_error_max=speed_gap_tangent_error_max,
+            n_floor_free=n_floor_free,
+            n_floor_lowered=n_floor_lowered,
+            n_floor_raised=n_floor_raised,
+            floor_old_margin_min=floor_old_margin_min,
         )
 
     def _clipped_jerk(self, jerk):
@@ -2146,6 +2226,7 @@ class NairACCSMPC:
             bool(self.config.jerk_input),
             None if self.config.relative_brake_decel is None else float(self.config.relative_brake_decel),
             None if self.config.slack_l1_weight is None else float(self.config.slack_l1_weight),
+            None if self.config.floor_risk is None else float(self.config.floor_risk),
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
 
@@ -2224,6 +2305,13 @@ class NairACCSMPC:
             opti.set_value(problem.shortfall_price_param, (
                 np.ones((num_modes, horizon + 1)) if prediction.lead_mode_probability is None
                 else prediction.lead_mode_probability))
+        if problem.floor_cell_param is not None:
+            # floorrisk<eps>: the cap off on every cut-in chance cell, the floor row on those that keep one
+            floor_cells, floor_sigma = floor_risk_cells(prediction, self.config)
+            floored = np.isfinite(floor_sigma)
+            opti.set_value(problem.floor_cell_param, floor_cells.astype(float))
+            opti.set_value(problem.floor_mask_param, floored.astype(float))
+            opti.set_value(problem.floor_sigma_param, np.where(floored, floor_sigma, 0.0))
         k_slot_by_step = []
         if problem.optimize_k:
             for step in range(horizon):
@@ -2424,6 +2512,10 @@ class NairACCSMPC:
         # keeps a priced cell's shortfall within max(h, 0) (a larger one costs and relaxes nothing)
         short_bound = (self.config.time_headway * self.config.v_max + self.config.v_max ** 2 / (2.0 * relative_brake)
                        if relative_brake is not None else None)
+        floor_risk = self.config.floor_risk
+        floor_cell_param = opti.parameter(num_modes, horizon + 1) if floor_risk is not None else None
+        floor_mask_param = opti.parameter(num_modes, horizon + 1) if floor_risk is not None else None
+        floor_sigma_param = opti.parameter(num_modes, horizon + 1) if floor_risk is not None else None
         sharing_params = []
 
         opti.subject_to(ca.vec(slack_var) >= 0.0)
@@ -2594,7 +2686,12 @@ class NairACCSMPC:
                     # priced by the scenario probability below.
                     if rel_slope_param is None:
                         timegap = self.config.time_headway * states_v[step]
-                        opti.subject_to(short_var[mode, step] <= shortfall_mask_param[mode, step] * timegap)
+                        short_capped = short_var[mode, step]
+                        if floor_cell_param is not None:
+                            # floorrisk<eps>: no cap on a cut-in chance cell (the row then reads
+                            # 0 <= tau v); the floor row below bounds the gap there instead
+                            short_capped = (1.0 - floor_cell_param[mode, step]) * short_var[mode, step]
+                        opti.subject_to(short_capped <= shortfall_mask_param[mode, step] * timegap)
                     else:
                         # relbrake<b>: the priced part is the whole speed-dependent part h (its tangent),
                         # and the floor row below stands in for short <= h, infeasible where h < 0
@@ -2627,6 +2724,15 @@ class NairACCSMPC:
                             lead_s_param[mode, step], states_s[step], slack=slack_var[mode, step],
                             clearance_scale=clearance_scale_param[mode, step])
                         - tightening >= 0.0)
+                if floor_mask_param is not None:
+                    # floorrisk<eps>: the floor L + d0 + z_j sigma_jk as a second row on the cut-in chance
+                    # cells that keep one, with the emergency slack alone (no shortfall); elsewhere the
+                    # row reads slack >= 0
+                    opti.subject_to(
+                        floor_mask_param[mode, step] * (
+                            self._symbolic_min_clearance_margin(lead_s_param[mode, step], states_s[step])
+                            - floor_sigma_param[mode, step])
+                        + slack_var[mode, step] >= 0.0)
 
         if short_var is not None:
             for mode in range(num_modes):
@@ -2700,6 +2806,9 @@ class NairACCSMPC:
             a0_param=a0_param,
             rel_slope_param=rel_slope_param,
             rel_intercept_param=rel_intercept_param,
+            floor_cell_param=floor_cell_param,
+            floor_mask_param=floor_mask_param,
+            floor_sigma_param=floor_sigma_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
@@ -3570,6 +3679,38 @@ def optimized_standoff(clearance_scale, speed, config, lead_speed=None):
     """
     return (clearance_scale * (config.vehicle_length + config.d0)
             + speed_gap(speed, lead_speed, config))
+
+
+def floor_risk_quantile(probabilities, risk):
+    """``floorrisk<eps>``: ``z_j = Phi^-1(1 - eps / P_j)`` per scenario, the one-sided
+    quantile at which a Gaussian gap of mean ``mu`` and std ``sigma`` satisfies
+    ``P_j P(gap < mu - z_j sigma) <= eps``, so the floor ``L + d0 + z_j sigma_jk``
+    keeps ``P_j P(gap_jk < L + d0) <= eps``.  ``-inf`` where ``P_j <= eps``: the
+    chance constraint then holds without a floor.  Array-safe.
+    """
+    probabilities = np.asarray(probabilities, dtype=float)
+    z = np.full(probabilities.shape, -np.inf)
+    floored = probabilities > risk
+    z[floored] = norm.ppf(1.0 - risk / probabilities[floored])
+    return z
+
+
+def floor_risk_cells(prediction, config):
+    """``floorrisk<eps>``: the cut-in chance cells (active, finite ``chance_confidence``)
+    and the sigma term of the floor each keeps.
+
+    Returns ``(cells, floor_sigma)``: a bool mask, and per cell ``z_j sigma_jk``
+    (``floor_risk_quantile`` times ``safety_std``, the std of the row's sigma term),
+    ``-inf`` where the cell keeps no floor (``P_j <= eps``), NaN off the cut-in
+    chance cells.
+    """
+    cells = np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
+    z = floor_risk_quantile(prediction.probabilities, config.floor_risk)
+    floor_sigma = np.full(cells.shape, np.nan)
+    for mode, step in zip(*np.nonzero(cells)):
+        floor_sigma[mode, step] = (z[mode] * safety_std(prediction.covariances[mode, step], config)
+                                   if np.isfinite(z[mode]) else -np.inf)
+    return cells, floor_sigma
 
 
 def terminal_cost_matrix(config):
