@@ -241,7 +241,7 @@ class ACCNairSMPCAgent(object):
             self.safety_layer = SafetyLayer(self.controller_config.a_max)
             self._safety_tracker = LaneMembershipTracker(self.safety_layer.cfg)
             self._safety_clock = 0.0
-            self._safety_override = False      # the last command came from the layer (fail-safe or ICS braking)
+            self._safety_recover = False       # the layer acted and the MPC's start state is not yet feasible again
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
             SyntheticCutInConfig(
                 horizon=N,
@@ -2017,17 +2017,23 @@ class ACCNairSMPCAgent(object):
         self._safety_nominal_accel = float(action)
         decision = self.safety_layer.step(
             self._safety_clock, speed, previous_accel_cmd, action, vehicles, command_dt)
-        self._safety_override = decision.path != "nominal"
+        if decision.path != "nominal":
+            self._safety_recover = True
         return decision
 
     def _mpc_previous_accel(self, previous_accel_cmd, speed):
-        """``safelayer``: the previous command the MPC starts from. After the layer acted it can lie outside the
-        MPC's feasible set; clip it to the bounds and to no lower than -sqrt(2 j v), from which the jerk bound still
-        keeps v >= 0. Otherwise it is unchanged."""
-        if self.safety_layer is None or not self._safety_override:
+        """``safelayer``: the previous command the MPC starts from.
+
+        After the layer acted, that command can lie outside the MPC's feasible set. It is then clipped to the bounds,
+        and to no lower than -sqrt(2 j v), from which the jerk bound still keeps v >= 0, until it is back inside.
+        Otherwise it is unchanged."""
+        if self.safety_layer is None or not self._safety_recover:
             return previous_accel_cmd
         cfg = self.controller_config
         a_floor = max(cfg.a_min, -float(np.sqrt(2.0 * cfg.jerk_limit * max(float(speed), 0.0))))
+        if a_floor <= float(previous_accel_cmd) <= cfg.a_max:
+            self._safety_recover = False
+            return previous_accel_cmd
         return float(np.clip(previous_accel_cmd, a_floor, cfg.a_max))
 
     def _command_jerk(self, action, command_dt):

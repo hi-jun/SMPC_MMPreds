@@ -86,8 +86,8 @@ class GuaranteeTests(unittest.TestCase):
             self.assertGreaterEqual(gap_min, -1.0e-9, "trial %d" % trial)
 
     def test_standstill_creep_stops_before_contact(self):
-        # stopped behind a stopped lead 3 mm away, the nominal keeps asking +0.1 m/s^2
-        gap_min, paths = closed_loop(0.0, 0.0, 0.003, lambda k, ve, g: 0.1, lambda k, vl: 0.0, 0.1, 300)
+        # stopped 5 cm behind a stopped lead (first seen outside its 1 cm requirement), the nominal keeps asking +0.1
+        gap_min, paths = closed_loop(0.0, 0.0, 0.05, lambda k, ve, g: 0.1, lambda k, vl: 0.0, 0.1, 300)
         self.assertGreaterEqual(gap_min, 0.0)
         self.assertGreater(paths[PATH_FAILSAFE], 0)
 
@@ -109,20 +109,22 @@ class ModeTests(unittest.TestCase):
 
     def test_failsafe_follows_the_profile_and_releases(self):
         layer = SafetyLayer(2.0)
-        lead = [VehicleObs(1, 10.0, 10.0, True)]
-        first = layer.step(0.0, 20.0, 0.0, 0.0, lead, 0.1)
+        near = [VehicleObs(1, 10.0, 10.0, True)]
+        layer.step(0.0, 20.0, 0.0, 0.0, [VehicleObs(1, 60.0, 10.0, True)], 0.1)     # first seen far: covered
+        first = layer.step(0.1, 20.0, 0.0, 0.0, near, 0.1)
         self.assertEqual(first.path, PATH_FAILSAFE)
         self.assertAlmostEqual(first.accel, -2.0)                 # 0 - 20 m/s^3 * 0.1 s
-        second = layer.step(0.1, 19.8, first.accel, 0.0, lead, 0.1)
+        second = layer.step(0.2, 19.8, first.accel, 0.0, near, 0.1)
         self.assertAlmostEqual(second.accel, -4.0)                # the same profile, not restarted
-        released = layer.step(0.2, 19.5, second.accel, 0.0, [VehicleObs(1, 60.0, 19.5, True)], 0.1)
+        released = layer.step(0.3, 19.5, second.accel, 0.0, [VehicleObs(1, 60.0, 19.5, True)], 0.1)
         self.assertEqual((released.path, released.accel), (PATH_NOMINAL, 0.0))
-        again = layer.step(0.3, 19.5, 0.0, 0.0, lead, 0.1)
+        again = layer.step(0.4, 19.5, 0.0, 0.0, near, 0.1)
         self.assertAlmostEqual(again.accel, -2.0)                 # a new engagement starts a new profile
 
     def test_a_harder_nominal_command_is_kept(self):
         layer = SafetyLayer(2.0)
-        dec = layer.step(0.0, 20.0, 0.0, -3.0, [VehicleObs(1, 10.0, 10.0, True)], 0.1)
+        layer.step(0.0, 20.0, 0.0, 0.0, [VehicleObs(1, 60.0, 10.0, True)], 0.1)
+        dec = layer.step(0.1, 20.0, 0.0, -3.0, [VehicleObs(1, 10.0, 10.0, True)], 0.1)
         self.assertEqual(dec.path, PATH_FAILSAFE)
         self.assertEqual(dec.accel, -3.0)
 
@@ -143,10 +145,16 @@ class ModeTests(unittest.TestCase):
         dec = layer.step(0.2, 10.0, 0.0, 0.0, [VehicleObs(7, 30.0, 12.0, True)], 0.1)
         self.assertEqual((dec.cutin_vids, dec.checked_vids), ([], [7]))
 
-    def test_first_sight_inside_the_lane_is_not_a_cut_in(self):
+    def test_first_sight_inside_the_distance_is_a_cut_in(self):
+        # e.g. a vehicle already in the path 1 m ahead at the start: outside the guarantee, no ICS at equal speeds
         layer = SafetyLayer(2.0)
         dec = layer.step(0.0, 15.0, 0.0, 0.0, [VehicleObs(7, 1.0, 15.0, True)], 0.1)
-        self.assertEqual((dec.cutin_vids, dec.checked_vids, dec.path), ([], [7], PATH_FAILSAFE))
+        self.assertEqual((dec.cutin_vids, dec.checked_vids, dec.path), ([7], [], PATH_NOMINAL))
+
+    def test_first_sight_outside_the_distance_is_covered(self):
+        layer = SafetyLayer(2.0)
+        dec = layer.step(0.0, 15.0, 0.0, 0.0, [VehicleObs(7, 40.0, 15.0, True)], 0.1)
+        self.assertEqual((dec.cutin_vids, dec.checked_vids, dec.path), ([], [7], PATH_NOMINAL))
 
 
 class TokenTests(unittest.TestCase):

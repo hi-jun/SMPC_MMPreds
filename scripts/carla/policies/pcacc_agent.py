@@ -311,6 +311,7 @@ def observe_preceding_vehicles(world, vehicle, frenet_traj, tracker, cfg, time_s
     that ``tracker`` keeps, plus a per-vehicle log row.
 
     ``ego_path`` = (the ego's lateral offset on ``frenet_traj``, its half width) [m] (``safelayer``). With it:
+    * membership needs the vehicle to precede the ego (bumper gap > 0), so a vehicle alongside is not a member;
     * an adjacent vehicle occupies the ego's path only while its body overlaps the ego's laterally, in place of
       reaching over the lane line;
     * the lateral cut-in rule is not applied, so membership is occupancy plus the leave lag."""
@@ -353,10 +354,12 @@ def observe_preceding_vehicles(world, vehicle, frenet_traj, tracker, cfg, time_s
             # the ego's path: lateral body overlap, and no lateral cut-in rule (it needs both inputs)
             if adjacent:
                 occupies = abs(float(d_tv) - float(ego_path[0])) < float(actor.bounding_box.extent.y) + float(ego_path[1])
+            occupies = occupies and gap > 0.0          # preceding only: a vehicle alongside is not one
             s_lat_toward = theta_toward = None
         state = tracker.update(actor.id, time_s, occupies, adjacent, s_lat_toward, theta_toward)
         role = actor.attributes.get("role_name", "")
-        vehicles.append(VehicleObs(int(actor.id), float(gap), float(speed), bool(state.member), role))
+        member = bool(state.member) and (ego_path is None or gap > 0.0)
+        vehicles.append(VehicleObs(int(actor.id), float(gap), float(speed), member, role))
         rows.append({
             "vid": int(actor.id),
             "role": role,

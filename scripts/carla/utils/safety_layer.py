@@ -6,9 +6,9 @@ replaced without having to have the system re-certified".
 
 Every command interval:
 
-* **Cut-in classification (Def. II.3).** A measured vehicle that becomes an ego-lane member with a gap below the safe
-  distance of the current state is a cut-in until the gap reaches that distance again. Cut-ins are outside the
-  guarantee.
+* **Cut-in classification (Def. II.3).** A measured vehicle that joins the ego's path with a gap below the safe
+  distance of the current state is a cut-in until the gap reaches that distance again. This includes a vehicle seen
+  for the first time already inside the path. Cut-ins are outside the guarantee.
 * **Check (7).** For every other member: after the nominal command is held over the interval, the fail-safe braking
   must stop behind the vehicle braking at a_p from now (Prop. IV.4-IV.5).
 * **Fail-safe.** If one check fails, the fail-safe is issued (or the nominal command, if it brakes harder). The
@@ -20,19 +20,25 @@ Only measured states enter; the predictor and the MPC's feasibility play no role
 
 **Membership.** The callers give each vehicle's membership in the ego's path from PC-ACC's perception, with its 1 s
 leave lag: the CARLA agent through ``policies/pcacc_agent.observe_preceding_vehicles``, the replay through
-``PCACCReplay.observe``. A vehicle is in the path if it is in the same lane, or if it is an adjacent-lane vehicle whose
-body overlaps the ego's laterally.
+``PCACCReplay.observe``. A vehicle is in the path if it precedes the ego (its rear bumper is ahead of the ego's front)
+and it is either in the same lane, or an adjacent-lane vehicle whose body overlaps the ego's laterally.
 
-This differs from the paper in two ways, because a 1-D longitudinal collision needs lateral body overlap:
+This differs from the paper, because a longitudinal controller can only avoid vehicles ahead that overlap it
+laterally:
 * the paper's lane occupancy is not used;
-* the paper's lateral cut-in rule is not used.
+* the paper's lateral cut-in rule is not used;
+* vehicles alongside the ego are not members.
 
-On NGSIM both engaged the fail-safe for vehicles that never entered: vehicles touching the marking 0.4-1.4 m beside
-the ego, and a slow adjacent queue vehicle.
+On NGSIM each of these engaged the fail-safe or full braking for vehicles that the longitudinal controller cannot or
+need not avoid:
+* vehicles touching the marking 0.4-1.4 m beside the ego;
+* a slow adjacent queue vehicle;
+* vehicles merging alongside the ego (bumper gap down to -12 m). Braking for these turned a pass into a yield and
+  created floor breaches (2026-11-02, the first final-set run).
 
-**Guarantee (Prop. IV.5, by induction).** No collision with an ego-lane member that did not cut in, provided that:
-every member brakes no harder than |a_p|, the vehicle executes the fail-safe, the measured states are exact, and the
-layer starts in a safe state.
+**Guarantee (Prop. IV.5, by induction).** No collision with a path member that joined the path, or was first seen,
+outside the safe distance. This holds provided that every member brakes no harder than |a_p|, the vehicle executes
+the fail-safe, and the measured states are exact.
 
 **Fail-safe parameters.** Constant jerk -20 m/s^3 from the current acceleration down to -8 m/s^2, then -8. This is
 emergency braking, beyond the nominal comfort limits. a_p = -10.5 m/s^2 (Spec. III.5); a_cut-in = -2 m/s^2 (PC-ACC's).
@@ -129,8 +135,9 @@ class SafetyLayer:
                 self._cutin.discard(vid)
         checked, cutins = [], []
         for veh in sorted(vehicles, key=lambda item: item.gap):
-            # A vehicle first seen inside the lane has not entered it (Def. II.3 needs it outside just before).
-            was = self._was_member.get(veh.vid, bool(veh.member))
+            # A vehicle first seen inside the path counts as having just entered it: inside the safe distance it is a
+            # cut-in like any other (the paper treats it as safety keeping and assumes a safe start).
+            was = self._was_member.get(veh.vid, False)
             self._was_member[veh.vid] = bool(veh.member)
             if not veh.member:
                 self._cutin.discard(veh.vid)
