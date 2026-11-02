@@ -233,6 +233,15 @@ class ACCNairSMPCAgent(object):
         self.controller_config.standoff_shortfall_cell_price = self.standoff_shortfall_cell_price
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
+        # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
+        self.safety_layer = None
+        if self._parse_safety_layer(smpc_config):
+            from utils.pcacc import LaneMembershipTracker
+            from utils.safety_layer import SafetyLayer
+            self.safety_layer = SafetyLayer(self.controller_config.a_max)
+            self._safety_tracker = LaneMembershipTracker(self.safety_layer.cfg)
+            self._safety_clock = 0.0
+            self._safety_override = False      # the last command came from the layer (fail-safe or ICS braking)
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
             SyntheticCutInConfig(
                 horizon=N,
@@ -553,7 +562,7 @@ class ACCNairSMPCAgent(object):
             solution = self.controller.solve(
                 np.array([s_ego, speed]),
                 prediction_bundle["prediction"],
-                previous_accel_cmd=previous_accel_cmd,
+                previous_accel_cmd=self._mpc_previous_accel(previous_accel_cmd, speed),
                 command_dt=command_dt,
             )
             solve_time = time.time() - start
@@ -564,6 +573,10 @@ class ACCNairSMPCAgent(object):
                     np.asarray(solution.x_nominal, dtype=float)[:, :, 1])
             raw_action = float(solution.action)
             action = self._limit_accel_command(raw_action, previous_accel_cmd, command_dt)
+            safety = None
+            if self.safety_layer is not None:
+                safety = self._apply_safety_layer(time_s, s_ego, ey, speed, previous_accel_cmd, action, command_dt)
+                action = safety.accel
             df_des = self._lane_keeping_steer(ey, epsi)
             v_des = np.clip(speed + action * self.DT,
                             self.controller_config.v_min,
@@ -636,6 +649,16 @@ class ACCNairSMPCAgent(object):
                     [None if np.isnan(value) else value for value in row]
                     for row in np.asarray(solution.planned_standoff, dtype=float).round(4).tolist()
                 ]
+            if safety is not None:
+                # safelayer: the decision; accel_cmd above is the issued command, nominal_accel the MPC's limited one
+                self.policy_log[-1]["safety_layer"] = {
+                    "path": safety.path,
+                    "vid": safety.vid,
+                    "margin": safety.margin,
+                    "nominal_accel": self._safety_nominal_accel,
+                    "checked_vids": safety.checked_vids,
+                    "cutin_vids": safety.cutin_vids,
+                }
             self._log_wandb(self.policy_log[-1], solution, prediction_bundle)
 
         self._remember_accel_cmd(time_s, action)
@@ -1636,6 +1659,14 @@ class ACCNairSMPCAgent(object):
         return float(match.group(1)) if match else None
 
     @staticmethod
+    def _parse_safety_layer(smpc_config):
+        """Read ``safelayer`` from the config string (default: off).
+
+        PC-ACC's safety layer (``utils/safety_layer.py``) around the MPC's command, 2026-11-02. Whole-token match.
+        """
+        return re.search(r"(?:^|_)safelayer(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
     def _parse_intention_lpf_s(smpc_config):
         """Read ``intent_lpf<seconds>`` from the config string (default: off).
 
@@ -1967,6 +1998,37 @@ class ACCNairSMPCAgent(object):
             self.controller_config.a_min,
             self.controller_config.a_max,
         ))
+
+    def _apply_safety_layer(self, time_s, s_ego, ey, speed, previous_accel_cmd, action, command_dt):
+        """``safelayer`` (2026-11-02): PC-ACC's safety layer (``utils/safety_layer.py``) around the limited MPC
+        command, on PC-ACC's perception (``policies/pcacc_agent.observe_preceding_vehicles``):
+        waypoint lanes, the paper's lateral cut-in rule and leave lag, and physical bumper gaps.
+        An adjacent vehicle counts only while its body overlaps the ego's laterally. Returns the layer's
+        ``SafetyDecision``."""
+        from policies.pcacc_agent import observe_preceding_vehicles
+        # the membership rule's clocks need a time even when the snapshot has none (PC-ACC's agent does the same)
+        self._safety_clock = float(time_s) if time_s is not None else self._safety_clock + float(command_dt)
+        ego_waypoint = self.world.get_map().get_waypoint(
+            self.vehicle.get_location(), project_to_road=True, lane_type=carla.LaneType.Driving)
+        vehicles, _ = observe_preceding_vehicles(
+            self.world, self.vehicle, self._frenet_traj, self._safety_tracker, self.safety_layer.cfg,
+            self._safety_clock, s_ego, ego_waypoint,
+            ego_path=(float(ey), float(self.vehicle.bounding_box.extent.y)))
+        self._safety_nominal_accel = float(action)
+        decision = self.safety_layer.step(
+            self._safety_clock, speed, previous_accel_cmd, action, vehicles, command_dt)
+        self._safety_override = decision.path != "nominal"
+        return decision
+
+    def _mpc_previous_accel(self, previous_accel_cmd, speed):
+        """``safelayer``: the previous command the MPC starts from. After the layer acted it can lie outside the
+        MPC's feasible set; clip it to the bounds and to no lower than -sqrt(2 j v), from which the jerk bound still
+        keeps v >= 0. Otherwise it is unchanged."""
+        if self.safety_layer is None or not self._safety_override:
+            return previous_accel_cmd
+        cfg = self.controller_config
+        a_floor = max(cfg.a_min, -float(np.sqrt(2.0 * cfg.jerk_limit * max(float(speed), 0.0))))
+        return float(np.clip(previous_accel_cmd, a_floor, cfg.a_max))
 
     def _command_jerk(self, action, command_dt):
         if self._prev_accel_cmd_time_s is None:

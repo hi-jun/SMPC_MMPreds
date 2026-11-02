@@ -145,64 +145,8 @@ class PCACCAgent(object):
 
     def _observe(self, time_s, s_ego, ego_waypoint):
         """Preceding vehicles as ``VehicleObs`` plus a per-vehicle log row."""
-        carla_map = self.world.get_map()
-        cfg = self.config
-        ego_half_len = float(self.vehicle.bounding_box.extent.x)
-        neighbours = {}
-        for side, lane in (("left", ego_waypoint.get_left_lane()), ("right", ego_waypoint.get_right_lane())):
-            if lane is not None and lane.lane_id * ego_waypoint.lane_id > 0:
-                neighbours[lane.lane_id] = side
-        vehicles, rows = [], []
-        for actor in self.world.get_actors().filter("vehicle*"):
-            if actor.id == self.vehicle.id:
-                continue
-            x, y, psi, speed = self._actor_state_rhs(actor)
-            s_tv, d_tv, _ = self._frenet_traj.convert_global_to_frenet_frame(x, y, psi)
-            if s_tv <= s_ego:
-                continue
-            if cfg.paper_d_safe:
-                gap = (s_tv - float(actor.bounding_box.extent.x)) - (s_ego + ego_half_len)
-            else:
-                gap = s_tv - s_ego - cfg.vehicle_length
-            if gap > cfg.sensor_range_m:
-                continue
-            waypoint = carla_map.get_waypoint(
-                actor.get_location(), project_to_road=True, lane_type=carla.LaneType.Driving)
-            if waypoint is None:
-                continue
-            s_lat, theta = self._own_lane_deviation(waypoint, x, y, psi)
-            same_lane = waypoint.lane_id == ego_waypoint.lane_id and (
-                waypoint.road_id == ego_waypoint.road_id or abs(d_tv) <= self.LANE_HALF_WIDTH_M)
-            side = neighbours.get(waypoint.lane_id) if not same_lane else None
-            adjacent = side is not None
-            # toward the ego lane: a vehicle on the ego's left reaches it by moving right
-            sign = -1.0 if side == "left" else 1.0
-            s_lat_toward = sign * s_lat if adjacent else None
-            theta_toward = sign * theta if adjacent else None
-            occupies = same_lane or (
-                adjacent and s_lat_toward > 0.5 * float(waypoint.lane_width) - float(actor.bounding_box.extent.y))
-            state = self.tracker.update(actor.id, time_s, occupies, adjacent, s_lat_toward, theta_toward)
-            role = actor.attributes.get("role_name", "")
-            vehicles.append(VehicleObs(int(actor.id), float(gap), float(speed), bool(state.member), role))
-            rows.append({
-                "vid": int(actor.id),
-                "role": role,
-                "s": float(s_tv),
-                "d": float(d_tv),
-                "gap": float(gap),
-                "v": float(speed),
-                "lane_id": int(waypoint.lane_id),
-                "road_id": int(waypoint.road_id),
-                "s_lat": s_lat,
-                "theta": theta,
-                "side": side,
-                "same_lane": bool(same_lane),
-                "occupies": bool(occupies),
-                "predicted": bool(state.predicted),
-                "member": bool(state.member),
-                "rule_ok_since": state.rule_ok_since,
-            })
-        return vehicles, rows
+        return observe_preceding_vehicles(self.world, self.vehicle, self._frenet_traj, self.tracker, self.config,
+                                          time_s, s_ego, ego_waypoint, self.LANE_HALF_WIDTH_M)
 
     # ------------------------------------------------------------------ step
     def run_step(self, pred_dict):
@@ -357,3 +301,78 @@ class PCACCAgent(object):
         if snapshot is None or snapshot.timestamp is None:
             return None
         return snapshot.timestamp.elapsed_seconds
+
+
+def observe_preceding_vehicles(world, vehicle, frenet_traj, tracker, cfg, time_s, s_ego, ego_waypoint,
+                               lane_half_width=PCACCAgent.LANE_HALF_WIDTH_M, ego_path=None):
+    """PC-ACC's perception (``PCACCAgent._observe``; also the ``safelayer`` token's, 2026-11-02).
+
+    Returns the vehicles ahead of ``vehicle`` on ``frenet_traj`` as ``VehicleObs``, with the ego-lane membership
+    that ``tracker`` keeps, plus a per-vehicle log row.
+
+    ``ego_path`` = (the ego's lateral offset on ``frenet_traj``, its half width) [m] (``safelayer``). With it:
+    * an adjacent vehicle occupies the ego's path only while its body overlaps the ego's laterally, in place of
+      reaching over the lane line;
+    * the lateral cut-in rule is not applied, so membership is occupancy plus the leave lag."""
+    carla_map = world.get_map()
+    ego_half_len = float(vehicle.bounding_box.extent.x)
+    neighbours = {}
+    for side, lane in (("left", ego_waypoint.get_left_lane()), ("right", ego_waypoint.get_right_lane())):
+        if lane is not None and lane.lane_id * ego_waypoint.lane_id > 0:
+            neighbours[lane.lane_id] = side
+    vehicles, rows = [], []
+    for actor in world.get_actors().filter("vehicle*"):
+        if actor.id == vehicle.id:
+            continue
+        x, y, psi, speed = PCACCAgent._actor_state_rhs(actor)
+        s_tv, d_tv, _ = frenet_traj.convert_global_to_frenet_frame(x, y, psi)
+        if s_tv <= s_ego:
+            continue
+        if cfg.paper_d_safe:
+            gap = (s_tv - float(actor.bounding_box.extent.x)) - (s_ego + ego_half_len)
+        else:
+            gap = s_tv - s_ego - cfg.vehicle_length
+        if gap > cfg.sensor_range_m:
+            continue
+        waypoint = carla_map.get_waypoint(
+            actor.get_location(), project_to_road=True, lane_type=carla.LaneType.Driving)
+        if waypoint is None:
+            continue
+        s_lat, theta = PCACCAgent._own_lane_deviation(waypoint, x, y, psi)
+        same_lane = waypoint.lane_id == ego_waypoint.lane_id and (
+            waypoint.road_id == ego_waypoint.road_id or abs(d_tv) <= lane_half_width)
+        side = neighbours.get(waypoint.lane_id) if not same_lane else None
+        adjacent = side is not None
+        # toward the ego lane: a vehicle on the ego's left reaches it by moving right
+        sign = -1.0 if side == "left" else 1.0
+        s_lat_toward = sign * s_lat if adjacent else None
+        theta_toward = sign * theta if adjacent else None
+        occupies = same_lane or (
+            adjacent and s_lat_toward > 0.5 * float(waypoint.lane_width) - float(actor.bounding_box.extent.y))
+        if ego_path is not None:
+            # the ego's path: lateral body overlap, and no lateral cut-in rule (it needs both inputs)
+            if adjacent:
+                occupies = abs(float(d_tv) - float(ego_path[0])) < float(actor.bounding_box.extent.y) + float(ego_path[1])
+            s_lat_toward = theta_toward = None
+        state = tracker.update(actor.id, time_s, occupies, adjacent, s_lat_toward, theta_toward)
+        role = actor.attributes.get("role_name", "")
+        vehicles.append(VehicleObs(int(actor.id), float(gap), float(speed), bool(state.member), role))
+        rows.append({
+            "vid": int(actor.id),
+            "role": role,
+            "s": float(s_tv),
+            "d": float(d_tv),
+            "gap": float(gap),
+            "v": float(speed),
+            "lane_id": int(waypoint.lane_id),
+            "road_id": int(waypoint.road_id),
+            "s_lat": s_lat,
+            "theta": theta,
+            "side": side,
+            "same_lane": bool(same_lane),
+            "occupies": bool(occupies),
+            "predicted": bool(state.predicted),
+            "member": bool(state.member),
+            "rule_ok_since": state.rule_ok_since,
+        })
+    return vehicles, rows
