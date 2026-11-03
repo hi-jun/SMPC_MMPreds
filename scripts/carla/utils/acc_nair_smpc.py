@@ -268,6 +268,27 @@ class NairACCConfig:
     #: ``confidence_chance`` (and the agent's ``fullfoot``); cached feedback QP
     #: only; not with ``relative_brake_decel``.
     floor_risk: Optional[float] = None
+    #: ``safebranch``: the safety layer's fail-safe as one more branch of the
+    #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
+    #: contingency plan).  The branch shares the first input with every
+    #: scenario and from step 1 obeys the fail-safe's limits (jerk
+    #: ``FAILSAFE_JERK``, deceleration ``FAILSAFE_DECEL`` of
+    #: ``utils/safety_layer.py``) instead of the comfort limits.  Its lead is the
+    #: layer's checked members braking at ``LEAD_DECEL`` from their measured
+    #: states (``FailsafeBranch``, ``NairACCSMPC.solve(failsafe_branch=)``,
+    #: ``failsafe_branch_lead``); its rows are the physical bumper gap to that
+    #: lead at steps 1..N, at least ``FAILSAFE_BRANCH_MARGIN_M``, and a terminal
+    #: row that bounds the fail-safe's remaining stopping distance
+    #: (``failsafe_terminal_coefficients``), hard with the same emergency slack
+    #: as every row; no time gap, sigma term, chance factor or ``dopt`` price.
+    #: Its cost is scenario 0's with the weight ``FAILSAFE_BRANCH_PROBABILITY``,
+    #: which regularises its free inputs and leaves the other scenarios'
+    #: weights unchanged.  Without a checked member the rows are placed 10^6 m
+    #: ahead and never bind.  The layer's check and fail-safe after the solve
+    #: are unchanged; the branch's slack reports that no hard solution existed.
+    #: ``False`` is off.  Cached feedback QP only; not with ``accel_lag_tau``
+    #: or ``optimize_k``.
+    failsafe_branch: bool = False
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -374,6 +395,13 @@ class NairACCConfig:
                 raise ValueError("floor_risk (floorrisk<eps>) is not implemented with relative_brake_decel (relbrake<b>)")
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("floor_risk (floorrisk<eps>) is implemented only in the cached feedback QP")
+        if self.failsafe_branch:
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
+            if self.accel_lag_tau is not None:
+                raise ValueError("failsafe_branch (safebranch) is not implemented with accel_lag_tau (alag<tau>)")
+            if self.optimize_k:
+                raise ValueError("failsafe_branch (safebranch) is not implemented with optimize_k (with_k)")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -778,6 +806,43 @@ class NairACCPolicy:
         return correction
 
 
+#: ``safebranch``: the bumper gap the branch's rows keep to the checked members [m].  It covers the largest
+#: dip of the gap between two 0.2 s samples, (1/8) (|LEAD_DECEL| + |FAILSAFE_DECEL|) dt^2 = 0.0925 m for
+#: a member at -10.5 and the ego at -8, plus the layer's stop-tick term |a_em| dt^2 / 8 = 0.01 m at 0.1 s.
+FAILSAFE_BRANCH_MARGIN_M = 0.1
+#: ``safebranch``: the branch's probability weight.  It regularises the branch's free inputs; the other
+#: scenarios' weights (summing to 1) are unchanged.
+FAILSAFE_BRANCH_PROBABILITY = 1.0e-3
+#: The offset at which an absent lead is placed ahead of the ego, where no row binds (also the cached QPs'
+#: convention for inactive cells, ``NairACCSMPC._cached_safety_lead_s``).
+INACTIVE_LEAD_OFFSET_M = 1.0e6
+
+
+@dataclass
+class FailsafeBranch:
+    """``safebranch``: the safety layer's checked members this tick, the fail-safe branch's lead.
+
+    ``gaps`` are their measured bumper gaps [m] and ``speeds`` their measured speeds [m/s]
+    (``pcacc.VehicleObs``); empty when the layer checks nobody, in which case the branch is absent.
+    """
+
+    gaps: np.ndarray
+    speeds: np.ndarray
+
+    @classmethod
+    def from_members(cls, vehicles):
+        """From the layer's checked ``VehicleObs`` (anything with ``gap`` and ``speed``)."""
+        vehicles = list(vehicles)
+        return cls(
+            gaps=np.array([float(veh.gap) for veh in vehicles], dtype=float),
+            speeds=np.array([float(veh.speed) for veh in vehicles], dtype=float),
+        )
+
+    @property
+    def present(self) -> bool:
+        return int(np.asarray(self.gaps).size) > 0
+
+
 @dataclass
 class NairACCSolution:
     """Controller output and diagnostics."""
@@ -839,6 +904,19 @@ class NairACCSolution:
     #: (negative where the plan used the relaxation); NaN without such a cell.  Reported with and without
     #: the token.
     floor_old_margin_min: float = float("nan")
+    #: ``safebranch`` only: whether the fail-safe branch was in this solve (the safety layer checked at least
+    #: one member) and with how many members; the branch plan's smallest row margin over steps 1..N, the
+    #: bumper gap to the branch's lead minus ``FAILSAFE_BRANCH_MARGIN_M`` [m], and the terminal row's margin
+    #: [m] (NaN when the branch is absent or after a fallback); the largest emergency slack on the branch's
+    #: rows [m] (NaN after a fallback); and the branch's plan, the states (s, v, a) per step and the inputs
+    #: (jerks with ``jinput``).  The defaults without the token.
+    failsafe_present: bool = False
+    failsafe_members: int = 0
+    failsafe_margin_min: float = float("nan")
+    failsafe_terminal_margin: float = float("nan")
+    failsafe_slack_max: float = float("nan")
+    failsafe_x_nominal: Optional[np.ndarray] = None
+    failsafe_u_nominal: Optional[np.ndarray] = None
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -938,6 +1016,13 @@ class CachedFeedbackScalarChanceQP:
     floor_cell_param: Any = None
     floor_mask_param: Any = None
     floor_sigma_param: Any = None
+    #: safebranch: the fail-safe branch's inputs (step 0 shared), the slack of its rows at steps 1..N (index
+    #: k - 1) and of its terminal row, its lead (centre position) per step and its stop point; None without it
+    fs_u_var: Any = None
+    fs_slack_var: Any = None
+    fs_stop_slack_var: Any = None
+    fs_lead_param: Any = None
+    fs_stop_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -1138,6 +1223,10 @@ class NairACCSMPC:
         self._open_loop_fixed_qp_cache = {}
         self._feedback_scalar_chance_qp_cache = {}
         self._standoff_shortfall = None  # dopt<w>: the cached QP's solved shortfall
+        # safebranch: the branch given to this solve, and the cached QP's solved branch
+        # (inputs, row slacks, terminal slack, lead per step, stop point; the last two relative to the ego)
+        self._failsafe_branch = None
+        self._failsafe_plan = None
         # dopt<w>lkr: vehicles seen with a live cut-in hypothesis, and those of
         # them now followed as the in-lane lead -> ticks the gap has been full.
         self._armed_cutin_vehicles = set()
@@ -1165,10 +1254,15 @@ class NairACCSMPC:
             warm_start=None,
             previous_accel_cmd=None,
             command_dt=None,
-            ego_accel=None):
+            ego_accel=None,
+            failsafe_branch=None):
         solve_start = time.perf_counter()
         timing_breakdown = {}
         self._set_command_context(previous_accel_cmd, command_dt, ego_accel, ego_speed=ego_state[1])
+        # safebranch: the layer's checked members this tick (FailsafeBranch); None, or empty, is an absent branch
+        if failsafe_branch is not None and not self.config.failsafe_branch:
+            raise ValueError("solve(failsafe_branch=) needs failsafe_branch (safebranch) in the config")
+        self._failsafe_branch = failsafe_branch
 
         phase_start = time.perf_counter()
         prediction = self._trim_prediction(lead_prediction)
@@ -1517,6 +1611,11 @@ class NairACCSMPC:
             raise ValueError(
                 "floor_risk (floorrisk<eps>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.failsafe_branch and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "failsafe_branch (safebranch) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1525,6 +1624,7 @@ class NairACCSMPC:
         timing_breakdown["policy_layout_s"] = time.perf_counter() - phase_start
         solve_path = "fallback"
         self._standoff_shortfall = None
+        self._failsafe_plan = None
 
         try:
             if self._can_use_cached_open_loop_fixed_qp(open_loop, prediction):
@@ -1694,6 +1794,7 @@ class NairACCSMPC:
             planned_v = self.reference_adapter.planned_speed(x0)
             tangent_error = (x_nominal[:, :, 1] - planned_v[None, :]) ** 2 / (2.0 * self.config.relative_brake_decel)
             speed_gap_tangent_error_max = float(np.max(tangent_error[prediction.active_mask]))
+        failsafe_fields = self._failsafe_solution_fields(x0)
         timing_breakdown["solution_postprocess_s"] = time.perf_counter() - phase_start
 
         j_nominal = None
@@ -1774,7 +1875,45 @@ class NairACCSMPC:
             n_floor_lowered=n_floor_lowered,
             n_floor_raised=n_floor_raised,
             floor_old_margin_min=floor_old_margin_min,
+            **failsafe_fields,
         )
+
+    def _failsafe_solution_fields(self, x0):
+        """``safebranch``: the branch's fields of the ``NairACCSolution`` from the cached QP's solved branch
+        (``_failsafe_plan``): its rollout with the controller's model, the margin of its rows at steps 1..N
+        and of its terminal row, and its largest slack.  Empty without the token; presence and member count
+        only after a fallback, which plans no branch."""
+        if not self.config.failsafe_branch:
+            return {}
+        branch = self._failsafe_branch
+        present = branch is not None and branch.present
+        fields = {"failsafe_present": bool(present),
+                  "failsafe_members": int(np.asarray(branch.gaps).size) if present else 0}
+        if self._failsafe_plan is None:
+            return fields
+        fs_u, fs_slack, fs_stop_slack, fs_lead, fs_stop = self._failsafe_plan
+        horizon, dt = self.config.horizon, self.config.dt
+        states = np.zeros((horizon + 1, 3))
+        states[0] = [float(x0[0]), float(x0[1]), self._ego_accel]
+        for step in range(horizon):
+            if self.config.jerk_input:
+                next_state, accel = acc_jerk_step(states[step, :2], states[step, 2], fs_u[step], dt)
+            else:
+                next_state, accel = acc_step(states[step, :2], fs_u[step], dt), fs_u[step]
+            states[step + 1] = [next_state[0], next_state[1], accel]
+        fields.update(
+            failsafe_x_nominal=states,
+            failsafe_u_nominal=np.asarray(fs_u, dtype=float).copy(),
+            failsafe_slack_max=float(max(np.max(fs_slack), fs_stop_slack)),
+        )
+        if present:
+            footprint = self.config.vehicle_length + FAILSAFE_BRANCH_MARGIN_M
+            margins = float(x0[0]) + fs_lead[1:] - states[1:, 0] - footprint
+            c_t, d_0 = failsafe_terminal_coefficients(self.config)
+            terminal = (float(x0[0]) + fs_stop - footprint - d_0
+                        - states[horizon, 0] - c_t * states[horizon, 1])
+            fields.update(failsafe_margin_min=float(np.min(margins)), failsafe_terminal_margin=float(terminal))
+        return fields
 
     def _clipped_jerk(self, jerk):
         """jinput: a jerk plan within ``[-jerk_limit, jerk_limit]`` (unbounded with ``jerk_limit`` None)."""
@@ -2227,6 +2366,7 @@ class NairACCSMPC:
             None if self.config.relative_brake_decel is None else float(self.config.relative_brake_decel),
             None if self.config.slack_l1_weight is None else float(self.config.slack_l1_weight),
             None if self.config.floor_risk is None else float(self.config.floor_risk),
+            bool(self.config.failsafe_branch),
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
 
@@ -2312,6 +2452,14 @@ class NairACCSMPC:
             opti.set_value(problem.floor_cell_param, floor_cells.astype(float))
             opti.set_value(problem.floor_mask_param, floored.astype(float))
             opti.set_value(problem.floor_sigma_param, np.where(floored, floor_sigma, 0.0))
+        fs_lead = fs_stop = None
+        if problem.fs_lead_param is not None:
+            # safebranch: the branch's lead per step and its stop point, in the ego's frame (10^6 m ahead without
+            # a checked member, where no row binds)
+            fs_lead, fs_stop = failsafe_branch_lead(self._failsafe_branch, self.config)
+            s_now = float(np.asarray(x0, dtype=float).reshape(-1)[0])
+            opti.set_value(problem.fs_lead_param, s_now + fs_lead)
+            opti.set_value(problem.fs_stop_param, s_now + fs_stop)
         k_slot_by_step = []
         if problem.optimize_k:
             for step in range(horizon):
@@ -2349,6 +2497,11 @@ class NairACCSMPC:
         opti.set_initial(problem.slack_var, np.zeros((num_modes, horizon + 1)))
         if problem.short_var is not None:
             opti.set_initial(problem.short_var, np.zeros((num_modes, horizon + 1)))
+        if problem.fs_u_var is not None:
+            # safebranch: the branch starts from scenario 0's warm start (its inputs are absolute values)
+            opti.set_initial(problem.fs_u_var, np.asarray(reference.prev_u[0], dtype=float) + h_initial[0])
+            opti.set_initial(problem.fs_slack_var, np.zeros(horizon))
+            opti.set_initial(problem.fs_stop_slack_var, 0.0)
         if problem.optimize_k:
             for slot in range(problem.k_group_capacity):
                 for step in range(horizon):
@@ -2397,6 +2550,11 @@ class NairACCSMPC:
         if problem.short_var is not None:
             shortfall = np.asarray(sol.value(problem.short_var), dtype=float).reshape((num_modes, horizon + 1))
             shortfall = np.where(shortfall_mask, shortfall, 0.0)
+        failsafe_plan = None
+        if problem.fs_u_var is not None:
+            fs_u = np.asarray(sol.value(problem.fs_u_var), dtype=float).reshape(horizon)
+            fs_slack = np.asarray(sol.value(problem.fs_slack_var), dtype=float).reshape(horizon)
+            failsafe_plan = (fs_u, fs_slack, float(sol.value(problem.fs_stop_slack_var)), fs_lead, fs_stop)
 
         opti.set_initial(problem.h_var, h_values)
         opti.set_initial(problem.slack_var, slack)
@@ -2447,6 +2605,7 @@ class NairACCSMPC:
             extract_solution_s,
         )
         self._standoff_shortfall = shortfall
+        self._failsafe_plan = failsafe_plan
         return NairACCPolicy(h=h, M=m, K=k), slack, cost, "optimal", message, layout, optimized_eta_data
 
     def _get_feedback_scalar_chance_qp(self, num_modes):
@@ -2764,6 +2923,83 @@ class NairACCSMPC:
                     + terminal_matrix[1, 1] * a * a)
             objective = objective + terminal
 
+        fs_u_var = fs_slack_var = fs_stop_slack_var = fs_lead_param = fs_stop_param = None
+        if self.config.failsafe_branch:
+            # safebranch (2026-11-03): the fail-safe as one more branch of the tree.  It shares the first
+            # input with every scenario (the equality below puts it in the step-0 group; it has no sharing
+            # parameter, so from step 1 it is a group of its own) and from step 1 obeys the safety layer's
+            # fail-safe limits in place of the comfort limits; its lead per step is the layer's checked
+            # members braking at the lead bound (fs_lead_param, failsafe_branch_lead), its rows the physical
+            # bumper gap to that lead at steps 1..N, at least FAILSAFE_BRANCH_MARGIN_M, hard with the
+            # emergency slack, plus the terminal row (failsafe_terminal_coefficients).  Its cost is scenario
+            # 0's weighted FAILSAFE_BRANCH_PROBABILITY (no dopt price), which regularises its free inputs
+            # without changing the other scenarios' weights.  Without a checked member the lead sits 10^6 m
+            # ahead and no row binds.
+            fs_decel, fs_jerk, _ = _failsafe_limits()
+            fs_u_var = opti.variable(horizon)
+            fs_slack_var = opti.variable(horizon)            # the row at step k = 1..N has the slack [k - 1]
+            fs_stop_slack_var = opti.variable()
+            fs_lead_param = opti.parameter(horizon + 1)
+            fs_stop_param = opti.parameter()
+            opti.subject_to(ca.vec(fs_slack_var) >= 0.0)
+            opti.subject_to(fs_stop_slack_var >= 0.0)
+            dt = self.config.dt
+            state_s, state_v, state_a = x0_param[0], x0_param[1], a0_param
+            states_s, states_v, inputs = [state_s], [state_v], []
+            for step in range(horizon):
+                control = fs_u_var[step]
+                if step == 0:
+                    opti.subject_to(control == first_input)   # the shared first input, within its comfort limits
+                elif jerk_input:
+                    opti.subject_to(control >= -fs_jerk)
+                    opti.subject_to(control <= fs_jerk)
+                else:
+                    opti.subject_to(control >= fs_decel)
+                    opti.subject_to(control <= self.config.a_max)
+                    opti.subject_to(control - inputs[step - 1] <= fs_jerk * dt)
+                    opti.subject_to(inputs[step - 1] - control <= fs_jerk * dt)
+                if jerk_input:
+                    state_s = state_s + dt * state_v + 0.5 * dt ** 2 * state_a + dt ** 3 / 6.0 * control
+                    state_v = state_v + dt * state_a + 0.5 * dt ** 2 * control
+                    state_a = state_a + dt * control
+                    inputs.append(state_a)
+                    opti.subject_to(state_a >= fs_decel)
+                    opti.subject_to(state_a <= self.config.a_max)
+                else:
+                    state_s = state_s + dt * state_v + 0.5 * dt ** 2 * control
+                    state_v = state_v + dt * control
+                    inputs.append(control)
+                states_s.append(state_s)
+                states_v.append(state_v)
+                opti.subject_to(state_v >= self.config.v_min)
+                opti.subject_to(state_v <= self.config.v_max)
+            footprint = self.config.vehicle_length + FAILSAFE_BRANCH_MARGIN_M
+            for step in range(1, horizon + 1):
+                opti.subject_to(fs_lead_param[step] - states_s[step] - footprint + fs_slack_var[step - 1] >= 0.0)
+            c_t, d_0 = failsafe_terminal_coefficients(self.config)
+            opti.subject_to(fs_stop_param - footprint - d_0 - states_s[horizon] - c_t * states_v[horizon]
+                            + fs_stop_slack_var >= 0.0)
+            if self.config.slack_l1_weight is not None:
+                objective += self.config.slack_l1_weight * (ca.sum1(ca.vec(fs_slack_var)) + fs_stop_slack_var)
+            else:
+                objective += self.config.slack_weight * (ca.sumsqr(fs_slack_var) + fs_stop_slack_var ** 2)
+            weight = sample_weight * FAILSAFE_BRANCH_PROBABILITY
+            previous_input = previous_accel_param
+            for step in range(horizon + 1):
+                s_error = states_s[step] - x_ref_s_param[0, step]
+                v_error = states_v[step] - x_ref_v_param[0, step]
+                objective += weight * (self.config.q_s * s_error ** 2 + self.config.q_v * v_error ** 2)
+                if step < horizon:
+                    input_error = inputs[step] - a_ref_param[0, step]
+                    if jerk_input:
+                        smooth = self.config.r_jerk * fs_u_var[step] ** 2
+                    else:
+                        move = inputs[step] - previous_input
+                        smooth = (self.config.r_move * move ** 2 if step == 0
+                                  else self.config.r_jerk * (move / dt) ** 2)
+                    objective += weight * (self.config.r_a * input_error ** 2 + smooth)
+                    previous_input = inputs[step]
+
         opti.minimize(objective)
         p_opts, s_opts = self._gurobi_options()
         opti.solver(self.config.solver_name, p_opts, s_opts)
@@ -2809,6 +3045,11 @@ class NairACCSMPC:
             floor_cell_param=floor_cell_param,
             floor_mask_param=floor_mask_param,
             floor_sigma_param=floor_sigma_param,
+            fs_u_var=fs_u_var,
+            fs_slack_var=fs_slack_var,
+            fs_stop_slack_var=fs_stop_slack_var,
+            fs_lead_param=fs_lead_param,
+            fs_stop_param=fs_stop_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
@@ -3711,6 +3952,64 @@ def floor_risk_cells(prediction, config):
         floor_sigma[mode, step] = (z[mode] * safety_std(prediction.covariances[mode, step], config)
                                    if np.isfinite(z[mode]) else -np.inf)
     return cells, floor_sigma
+
+
+def _failsafe_limits():
+    """``safebranch``: the safety layer's fail-safe deceleration and jerk and its lead bound
+    (``utils/safety_layer.py``: FAILSAFE_DECEL, FAILSAFE_JERK, LEAD_DECEL), which the branch adopts."""
+    try:
+        from utils.safety_layer import FAILSAFE_DECEL, FAILSAFE_JERK, LEAD_DECEL
+    except ImportError:
+        from scripts.carla.utils.safety_layer import FAILSAFE_DECEL, FAILSAFE_JERK, LEAD_DECEL
+    return float(FAILSAFE_DECEL), float(FAILSAFE_JERK), float(LEAD_DECEL)
+
+
+def failsafe_branch_lead(branch, config):
+    """``safebranch``: the branch's lead per MPC step and its stop point, relative to the ego's current
+    position, as ``(lead, stop)`` with ``lead`` of shape ``(horizon + 1,)`` [m].
+
+    Each checked member brakes from its measured state at the layer's lead bound ``a_p = LEAD_DECEL`` until
+    it stops: after ``t`` it has moved ``v_p t - |a_p| t^2 / 2`` while ``t <= v_p / |a_p|`` and
+    ``v_p^2 / (2 |a_p|)`` after.  Its centre position in the MPC's frame is ``s_ego + gap + L +`` that
+    displacement (``gap`` the measured bumper gap, ``pcacc.VehicleObs``), so that ``lead - s_k - L`` is the
+    physical bumper gap.  The branch's lead at a step is the nearest member's position there (in 1-D the
+    nearest stop point binds) and ``stop`` the nearest final position.  Without a member (``None`` or empty)
+    both sit ``INACTIVE_LEAD_OFFSET_M`` ahead, where no row binds."""
+    horizon = int(config.horizon)
+    if branch is None or not branch.present:
+        return np.full(horizon + 1, INACTIVE_LEAD_OFFSET_M), INACTIVE_LEAD_OFFSET_M
+    decel = abs(_failsafe_limits()[2])
+    t = float(config.dt) * np.arange(horizon + 1)
+    gaps = np.asarray(branch.gaps, dtype=float).reshape(-1)
+    speeds = np.maximum(np.asarray(branch.speeds, dtype=float).reshape(-1), 0.0)
+    moving = t[None, :] < (speeds / decel)[:, None]
+    displacement = np.where(
+        moving, speeds[:, None] * t[None, :] - 0.5 * decel * t[None, :] ** 2, (speeds ** 2 / (2.0 * decel))[:, None])
+    positions = gaps[:, None] + float(config.vehicle_length) + displacement
+    stop = gaps + float(config.vehicle_length) + speeds ** 2 / (2.0 * decel)
+    return positions.min(axis=0), float(np.min(stop))
+
+
+def failsafe_terminal_coefficients(config):
+    """``safebranch``: ``(c_T, D_0)`` of the branch's terminal row
+    ``s_N + c_T v_N + D_0 <= s_stop - L - FAILSAFE_BRANCH_MARGIN_M``, an upper bound on the distance the
+    fail-safe still needs to stop from the branch's end state ``(v_N, a_N)``, ``a_em <= a_N <= a_max``.
+
+    From ``(v, a)`` the fail-safe ramps the acceleration at ``-j_em`` to ``a_em`` (ramp time
+    ``t_r = (a - a_em) / j_em``, at most ``(a_max - a_em) / j_em``) and then holds ``a_em``.  The ramp covers
+    ``v t_r + t_r^2 (a + a_em / 2) / 3 <= v t_r`` (``a <= a_max < -a_em / 2``) and ends at the speed
+    ``v_r = v + t_r (a + a_em) / 2 <= v``; the hold then covers ``v_r^2 / (2 |a_em|) <= v v_max / (2 |a_em|)``.
+    Hence ``c_T = (a_max - a_em) / j_em + v_max / (2 |a_em|)`` (1.75 s at a_max 2, v_max 20).  If the ego stops
+    inside the ramp (``v_r < 0``, i.e. ``v < (a_em^2 - a^2) / (2 j_em)``, below 1.6 m/s), the distance is at most
+    ``v t_r`` plus the area under ``a t - j_em t^2 / 2`` up to its root, ``2 a^3 / (3 j_em^2)`` for ``a > 0``:
+    ``D_0 = 2 a_max^3 / (3 j_em^2)`` (1.3 cm at a_max 2, j_em 20) covers it; without it the bound ``c_T v`` is
+    below the true distance by up to ``D_0`` as ``v -> 0`` with ``a_N > 0``.  Checked against the layer's
+    ``ego_brake_distance`` on a grid of ``(v, a)`` in ``tests/test_safebranch.py``."""
+    a_em, j_em, _ = _failsafe_limits()
+    a_max, v_max = float(config.a_max), float(config.v_max)
+    c_t = (a_max - a_em) / j_em + v_max / (2.0 * abs(a_em))
+    d_0 = 2.0 * max(a_max, 0.0) ** 3 / (3.0 * j_em ** 2)
+    return float(c_t), float(d_0)
 
 
 def terminal_cost_matrix(config):

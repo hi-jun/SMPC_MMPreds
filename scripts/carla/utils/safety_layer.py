@@ -118,7 +118,7 @@ class SafetyLayer:
         self._engaged = None      # (time, acceleration) at which the running fail-safe started
 
     def step(self, t, v, a, a_nominal, vehicles: Sequence[VehicleObs], dt):
-        """Return the ``SafetyDecision`` for one command interval.
+        """Return the ``SafetyDecision`` for one command interval: ``classify`` then ``decide``.
 
         * ``v``: the ego's speed.
         * ``a``: the acceleration of the last interval (the previous command).
@@ -126,8 +126,17 @@ class SafetyLayer:
         * ``vehicles``: the measured preceding vehicles with their ego-lane membership
           (``pcacc.LaneMembershipTracker``) and physical bumper gaps.
         """
+        checked, cutins = self.classify(t, v, a, vehicles, dt)
+        return self.decide(t, v, a, a_nominal, checked, cutins, dt)
+
+    def classify(self, t, v, a, vehicles: Sequence[VehicleObs], dt):
+        """Update the membership history and the cut-in set (Def. II.3) for one command interval and return
+        ``(checked, cutins)``: the members the guarantee covers, and the cut-ins, both as ``VehicleObs`` lists
+        sorted by gap. Arguments as in ``step``. Call it once per interval: a second call advances the
+        membership history again (``safebranch`` classifies before the MPC solve and decides after it)."""
+        del t                                   # the classification does not depend on the time
         cfg = self.cfg
-        t, v, a, a_nominal, dt = float(t), max(0.0, float(v)), float(a), float(a_nominal), float(dt)
+        v, a, dt = max(0.0, float(v)), float(a), float(dt)
         seen = {veh.vid for veh in vehicles}
         for vid in list(self._was_member):
             if vid not in seen:
@@ -148,6 +157,14 @@ class SafetyLayer:
             elif veh.vid in self._cutin and veh.gap >= d_now:
                 self._cutin.discard(veh.vid)        # safe distance restored -> covered by the guarantee
             (cutins if veh.vid in self._cutin else checked).append(veh)
+        return checked, cutins
+
+    def decide(self, t, v, a, a_nominal, checked, cutins, dt):
+        """The ``SafetyDecision`` for one command interval from ``classify``'s members: check (7) on every
+        checked member, the fail-safe when one fails, full braking in an ICS against a cut-in. Arguments as
+        in ``step``."""
+        cfg = self.cfg
+        t, v, a, a_nominal, dt = float(t), max(0.0, float(v)), float(a), float(a_nominal), float(dt)
         accel, path, vid = a_nominal, PATH_NOMINAL, None
         margin, worst = math.inf, None
         for veh in checked:

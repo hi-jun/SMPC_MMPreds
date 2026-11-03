@@ -20,6 +20,7 @@ from utils import frenet_trajectory_handler as fth
 from utils.acc_nair_smpc import (
     BRAKE_DISTANCE_BOUND_HARD_BAND,
     BRAKE_DISTANCE_BOUND_REACHABLE_INTERVAL,
+    FailsafeBranch,
     MultimodalLeadPrediction,
     NairACCSMPC,
     PolicySharingTree,
@@ -234,6 +235,10 @@ class ACCNairSMPCAgent(object):
         if self.controller_config.floor_risk is not None and not self.full_footprint:
             # Its floor replaces the one fullfoot gives a cut-in chance cell, L + d0 + q(beta_j) sigma.
             raise ValueError("floorrisk<eps> needs fullfoot (with cutin_chance<beta_ref> and dopt<w>)")
+        self.controller_config.failsafe_branch = self._parse_failsafe_branch(smpc_config)
+        if self.controller_config.failsafe_branch and not self._parse_safety_layer(smpc_config):
+            # The branch is the layer's fail-safe against the layer's checked members.
+            raise ValueError("safebranch needs safelayer")
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -565,12 +570,22 @@ class ACCNairSMPCAgent(object):
             u0 = np.array([action, df_des])
         else:
             prediction_bundle = self._prediction_bundle(s_ego, speed)
+            safety_members = None
+            failsafe_branch = None
+            if self.safety_layer is not None and self.controller_config.failsafe_branch:
+                # safebranch: the layer observes and classifies before the solve, which takes its checked
+                # members as the fail-safe branch's lead; the same classification decides after the solve
+                # (the layer is never classified twice in a tick)
+                safety_members = self._classify_safety_layer(
+                    time_s, s_ego, ey, speed, previous_accel_cmd, command_dt)
+                failsafe_branch = FailsafeBranch.from_members(safety_members[0])
             start = time.time()
             solution = self.controller.solve(
                 np.array([s_ego, speed]),
                 prediction_bundle["prediction"],
                 previous_accel_cmd=self._mpc_previous_accel(previous_accel_cmd, speed),
                 command_dt=command_dt,
+                failsafe_branch=failsafe_branch,
             )
             solve_time = time.time() - start
             if self.entry_pass and time_s is not None:
@@ -582,7 +597,8 @@ class ACCNairSMPCAgent(object):
             action = self._limit_accel_command(raw_action, previous_accel_cmd, command_dt)
             safety = None
             if self.safety_layer is not None:
-                safety = self._apply_safety_layer(time_s, s_ego, ey, speed, previous_accel_cmd, action, command_dt)
+                safety = self._apply_safety_layer(time_s, s_ego, ey, speed, previous_accel_cmd, action, command_dt,
+                                                  members=safety_members)
                 action = safety.accel
             df_des = self._lane_keeping_steer(ey, epsi)
             v_des = np.clip(speed + action * self.DT,
@@ -672,6 +688,15 @@ class ACCNairSMPCAgent(object):
                     "nominal_accel": self._safety_nominal_accel,
                     "checked_vids": safety.checked_vids,
                     "cutin_vids": safety.cutin_vids,
+                }
+            if self.controller_config.failsafe_branch:
+                # safebranch: the fail-safe branch of this solve (NairACCSolution.failsafe_*)
+                self.policy_log[-1]["failsafe_branch"] = {
+                    "present": bool(solution.failsafe_present),
+                    "members": int(solution.failsafe_members),
+                    "margin_min": float(solution.failsafe_margin_min),
+                    "terminal_margin": float(solution.failsafe_terminal_margin),
+                    "slack_max": float(solution.failsafe_slack_max),
                 }
             self._log_wandb(self.policy_log[-1], solution, prediction_bundle)
 
@@ -1694,6 +1719,15 @@ class ACCNairSMPCAgent(object):
         return re.search(r"(?:^|_)safelayer(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
+    def _parse_failsafe_branch(smpc_config):
+        """Read ``safebranch`` from the config string (default: off).
+
+        The safety layer's fail-safe as a branch of the scenario tree (``NairACCConfig.failsafe_branch``),
+        2026-11-03. Needs ``safelayer``. Whole-token match.
+        """
+        return re.search(r"(?:^|_)safebranch(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
     def _parse_lead_merge(smpc_config):
         """Read ``leadmerge`` from the config string (default: off).
 
@@ -2035,12 +2069,11 @@ class ACCNairSMPCAgent(object):
             self.controller_config.a_max,
         ))
 
-    def _apply_safety_layer(self, time_s, s_ego, ey, speed, previous_accel_cmd, action, command_dt):
-        """``safelayer`` (2026-11-02): PC-ACC's safety layer (``utils/safety_layer.py``) around the limited MPC
-        command, on PC-ACC's perception (``policies/pcacc_agent.observe_preceding_vehicles``):
-        waypoint lanes, the paper's lateral cut-in rule and leave lag, and physical bumper gaps.
-        An adjacent vehicle counts only while its body overlaps the ego's laterally. Returns the layer's
-        ``SafetyDecision``."""
+    def _observe_safety_layer(self, time_s, s_ego, ey, command_dt):
+        """``safelayer``: PC-ACC's perception this tick (``policies/pcacc_agent.observe_preceding_vehicles``):
+        waypoint lanes, the paper's lateral cut-in rule and leave lag, and physical bumper gaps. An adjacent
+        vehicle counts only while its body overlaps the ego's laterally. Advances the layer's clock; once per
+        tick."""
         from policies.pcacc_agent import observe_preceding_vehicles
         # the membership rule's clocks need a time even when the snapshot has none (PC-ACC's agent does the same)
         self._safety_clock = float(time_s) if time_s is not None else self._safety_clock + float(command_dt)
@@ -2050,9 +2083,28 @@ class ACCNairSMPCAgent(object):
             self.world, self.vehicle, self._frenet_traj, self._safety_tracker, self.safety_layer.cfg,
             self._safety_clock, s_ego, ego_waypoint,
             ego_path=(float(ey), float(self.vehicle.bounding_box.extent.y)))
+        return vehicles
+
+    def _classify_safety_layer(self, time_s, s_ego, ey, speed, previous_accel_cmd, command_dt):
+        """``safebranch``: observe and classify (``SafetyLayer.classify``) before the MPC solve. Returns
+        ``(checked, cutins)``, to be given to ``_apply_safety_layer`` after the solve."""
+        vehicles = self._observe_safety_layer(time_s, s_ego, ey, command_dt)
+        return self.safety_layer.classify(self._safety_clock, speed, previous_accel_cmd, vehicles, command_dt)
+
+    def _apply_safety_layer(self, time_s, s_ego, ey, speed, previous_accel_cmd, action, command_dt, members=None):
+        """``safelayer`` (2026-11-02): PC-ACC's safety layer (``utils/safety_layer.py``) around the limited MPC
+        command, on PC-ACC's perception (``_observe_safety_layer``). Returns the layer's ``SafetyDecision``.
+        With ``members``, this tick's ``(checked, cutins)`` from ``_classify_safety_layer`` (``safebranch``),
+        the layer only decides; otherwise it observes, classifies and decides (``SafetyLayer.step``)."""
         self._safety_nominal_accel = float(action)
-        decision = self.safety_layer.step(
-            self._safety_clock, speed, previous_accel_cmd, action, vehicles, command_dt)
+        if members is None:
+            vehicles = self._observe_safety_layer(time_s, s_ego, ey, command_dt)
+            decision = self.safety_layer.step(
+                self._safety_clock, speed, previous_accel_cmd, action, vehicles, command_dt)
+        else:
+            checked, cutins = members
+            decision = self.safety_layer.decide(
+                self._safety_clock, speed, previous_accel_cmd, action, checked, cutins, command_dt)
         if decision.path != "nominal":
             self._safety_recover = True
         return decision
