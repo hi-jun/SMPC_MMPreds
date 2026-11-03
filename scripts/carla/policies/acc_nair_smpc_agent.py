@@ -245,6 +245,10 @@ class ACCNairSMPCAgent(object):
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
+        self.controller_config.standoff_shortfall_lk_release_sigma = self._parse_lk_release_sigma(smpc_config)
+        if self.controller_config.standoff_shortfall_lk_release_sigma and not self.lk_sigma:
+            # without lksigma the lane-keeping cells have no sigma term, so the token would change nothing
+            raise ValueError("lkrsigma needs lksigma")
         self.controller_config.standoff_shortfall_cell_price = self.standoff_shortfall_cell_price
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
@@ -1817,6 +1821,12 @@ class ACCNairSMPCAgent(object):
         ``NairACCConfig.standoff_shortfall_lk_cutin_only``.
         """
         return re.search(r"dopt[0-9]*\.?[0-9]+lkr", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_lk_release_sigma(smpc_config):
+        """Read ``lkrsigma`` (default: off): with ``dopt<w>lkr`` and ``lksigma``, the release test also asks for
+        the step-0 sigma term. See ``NairACCConfig.standoff_shortfall_lk_release_sigma``. Whole-token match."""
+        return re.search(r"(?:^|_)lkrsigma(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_standoff_shortfall_cell_price(smpc_config):

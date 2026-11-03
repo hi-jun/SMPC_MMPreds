@@ -192,6 +192,11 @@ class NairACCConfig:
     #: shortened standoff and nothing pushes the gap back out.  Needs
     #: ``MultimodalLeadPrediction.lead_vehicle_ids``.
     standoff_shortfall_lk_cutin_only: bool = False
+    #: ``lkrsigma`` (2026-11-03): with ``standoff_shortfall_lk_cutin_only``, the
+    #: release test also asks for the step-0 cell's sigma term ``q(beta) sigma``
+    #: (``lksigma``'s), so it tests the gap the released cell's hard row requires;
+    #: without it a release could leave that row short by ``q(0.6) * 0.164`` m or more.
+    standoff_shortfall_lk_release_sigma: bool = False
     #: ``pricep2``: with ``standoff_shortfall_weight``, price a cell's shortfall
     #: ``w * P_j * p_cell * short^2``, ``p_cell`` the probability of the cell's
     #: lead mode for its own vehicle (``MultimodalLeadPrediction.lead_mode_probability``),
@@ -353,6 +358,8 @@ class NairACCConfig:
             raise ValueError("standoff_shortfall_on_lk (dopt<w>lk) needs standoff_shortfall_weight")
         if self.standoff_shortfall_lk_cutin_only and not self.standoff_shortfall_on_lk:
             raise ValueError("standoff_shortfall_lk_cutin_only (dopt<w>lkr) needs standoff_shortfall_on_lk")
+        if self.standoff_shortfall_lk_release_sigma and not self.standoff_shortfall_lk_cutin_only:
+            raise ValueError("standoff_shortfall_lk_release_sigma (lkrsigma) needs standoff_shortfall_lk_cutin_only")
         if self.standoff_shortfall_cell_price and self.standoff_shortfall_weight is None:
             raise ValueError("standoff_shortfall_cell_price (pricep2) needs standoff_shortfall_weight")
         if self.accel_lag_tau is not None:
@@ -1542,9 +1549,18 @@ class NairACCSMPC:
         active_ids = set(int(v) for v in np.unique(ids[active]))
         self._armed_cutin_vehicles |= set(int(v) for v in np.unique(ids[cutin_cells]))
         self._armed_cutin_vehicles &= active_ids
-        # the in-lane leads at step 0 and the (centre-to-centre) position and speed of each
-        leads_now = {int(ids[j, 0]): (float(prediction.means[j, 0, 0]), float(prediction.means[j, 0, 1]))
-                     for j in range(prediction.num_modes) if active[j, 0] and lk[j, 0]}
+        # the in-lane leads at step 0 and the (centre-to-centre) position and speed of each, and with lkrsigma
+        # the cell's sigma term at step 0 (0 without a finite confidence)
+        leads_now = {}
+        for j in range(prediction.num_modes):
+            if not (active[j, 0] and lk[j, 0]):
+                continue
+            sigma_term = 0.0
+            if self.config.standoff_shortfall_lk_release_sigma:
+                beta = cell_sigma_confidence(prediction, j, 0)
+                if np.isfinite(beta):
+                    sigma_term = confidence_quantile(beta) * safety_std(prediction.covariances[j, 0], self.config)
+            leads_now[int(ids[j, 0])] = (float(prediction.means[j, 0, 0]), float(prediction.means[j, 0, 1]), sigma_term)
         for vid in leads_now:
             if vid in self._armed_cutin_vehicles:
                 self._priced_cutin_vehicles.setdefault(vid, 0)
@@ -1554,8 +1570,8 @@ class NairACCSMPC:
                 released = True
             elif vid in leads_now:
                 # the full standoff: d_safe, or with relbrake<b> the relative-speed gap to this lead
-                lead_s, lead_v = leads_now[vid]
-                full = required_standoff(ego_state, self.config, lead_speed=lead_v)
+                lead_s, lead_v, sigma_term = leads_now[vid]
+                full = required_standoff(ego_state, self.config, lead_speed=lead_v) + sigma_term
                 recovered = lead_s - float(ego_state[0]) >= full
                 self._priced_cutin_vehicles[vid] = self._priced_cutin_vehicles[vid] + 1 if recovered else 0
                 released = self._priced_cutin_vehicles[vid] >= hold_ticks
