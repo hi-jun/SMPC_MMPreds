@@ -17,6 +17,7 @@ from utils.acc_nair_smpc import (  # noqa: E402
     VARIANT_FIXED_RISK,
     VARIANT_MULTIMODAL_OL,
     failsafe_branch_lead,
+    failsafe_recovery_floor,
     failsafe_terminal_coefficients,
     original_nair_acc_config,
 )
@@ -51,6 +52,7 @@ def design_config(branch=True, **overrides):
     config.jerk_input = True
     config.slack_l1_weight = 1.0e6
     config.failsafe_branch = branch
+    config.failsafe_recovery = True          # safelayer's exit from the fail-safe (item 7), as the agent sets it
     for name, value in overrides.items():
         setattr(config, name, value)
     config.__post_init__()
@@ -273,24 +275,20 @@ class ControllerTests(unittest.TestCase):
     def _closed_loop(self, with_branch, gap0, lead_decel, lead_v_min, ticks=90):
         """Ego at 20 m/s behind a lead at 20 m/s, ``gap0`` ahead, that brakes at ``lead_decel`` down to
         ``lead_v_min``.  The MPC's hypotheses never cover it (far leads); only the layer sees it, through the
-        replay's protocol (the previous command clipped to the MPC's bounds after the layer acted).  Returns
-        per-tick rows (tick, bumper gap, command, path, branch slack or NaN)."""
+        replay's protocol (after the layer's fail-safe the MPC starts from the issued command, raised at low
+        speed to the recovery floor).  Returns per-tick rows (tick, bumper gap, command, path, branch slack
+        or NaN)."""
         config = design_config(branch=with_branch)
         controller = NairACCSMPC(config)
         layer = SafetyLayer(config.a_max)
         s_e, v_e, s_l, v_l, prev = 0.0, 20.0, gap0, 20.0, 0.0
-        recover = False
         rows = []
         for k in range(ticks):
             t = k * TICK
             obs = [VehicleObs(1, s_l - s_e, v_l, True)]
             mpc_prev = prev
-            if recover:
-                a_floor = max(config.a_min, -float(np.sqrt(2.0 * config.jerk_limit * max(v_e, 0.0))))
-                if a_floor <= prev <= config.a_max:
-                    recover = False
-                else:
-                    mpc_prev = min(config.a_max, max(a_floor, prev))
+            if prev < config.a_min:
+                mpc_prev = max(prev, failsafe_recovery_floor(v_e, config, TICK))
             if with_branch:
                 checked, cutins = layer.classify(t, v_e, prev, obs, TICK)
                 solution = controller.solve(np.array([s_e, v_e]), far_prediction(s_e), previous_accel_cmd=mpc_prev,
@@ -304,8 +302,6 @@ class ControllerTests(unittest.TestCase):
                 decision = layer.step(t, v_e, prev, solution.action, obs, TICK)
                 slack = float("nan")
             self.assertNotEqual(solution.solve_path, "fallback", "tick %d" % k)
-            if decision.path != PATH_NOMINAL:
-                recover = True
             rows.append((k, s_l - s_e, decision.accel, decision.path, slack))
             s_e, v_e = plant(s_e, v_e, decision.accel, TICK)
             s_l, v_l = plant(s_l, v_l, lead_decel if v_l > lead_v_min else 0.0, TICK)

@@ -21,6 +21,8 @@ from utils.acc_nair_smpc import (
     BRAKE_DISTANCE_BOUND_HARD_BAND,
     BRAKE_DISTANCE_BOUND_REACHABLE_INTERVAL,
     FailsafeBranch,
+    failsafe_recovery_command,
+    failsafe_recovery_floor,
     MultimodalLeadPrediction,
     NairACCSMPC,
     PolicySharingTree,
@@ -245,6 +247,8 @@ class ACCNairSMPCAgent(object):
         if self.controller_config.failsafe_branch and not self._parse_safety_layer(smpc_config):
             # The branch is the layer's fail-safe against the layer's checked members.
             raise ValueError("safebranch needs safelayer")
+        # safelayer: the MPC starts from the fail-safe's acceleration and plans the recovery (item 7, 2026-11-04)
+        self.controller_config.failsafe_recovery = self._parse_safety_layer(smpc_config)
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -263,7 +267,6 @@ class ACCNairSMPCAgent(object):
             self.safety_layer = SafetyLayer(self.controller_config.a_max)
             self._safety_tracker = LaneMembershipTracker(self.safety_layer.cfg)
             self._safety_clock = 0.0
-            self._safety_recover = False       # the layer acted and the MPC's start state is not yet feasible again
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
             SyntheticCutInConfig(
                 horizon=N,
@@ -589,11 +592,15 @@ class ACCNairSMPCAgent(object):
                 safety_members = self._classify_safety_layer(
                     time_s, s_ego, ey, speed, previous_accel_cmd, command_dt)
                 failsafe_branch = FailsafeBranch.from_members(safety_members[0])
+            # safelayer: after a fail-safe the MPC starts from the issued command, raised at low speed to the
+            # floor from which the recovery keeps v >= 0 (_mpc_previous_accel); the limiter below keeps its
+            # window around the issued command (its recovery window admits the MPC's ramp)
+            mpc_previous_accel = self._mpc_previous_accel(previous_accel_cmd, speed, command_dt)
             start = time.time()
             solution = self.controller.solve(
                 np.array([s_ego, speed]),
                 prediction_bundle["prediction"],
-                previous_accel_cmd=self._mpc_previous_accel(previous_accel_cmd, speed),
+                previous_accel_cmd=mpc_previous_accel,
                 command_dt=command_dt,
                 failsafe_branch=failsafe_branch,
             )
@@ -2088,12 +2095,16 @@ class ACCNairSMPCAgent(object):
         return dt
 
     def _limit_accel_command(self, action, previous_accel_cmd, command_dt):
-        action = float(np.clip(
-            action,
-            self.controller_config.a_min,
-            self.controller_config.a_max,
-        ))
-        jerk_limit = self.controller_config.jerk_limit
+        """Clip to the limits, then the command jerk limit around the previous command.
+
+        ``safelayer`` (``failsafe_recovery``): while the previous command lies below ``a_min`` (the layer's
+        fail-safe) the window is the fail-safe's jerk around it, within its deceleration and ``a_max``, so the
+        MPC's recovery ramp passes as planned instead of being clipped to ``a_min`` at once."""
+        cfg = self.controller_config
+        jerk_limit = cfg.jerk_limit
+        if cfg.failsafe_recovery and float(previous_accel_cmd) < cfg.a_min and jerk_limit is not None:
+            return failsafe_recovery_command(action, previous_accel_cmd, cfg, command_dt)
+        action = float(np.clip(action, cfg.a_min, cfg.a_max))
         if jerk_limit is None:
             return action
         max_delta = float(jerk_limit) * max(float(command_dt), 1.0e-6)
@@ -2102,11 +2113,7 @@ class ACCNairSMPCAgent(object):
             float(previous_accel_cmd) - max_delta,
             float(previous_accel_cmd) + max_delta,
         )
-        return float(np.clip(
-            limited,
-            self.controller_config.a_min,
-            self.controller_config.a_max,
-        ))
+        return float(np.clip(limited, cfg.a_min, cfg.a_max))
 
     def _observe_safety_layer(self, time_s, s_ego, ey, command_dt):
         """``safelayer``: PC-ACC's perception this tick (``policies/pcacc_agent.observe_preceding_vehicles``):
@@ -2144,24 +2151,19 @@ class ACCNairSMPCAgent(object):
             checked, cutins = members
             decision = self.safety_layer.decide(
                 self._safety_clock, speed, previous_accel_cmd, action, checked, cutins, command_dt)
-        if decision.path != "nominal":
-            self._safety_recover = True
         return decision
 
-    def _mpc_previous_accel(self, previous_accel_cmd, speed):
-        """``safelayer``: the previous command the MPC starts from.
+    def _mpc_previous_accel(self, previous_accel_cmd, speed, command_dt):
+        """``safelayer``: the previous command the MPC starts from (item 7, 2026-11-04).
 
-        After the layer acted, that command can lie outside the MPC's feasible set. It is then clipped to the bounds,
-        and to no lower than -sqrt(2 j v), from which the jerk bound still keeps v >= 0, until it is back inside.
-        Otherwise it is unchanged."""
-        if self.safety_layer is None or not self._safety_recover:
-            return previous_accel_cmd
+        After the layer's fail-safe that command lies below ``a_min``. The MPC takes it as it is and plans the
+        recovery (``NairACCConfig.failsafe_recovery``); at low speed it is raised to
+        ``failsafe_recovery_floor``, below which the recovery cannot keep v >= 0 (the limiter then holds the
+        command on the ramp). Otherwise it is unchanged."""
         cfg = self.controller_config
-        a_floor = max(cfg.a_min, -float(np.sqrt(2.0 * cfg.jerk_limit * max(float(speed), 0.0))))
-        if a_floor <= float(previous_accel_cmd) <= cfg.a_max:
-            self._safety_recover = False
+        if not cfg.failsafe_recovery or float(previous_accel_cmd) >= cfg.a_min:
             return previous_accel_cmd
-        return float(np.clip(previous_accel_cmd, a_floor, cfg.a_max))
+        return float(max(previous_accel_cmd, failsafe_recovery_floor(speed, cfg, command_dt)))
 
     def _command_jerk(self, action, command_dt):
         if self._prev_accel_cmd_time_s is None:
