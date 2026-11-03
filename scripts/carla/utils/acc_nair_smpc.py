@@ -313,6 +313,20 @@ class NairACCConfig:
     #: off (bit-identical while the start acceleration is inside the bounds).
     #: Cached feedback QP only.
     failsafe_recovery: bool = False
+    #: ``entrant<b>`` with ``safebranch`` (2026-11-04, final-check item 12): the
+    #: safety layer's close entrants (vehicles that joined the ego's path inside
+    #: its safe distance, the code's cut-in set) lead the fail-safe branch too,
+    #: braking at this bound a_c < 0 (``FailsafeBranch.from_members(entrants=)``,
+    #: ``failsafe_branch_lead``), and the branch gets two terminal rows,
+    #: ``v_N <= min_E v_E(N)`` (the entrants' lower-bound speed at the horizon
+    #: end) and ``a_N <= a_c`` (``failsafe_entrant_terminal``), under which the
+    #: ego is never faster than an entrant after the horizon, so the branch's
+    #: rows at steps 1..N cover the entrant for all time; hard with the same
+    #: emergency slack.  The rows exist only in the cached QP used while the
+    #: branch carries an entrant (``_entrant_rows``); the other ticks solve
+    #: the problem without them, bit for bit.  ``None`` is off (the branch's
+    #: lead is the checked members only).
+    failsafe_entrant_decel: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -430,6 +444,11 @@ class NairACCConfig:
                 raise ValueError("failsafe_branch (safebranch) is not implemented with optimize_k (with_k)")
         if self.failsafe_recovery and self.controller_variant == VARIANT_MULTIMODAL_OL:
             raise ValueError("failsafe_recovery (safelayer) is implemented only in the cached feedback QP")
+        if self.failsafe_entrant_decel is not None:
+            if not self.failsafe_branch:
+                raise ValueError("failsafe_entrant_decel (entrant<b>) needs failsafe_branch (safebranch)")
+            if not float(self.failsafe_entrant_decel) < 0.0:
+                raise ValueError("failsafe_entrant_decel (entrant<b>) must be negative")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -852,18 +871,28 @@ class FailsafeBranch:
 
     ``gaps`` are their measured bumper gaps [m] and ``speeds`` their measured speeds [m/s]
     (``pcacc.VehicleObs``); empty when the layer checks nobody, in which case the branch is absent.
+    ``decels`` is each member's braking bound [m/s^2] (``LEAD_DECEL`` for the checked members; with
+    ``entrant<b>`` the layer's close entrants follow, at a_c), ``n_entrants`` how many of the last are entrants.
     """
 
     gaps: np.ndarray
     speeds: np.ndarray
+    decels: Optional[np.ndarray] = None
+    n_entrants: int = 0
 
     @classmethod
-    def from_members(cls, vehicles):
-        """From the layer's checked ``VehicleObs`` (anything with ``gap`` and ``speed``)."""
+    def from_members(cls, vehicles, entrants=(), entrant_decel=None):
+        """From the layer's checked ``VehicleObs`` (anything with ``gap`` and ``speed``) and, with
+        ``entrant_decel`` (``entrant<b>``), its close entrants braking at that bound."""
         vehicles = list(vehicles)
+        entrants = list(entrants) if entrant_decel is not None else []
+        lead_decel = _failsafe_limits()[2]
         return cls(
-            gaps=np.array([float(veh.gap) for veh in vehicles], dtype=float),
-            speeds=np.array([float(veh.speed) for veh in vehicles], dtype=float),
+            gaps=np.array([float(veh.gap) for veh in vehicles + entrants], dtype=float),
+            speeds=np.array([float(veh.speed) for veh in vehicles + entrants], dtype=float),
+            decels=np.array([lead_decel] * len(vehicles) + ([float(entrant_decel)] * len(entrants) if entrants else []),
+                            dtype=float),
+            n_entrants=len(entrants),
         )
 
     @property
@@ -945,6 +974,10 @@ class NairACCSolution:
     failsafe_slack_max: float = float("nan")
     failsafe_x_nominal: Optional[np.ndarray] = None
     failsafe_u_nominal: Optional[np.ndarray] = None
+    #: ``entrant<b>`` only: the close entrants in the branch and the smaller margin of its two entrant terminal
+    #: rows, ``min(v_term - v_N, a_c - a_N)`` (NaN without an entrant or after a fallback)
+    failsafe_entrants: int = 0
+    failsafe_entrant_margin: float = float("nan")
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -1051,6 +1084,11 @@ class CachedFeedbackScalarChanceQP:
     fs_stop_slack_var: Any = None
     fs_lead_param: Any = None
     fs_stop_param: Any = None
+    #: entrant<b>: the entrant terminal rows' right-hand sides and their slacks; None without it
+    fs_term_v_param: Any = None
+    fs_term_a_param: Any = None
+    fs_term_v_slack_var: Any = None
+    fs_term_a_slack_var: Any = None
     #: failsafe_recovery (safelayer): per step the lower bound on the planned acceleration (jinput: a_{k+1}; else
     #: the input u_k), the upper jerk bound (jinput: on j_k; else on the row into u_k) and, with jinput, the lower
     #: bound on j_0; the nominal bounds outside a recovery.  None without the flag
@@ -1958,10 +1996,11 @@ class NairACCSMPC:
         branch = self._failsafe_branch
         present = branch is not None and branch.present
         fields = {"failsafe_present": bool(present),
-                  "failsafe_members": int(np.asarray(branch.gaps).size) if present else 0}
+                  "failsafe_members": int(np.asarray(branch.gaps).size) if present else 0,
+                  "failsafe_entrants": int(getattr(branch, "n_entrants", 0)) if present else 0}
         if self._failsafe_plan is None:
             return fields
-        fs_u, fs_slack, fs_stop_slack, fs_lead, fs_stop = self._failsafe_plan
+        fs_u, fs_slack, fs_stop_slack, fs_lead, fs_stop, fs_term_slack, fs_term = self._failsafe_plan
         horizon, dt = self.config.horizon, self.config.dt
         states = np.zeros((horizon + 1, 3))
         states[0] = [float(x0[0]), float(x0[1]), self._ego_accel]
@@ -1974,8 +2013,12 @@ class NairACCSMPC:
         fields.update(
             failsafe_x_nominal=states,
             failsafe_u_nominal=np.asarray(fs_u, dtype=float).copy(),
-            failsafe_slack_max=float(max(np.max(fs_slack), fs_stop_slack)),
+            failsafe_slack_max=float(max(np.max(fs_slack), fs_stop_slack, fs_term_slack)),
         )
+        if fs_term is not None and fields["failsafe_entrants"] > 0:
+            # entrant<b>: the smaller margin of the two entrant terminal rows
+            fields["failsafe_entrant_margin"] = float(min(fs_term[0] - states[horizon, 1],
+                                                          fs_term[1] - states[horizon, 2]))
         if present:
             footprint = self.config.vehicle_length + FAILSAFE_BRANCH_MARGIN_M
             margins = float(x0[0]) + fs_lead[1:] - states[1:, 0] - footprint
@@ -2446,8 +2489,18 @@ class NairACCSMPC:
             None if self.config.floor_risk is None else float(self.config.floor_risk),
             bool(self.config.failsafe_branch),
             bool(self.config.failsafe_recovery),
+            self._entrant_rows(),
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
+
+    def _entrant_rows(self):
+        """``entrant<b>``: whether this solve's branch carries a close entrant, in which case the cached QP with
+        the entrant terminal rows is used; without one the problem is the one without the rows, so that those
+        ticks solve the same QP bit for bit (two inactive rows with slacks move Gurobi's solution by up to
+        1e-3 m/s^2).  A separate cache entry per case."""
+        branch = self._failsafe_branch
+        return bool(self.config.failsafe_entrant_decel is not None and branch is not None and branch.present
+                    and int(getattr(branch, "n_entrants", 0)) > 0)
 
     def _solve_feedback_scalar_chance_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
         phase_start = time.perf_counter()
@@ -2552,6 +2605,11 @@ class NairACCSMPC:
             s_now = float(np.asarray(x0, dtype=float).reshape(-1)[0])
             opti.set_value(problem.fs_lead_param, s_now + fs_lead)
             opti.set_value(problem.fs_stop_param, s_now + fs_stop)
+            if problem.fs_term_v_param is not None:
+                # entrant<b>: the entrant terminal rows' right-hand sides
+                fs_term = failsafe_entrant_terminal(self._failsafe_branch, self.config)
+                opti.set_value(problem.fs_term_v_param, fs_term[0])
+                opti.set_value(problem.fs_term_a_param, fs_term[1])
         k_slot_by_step = []
         if problem.optimize_k:
             for step in range(horizon):
@@ -2594,6 +2652,9 @@ class NairACCSMPC:
             opti.set_initial(problem.fs_u_var, np.asarray(reference.prev_u[0], dtype=float) + h_initial[0])
             opti.set_initial(problem.fs_slack_var, np.zeros(horizon))
             opti.set_initial(problem.fs_stop_slack_var, 0.0)
+            if problem.fs_term_v_slack_var is not None:
+                opti.set_initial(problem.fs_term_v_slack_var, 0.0)
+                opti.set_initial(problem.fs_term_a_slack_var, 0.0)
         if problem.optimize_k:
             for slot in range(problem.k_group_capacity):
                 for step in range(horizon):
@@ -2646,7 +2707,14 @@ class NairACCSMPC:
         if problem.fs_u_var is not None:
             fs_u = np.asarray(sol.value(problem.fs_u_var), dtype=float).reshape(horizon)
             fs_slack = np.asarray(sol.value(problem.fs_slack_var), dtype=float).reshape(horizon)
-            failsafe_plan = (fs_u, fs_slack, float(sol.value(problem.fs_stop_slack_var)), fs_lead, fs_stop)
+            fs_term_slack, fs_term = 0.0, None
+            if problem.fs_term_v_param is not None:
+                # entrant<b>: the entrant terminal rows' slack and right-hand sides
+                fs_term_slack = max(float(sol.value(problem.fs_term_v_slack_var)),
+                                    float(sol.value(problem.fs_term_a_slack_var)))
+                fs_term = failsafe_entrant_terminal(self._failsafe_branch, self.config)
+            failsafe_plan = (fs_u, fs_slack, float(sol.value(problem.fs_stop_slack_var)), fs_lead, fs_stop,
+                             fs_term_slack, fs_term)
 
         opti.set_initial(problem.h_var, h_values)
         opti.set_initial(problem.slack_var, slack)
@@ -3027,6 +3095,7 @@ class NairACCSMPC:
             objective = objective + terminal
 
         fs_u_var = fs_slack_var = fs_stop_slack_var = fs_lead_param = fs_stop_param = None
+        fs_term_v_param = fs_term_a_param = fs_term_v_slack_var = fs_term_a_slack_var = None
         if self.config.failsafe_branch:
             # safebranch (2026-11-03): the fail-safe as one more branch of the tree.  It shares the first
             # input with every scenario (the equality below puts it in the step-0 group; it has no sharing
@@ -3086,6 +3155,21 @@ class NairACCSMPC:
                 objective += self.config.slack_l1_weight * (ca.sum1(ca.vec(fs_slack_var)) + fs_stop_slack_var)
             else:
                 objective += self.config.slack_weight * (ca.sumsqr(fs_slack_var) + fs_stop_slack_var ** 2)
+            if self._entrant_rows():
+                # entrant<b>: the entrant terminal rows v_N <= v_term and a_N <= a_c (failsafe_entrant_terminal),
+                # only in the problem used while the branch carries an entrant (_entrant_rows)
+                fs_term_v_param = opti.parameter()
+                fs_term_a_param = opti.parameter()
+                fs_term_v_slack_var = opti.variable()
+                fs_term_a_slack_var = opti.variable()
+                opti.subject_to(fs_term_v_slack_var >= 0.0)
+                opti.subject_to(fs_term_a_slack_var >= 0.0)
+                opti.subject_to(fs_term_v_param - states_v[horizon] + fs_term_v_slack_var >= 0.0)
+                opti.subject_to(fs_term_a_param - inputs[horizon - 1] + fs_term_a_slack_var >= 0.0)
+                if self.config.slack_l1_weight is not None:
+                    objective += self.config.slack_l1_weight * (fs_term_v_slack_var + fs_term_a_slack_var)
+                else:
+                    objective += self.config.slack_weight * (fs_term_v_slack_var ** 2 + fs_term_a_slack_var ** 2)
             weight = sample_weight * FAILSAFE_BRANCH_PROBABILITY
             previous_input = previous_accel_param
             for step in range(horizon + 1):
@@ -3153,6 +3237,10 @@ class NairACCSMPC:
             fs_stop_slack_var=fs_stop_slack_var,
             fs_lead_param=fs_lead_param,
             fs_stop_param=fs_stop_param,
+            fs_term_v_param=fs_term_v_param,
+            fs_term_a_param=fs_term_a_param,
+            fs_term_v_slack_var=fs_term_v_slack_var,
+            fs_term_a_slack_var=fs_term_a_slack_var,
             a_lo_param=a_lo_param,
             j_hi_param=j_hi_param,
             j0_lo_param=j0_lo_param,
@@ -4192,16 +4280,36 @@ def failsafe_branch_lead(branch, config):
     horizon = int(config.horizon)
     if branch is None or not branch.present:
         return np.full(horizon + 1, INACTIVE_LEAD_OFFSET_M), INACTIVE_LEAD_OFFSET_M
-    decel = abs(_failsafe_limits()[2])
     t = float(config.dt) * np.arange(horizon + 1)
     gaps = np.asarray(branch.gaps, dtype=float).reshape(-1)
     speeds = np.maximum(np.asarray(branch.speeds, dtype=float).reshape(-1), 0.0)
+    # entrant<b>: each member brakes at its own bound (the checked members at a_p, the entrants at a_c)
+    decel = (np.full(gaps.size, abs(_failsafe_limits()[2])) if branch.decels is None
+             else np.abs(np.asarray(branch.decels, dtype=float).reshape(-1)))
     moving = t[None, :] < (speeds / decel)[:, None]
     displacement = np.where(
-        moving, speeds[:, None] * t[None, :] - 0.5 * decel * t[None, :] ** 2, (speeds ** 2 / (2.0 * decel))[:, None])
+        moving, speeds[:, None] * t[None, :] - 0.5 * decel[:, None] * t[None, :] ** 2,
+        (speeds ** 2 / (2.0 * decel))[:, None])
     positions = gaps[:, None] + float(config.vehicle_length) + displacement
     stop = gaps + float(config.vehicle_length) + speeds ** 2 / (2.0 * decel)
     return positions.min(axis=0), float(np.min(stop))
+
+
+def failsafe_entrant_terminal(branch, config):
+    """``entrant<b>``: the branch's entrant terminal rows' right-hand sides ``(v_term, a_term)``: the smallest
+    lower-bound speed of the branch's close entrants at the horizon end, ``max(0, v_E + a_c N dt)``, and
+    ``a_c``; without an entrant (or a branch) ``INACTIVE_LEAD_OFFSET_M`` and ``a_max``, where neither row binds.
+    With ``v_N <= v_term`` and ``a_N <= a_c``, the fail-safe after the horizon (acceleration at most ``a_N``)
+    keeps the ego no faster than every entrant braking at a_c, so the gap of the branch's last row cannot fall
+    until the entrant has stopped, by when the ego has stopped too."""
+    if branch is None or not branch.present or int(getattr(branch, "n_entrants", 0)) == 0:
+        return INACTIVE_LEAD_OFFSET_M, float(config.a_max)
+    n = int(branch.n_entrants)
+    speeds = np.maximum(np.asarray(branch.speeds, dtype=float).reshape(-1)[-n:], 0.0)
+    decels = np.abs(np.asarray(branch.decels, dtype=float).reshape(-1)[-n:])
+    horizon_s = float(config.horizon) * float(config.dt)
+    v_term = float(np.min(np.maximum(0.0, speeds - decels * horizon_s)))
+    return v_term, float(-np.max(decels))
 
 
 def failsafe_terminal_coefficients(config):

@@ -249,6 +249,13 @@ class ACCNairSMPCAgent(object):
             raise ValueError("safebranch needs safelayer")
         # safelayer: the MPC starts from the fail-safe's acceleration and plans the recovery (item 7, 2026-11-04)
         self.controller_config.failsafe_recovery = self._parse_safety_layer(smpc_config)
+        # entrant<b> (item 12, 2026-11-04): the layer covers close entrants under the braking bound -b; with
+        # safebranch they lead the branch too
+        entrant_decel = self._parse_entrant_decel(smpc_config)
+        if entrant_decel is not None and not self._parse_safety_layer(smpc_config):
+            raise ValueError("entrant<b> needs safelayer")
+        self.controller_config.failsafe_entrant_decel = (
+            entrant_decel if self.controller_config.failsafe_branch else None)
         self.controller_config.standoff_shortfall_weight = self.standoff_shortfall_weight
         self.controller_config.standoff_shortfall_on_lk = self.standoff_shortfall_on_lk
         self.controller_config.standoff_shortfall_lk_cutin_only = self.standoff_shortfall_lk_cutin_only
@@ -264,7 +271,7 @@ class ACCNairSMPCAgent(object):
         if self._parse_safety_layer(smpc_config):
             from utils.pcacc import LaneMembershipTracker
             from utils.safety_layer import SafetyLayer
-            self.safety_layer = SafetyLayer(self.controller_config.a_max)
+            self.safety_layer = SafetyLayer(self.controller_config.a_max, entrant_decel=entrant_decel)
             self._safety_tracker = LaneMembershipTracker(self.safety_layer.cfg)
             self._safety_clock = 0.0
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -591,7 +598,8 @@ class ACCNairSMPCAgent(object):
                 # (the layer is never classified twice in a tick)
                 safety_members = self._classify_safety_layer(
                     time_s, s_ego, ey, speed, previous_accel_cmd, command_dt)
-                failsafe_branch = FailsafeBranch.from_members(safety_members[0])
+                failsafe_branch = FailsafeBranch.from_members(
+                    safety_members[0], safety_members[1], self.controller_config.failsafe_entrant_decel)
             # safelayer: after a fail-safe the MPC starts from the issued command, raised at low speed to the
             # floor from which the recovery keeps v >= 0 (_mpc_previous_accel); the limiter below keeps its
             # window around the issued command (its recovery window admits the MPC's ramp)
@@ -705,6 +713,12 @@ class ACCNairSMPCAgent(object):
                     "nominal_accel": self._safety_nominal_accel,
                     "checked_vids": safety.checked_vids,
                     "cutin_vids": safety.cutin_vids,
+                    # entrant<b>: the close entrants' margin for the nominal command, the entrants the fail-safe
+                    # cannot avoid, and the vehicles that became entrants this tick (those unavoidable at once)
+                    "entrant_margin": safety.entrant_margin,
+                    "unavoidable_vids": safety.unavoidable_vids,
+                    "new_entrant_vids": safety.new_entrant_vids,
+                    "new_unavoidable_vids": safety.new_unavoidable_vids,
                 }
             if self.controller_config.failsafe_branch:
                 # safebranch: the fail-safe branch of this solve (NairACCSolution.failsafe_*)
@@ -714,6 +728,8 @@ class ACCNairSMPCAgent(object):
                     "margin_min": float(solution.failsafe_margin_min),
                     "terminal_margin": float(solution.failsafe_terminal_margin),
                     "slack_max": float(solution.failsafe_slack_max),
+                    "entrants": int(solution.failsafe_entrants),
+                    "entrant_margin": float(solution.failsafe_entrant_margin),
                 }
             self._log_wandb(self.policy_log[-1], solution, prediction_bundle)
 
@@ -1745,6 +1761,19 @@ class ACCNairSMPCAgent(object):
         2026-11-03. Needs ``safelayer``. Whole-token match.
         """
         return re.search(r"(?:^|_)safebranch(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_entrant_decel(smpc_config):
+        """Read ``entrant<b>`` from the config string (default: off, ``None``).
+
+        The safety layer covers close entrants (vehicles that joined the ego's path inside its safe distance,
+        the code's cut-in set) under the braking bound a_c = -b m/s^2 (``utils/safety_layer.py``,
+        ``SafetyLayer(entrant_decel=)``); with ``safebranch`` they lead the fail-safe branch too
+        (``NairACCConfig.failsafe_entrant_decel``). ``entrant2`` reads as -2.0. Needs ``safelayer``. Whole-token
+        match, 2026-11-04.
+        """
+        match = re.search(r"(?:^|_)entrant([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return -float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_lead_merge(smpc_config):
