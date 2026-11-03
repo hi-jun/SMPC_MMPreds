@@ -1217,21 +1217,19 @@ def _never_leads(mode, horizon, ego_s, entry_excluded):
     return not bool(np.any(active & ahead))
 
 
-def _pool_never_leading_modes(target, horizon, ego_s, entry_excluded, branch_floor_by_vehicle):
+def _pool_never_leading_modes(target, horizon, ego_s, entry_excluded):
     """``mergefirst``: a target's modes with its never-leading ones pooled into one.
 
-    A mode that never leads changes no cell and no effective-lead key, so joint modes that differ only in such
-    modes of one vehicle fall into one ``leadmerge`` class.  Pooling them before the product (one inactive copy of
-    the most likely of them, with their summed probability) gives the same classes and class probabilities from
-    fewer joint modes.  Ego-lane targets keep their modes (``_vacating_modes`` reads them whether they lead or
-    not), and so do the cut-in modes of a vehicle with a ``branchdec`` floor (their markers enter the keys).
+    A mode that never leads changes no cell and no effective-lead key (``branchdec`` marks only cut-in modes
+    that lead at some step), so joint modes that differ only in such modes of one vehicle fall into one
+    ``leadmerge`` class.  Pooling them before the product (one inactive copy of the most likely of them, with
+    their summed probability) gives the same classes and class probabilities from fewer joint modes.  Ego-lane
+    targets keep their modes (``_vacating_modes`` reads them whether they lead or not).
     """
     modes = list(target.mode_predictions)
     if target.relation_to_ego_lane == REL_EGO_LANE:
         return modes
-    floors = branch_floor_by_vehicle or {}
-    pooled = [mode for mode in modes if _never_leads(mode, horizon, ego_s, entry_excluded)
-              and not (mode.mode_name == "cutin" and int(mode.vehicle_id) in floors)]
+    pooled = [mode for mode in modes if _never_leads(mode, horizon, ego_s, entry_excluded)]
     if len(pooled) < 2:
         return modes
     representative = max(pooled, key=lambda mode: mode.probability)
@@ -1281,7 +1279,8 @@ def build_multitarget_lead_prediction(
     ``chance_cutin_clearance``'s.  ``branch_floor_by_vehicle`` maps a vehicle id
     to the step from which its cut-in hypothesis is its own policy branch even
     before it enters the ego lane (``decision_point_branch_step``); the
-    constraint cells are unchanged.  ``entry_plan`` (``entrypass``) maps a
+    constraint cells are unchanged, and a cut-in mode that leads at no step
+    gets no branch.  ``entry_plan`` (``entrypass``) maps a
     vehicle id to the ego's planned displacement over the steps
     (``entry_ego_displacement``): a cut-in mode whose bumper gap to the planned
     ego front at its first in-lane step -- lead position minus planned ego
@@ -1348,10 +1347,14 @@ def build_multitarget_lead_prediction(
                 entry_decisions.append({"vehicle_id": int(mode.vehicle_id), "label": str(mode.scenario_label),
                                         "entry_step": entry, "entry_gap_m": gap, "excluded": excluded})
 
+    # branchdec marks a cut-in mode only if it leads at some step: one that never does (gated, excluded, not in
+    # the ego lane within the horizon, or behind the ego) has lane keeping's cells, so a branch for it changed no
+    # solution and only added variables (until 2026-11-03 every cut-in mode of a vehicle with a floor was marked)
+    can_lead = ({id(mode) for target in targets for mode in target.mode_predictions
+                 if not _never_leads(mode, horizon, ego_s, entry_excluded)} if branch_floor_by_vehicle else set())
     mode_lists = [target.mode_predictions for target in targets]
     if merge_first:
-        mode_lists = [_pool_never_leading_modes(target, horizon, ego_s, entry_excluded, branch_floor_by_vehicle)
-                      for target in targets]
+        mode_lists = [_pool_never_leading_modes(target, horizon, ego_s, entry_excluded) for target in targets]
     combos = list(itertools.product(*mode_lists))
     scenarios = []
     for combo_idx, combo in enumerate(combos):
@@ -1402,7 +1405,7 @@ def build_multitarget_lead_prediction(
             decided = tuple(
                 (int(mode.vehicle_id), str(mode.scenario_label), "decided")
                 for mode in combo
-                if mode.mode_name == "cutin" and branch_floor_by_vehicle
+                if mode.mode_name == "cutin" and branch_floor_by_vehicle and id(mode) in can_lead
                 and not mode.active_mask[step]
                 and step >= branch_floor_by_vehicle.get(int(mode.vehicle_id), horizon + 1)
             )

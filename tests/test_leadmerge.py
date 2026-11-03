@@ -96,10 +96,24 @@ class TestLeadMerge(unittest.TestCase):
         np.testing.assert_allclose(displacement[2], 15.0 * self.DT * np.arange(self.HORIZON + 1))
 
     def test_classes_told_apart_only_by_branch_markers_keep_their_members_names(self):
-        merged, _ = self._build(lead_merge=True, branch_floor_by_vehicle={3: 3})
+        # Vehicle 3's cut-in enters from step 8, so it can lead (it leads when vehicle 2 keeps its lane) and
+        # gets branchdec markers; when vehicle 2 cuts in too, 3 is shadowed, and (2 cut-in, 3 cut-in) has the
+        # leads of (2 cut-in, 3 lk) but different keys -- two classes under one lead-sequence name
+        targets = self._targets()
+        targets[2].mode_predictions[1] = self._mode(3, "cutin", 0.3, 40.0, 15.0, 0.0, active_from=8, chance=0.3)
+        merged, _ = build_multitarget_lead_prediction(
+            targets, ego_state=np.array([0.0, 15.0]), horizon=self.HORIZON, desired_speed=20.0, num_modes=8,
+            reference_beta=0.6, vanish_threshold=0.1, lead_merge=True, branch_floor_by_vehicle={3: 3})
         self.assertEqual(merged.num_modes, 4)
         self.assertEqual(len(set(merged.mode_names)), 4)
-        self.assertIn("1:lk+2:lk+3:cutin", merged.mode_names)
+        self.assertIn("1:lk+2:cutin+3:cutin", merged.mode_names)
+
+    def test_a_cutin_that_never_leads_gets_no_branch_marker(self):
+        # vehicle 3's cut-in never leads (no in-lane step), so a branchdec floor for it changes nothing
+        merged, _ = self._build(lead_merge=True)
+        floored, _ = self._build(lead_merge=True, branch_floor_by_vehicle={3: 3})
+        self.assertEqual(floored.mode_names, merged.mode_names)
+        np.testing.assert_array_equal(floored.probabilities, merged.probabilities)
 
     def _config(self):
         """The current design's QP: dopt100, jinput, r_a 0, l1slack1e6 (fullfoot is the cells' factor 1)."""

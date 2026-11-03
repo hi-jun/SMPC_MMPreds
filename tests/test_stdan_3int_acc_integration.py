@@ -1366,6 +1366,40 @@ class TestDecisionPointBranch(unittest.TestCase):
         other, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={1: 3}, **common)
         self.assertEqual(other.policy_tree.policy_split_steps, (6,))
 
+    def test_a_cutin_that_never_leads_gets_no_branch(self):
+        # 2026-11-03: the decision marker goes only to a cut-in mode that leads at some step.  A gated one (no
+        # in-lane step) or one that entrypass excludes has lane keeping's cells; a branch for it changed nothing.
+        from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import ACCProcessedPrediction
+        horizon = 10
+        ego_lane_lead = self._mode(1, "lk", 1.0, [[30.0 + k, 0.0, 10.0] for k in range(horizon + 1)])
+        lk = self._mode(2, "lk", 0.95, [[20.0 + k, 3.5, 10.0] for k in range(horizon + 1)])
+        lk.active_mask[:] = False
+        gated = self._mode(2, "cutin", 0.05, [[20.0 + k, 0.0, 10.0] for k in range(horizon + 1)])
+        gated.active_mask[:] = False
+        # enters at step 6 at 5 m while the planned ego (10 m/s) is 12 m ahead of its current position
+        behind = self._mode(2, "cutin", 0.05, [[2.0 + 0.5 * k, 0.0, 2.5] for k in range(horizon + 1)])
+        behind.active_mask[:6] = False
+        common = dict(ego_state=np.array([0.0, 10.0]), horizon=horizon, desired_speed=10.0, num_modes=4)
+        entry = dict(entry_plan={2: 10.0 * self.DT * np.arange(horizon + 1)}, entry_clearance=4.5)
+        for cutin, kwargs in ((gated, {}), (behind, entry)):
+            targets = [
+                ACCProcessedPrediction(1, REL_EGO_LANE, [ego_lane_lead], {}, {}, {}),
+                ACCProcessedPrediction(2, REL_LEFT_ADJACENT, [lk, cutin], {}, {}, {}),
+            ]
+            plain, _ = build_multitarget_lead_prediction(targets, **common, **kwargs)
+            floored, metadata = build_multitarget_lead_prediction(
+                targets, branch_floor_by_vehicle={2: 3}, **common, **kwargs)
+            self.assertEqual(floored.policy_tree.policy_split_steps, plain.policy_tree.policy_split_steps)
+            self.assertFalse(any("decided" in key for entry_ in metadata
+                                 for key in entry_["effective_lead_keys"]))
+        # the same cut-in without the entrypass exclusion leads from step 6, so the floor splits the tree at 3
+        targets = [
+            ACCProcessedPrediction(1, REL_EGO_LANE, [ego_lane_lead], {}, {}, {}),
+            ACCProcessedPrediction(2, REL_LEFT_ADJACENT, [lk, behind], {}, {}, {}),
+        ]
+        floored, _ = build_multitarget_lead_prediction(targets, branch_floor_by_vehicle={2: 3}, **common)
+        self.assertEqual(floored.policy_tree.policy_split_steps, (3,))
+
     def test_the_agent_reads_the_jlim_token(self):
         from policies.acc_nair_smpc_agent import ACCNairSMPCAgent as agent
         base = "acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin"
