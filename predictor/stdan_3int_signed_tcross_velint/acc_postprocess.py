@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
@@ -1201,6 +1201,60 @@ def _merge_duplicate_scenarios(cells, probabilities, mode_names, metadata, effec
             [effective_lead_keys_by_scenario[idx] for idx in keep])
 
 
+# ``mergefirst``: the most joint modes enumerated before merging; with the never-leading modes pooled
+# (``_pool_never_leading_modes``) a tick has far fewer, so this bound only guards the worst case.
+MERGE_FIRST_MAX_JOINT_MODES = 512
+
+
+def _never_leads(mode, horizon, ego_s, entry_excluded):
+    """True if ``mode`` is a lead candidate at no step 0..horizon: entry-excluded, inactive, or behind the
+    ego's current position wherever it is active (the lead filter's own tests)."""
+    if id(mode) in entry_excluded:
+        return True
+    steps = min(int(horizon) + 1, mode.frenet.shape[0])
+    active = np.asarray(mode.active_mask, dtype=bool)[:steps]
+    ahead = np.asarray(mode.frenet[:steps, 0], dtype=float) >= ego_s
+    return not bool(np.any(active & ahead))
+
+
+def _pool_never_leading_modes(target, horizon, ego_s, entry_excluded, branch_floor_by_vehicle):
+    """``mergefirst``: a target's modes with its never-leading ones pooled into one.
+
+    A mode that never leads changes no cell and no effective-lead key, so joint modes that differ only in such
+    modes of one vehicle fall into one ``leadmerge`` class.  Pooling them before the product (one inactive copy of
+    the most likely of them, with their summed probability) gives the same classes and class probabilities from
+    fewer joint modes.  Ego-lane targets keep their modes (``_vacating_modes`` reads them whether they lead or
+    not), and so do the cut-in modes of a vehicle with a ``branchdec`` floor (their markers enter the keys).
+    """
+    modes = list(target.mode_predictions)
+    if target.relation_to_ego_lane == REL_EGO_LANE:
+        return modes
+    floors = branch_floor_by_vehicle or {}
+    pooled = [mode for mode in modes if _never_leads(mode, horizon, ego_s, entry_excluded)
+              and not (mode.mode_name == "cutin" and int(mode.vehicle_id) in floors)]
+    if len(pooled) < 2:
+        return modes
+    representative = max(pooled, key=lambda mode: mode.probability)
+    pooled_mode = replace(representative, probability=float(sum(mode.probability for mode in pooled)),
+                          active_mask=np.zeros_like(np.asarray(representative.active_mask, dtype=bool)))
+    out = []
+    for mode in modes:
+        if mode is representative:
+            out.append(pooled_mode)
+        elif all(mode is not other for other in pooled):
+            out.append(mode)
+    return out
+
+
+def _rank_scenarios(cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario, num_modes):
+    """``mergefirst``: the classes in order of their summed probability (stable for ties), the ``num_modes``
+    most likely kept."""
+    order = sorted(range(len(probabilities)), key=lambda idx: -float(probabilities[idx]))[:int(num_modes)]
+    return ([array[order] for array in cells], [probabilities[idx] for idx in order],
+            [mode_names[idx] for idx in order], [metadata[idx] for idx in order],
+            [effective_lead_keys_by_scenario[idx] for idx in order])
+
+
 def build_multitarget_lead_prediction(
     processed_predictions: Iterable[ACCProcessedPrediction],
     ego_state: Sequence[float],
@@ -1217,6 +1271,7 @@ def build_multitarget_lead_prediction(
     entry_clearance: float = 0.0,
     entry_margin: float = 0.0,
     lead_merge: bool = False,
+    merge_first: bool = False,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
 
@@ -1236,8 +1291,17 @@ def build_multitarget_lead_prediction(
     ego) -- the current-position filter alone keeps it whenever it is ahead of
     the ego now.  Every scenario's metadata then lists the decisions under
     ``entry_pass``.  ``lead_merge`` (``leadmerge``) keeps one scenario per
-    class of exact duplicates, see ``_merge_duplicate_scenarios``.
+    class of exact duplicates, see ``_merge_duplicate_scenarios``; it merges
+    the ``num_modes`` most likely joint modes and keeps the order of each
+    class's most likely member.  ``merge_first`` (``mergefirst``, with
+    ``lead_merge`` only) merges every joint mode instead (the never-leading
+    modes pooled first, ``_pool_never_leading_modes``), orders the classes by
+    their summed probability and keeps the ``num_modes`` most likely
+    classes; every scenario's metadata then holds the counts under
+    ``merge_first``.
     """
+    if merge_first and not lead_merge:
+        raise ValueError("mergefirst needs leadmerge")
     targets = [pred for pred in processed_predictions if pred.mode_predictions]
     horizon = int(horizon)
     num_modes = int(num_modes)
@@ -1284,13 +1348,17 @@ def build_multitarget_lead_prediction(
                 entry_decisions.append({"vehicle_id": int(mode.vehicle_id), "label": str(mode.scenario_label),
                                         "entry_step": entry, "entry_gap_m": gap, "excluded": excluded})
 
-    combos = list(itertools.product(*[target.mode_predictions for target in targets]))
+    mode_lists = [target.mode_predictions for target in targets]
+    if merge_first:
+        mode_lists = [_pool_never_leading_modes(target, horizon, ego_s, entry_excluded, branch_floor_by_vehicle)
+                      for target in targets]
+    combos = list(itertools.product(*mode_lists))
     scenarios = []
     for combo_idx, combo in enumerate(combos):
         prob = float(np.prod([mode.probability for mode in combo]))
         scenarios.append((combo_idx, combo, prob))
     scenarios.sort(key=lambda item: item[2], reverse=True)
-    scenarios = scenarios[:num_modes]
+    scenarios = scenarios[:MERGE_FIRST_MAX_JOINT_MODES if merge_first else num_modes]
 
     means = np.zeros((len(scenarios), horizon + 1, 2), dtype=float)
     covariances = np.zeros((len(scenarios), horizon + 1, 2, 2), dtype=float)
@@ -1389,6 +1457,12 @@ def build_multitarget_lead_prediction(
                  lead_mode_lk, lead_vehicle_ids, lead_mode_probability]
         cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario = _merge_duplicate_scenarios(
             cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario)
+        if merge_first:
+            counts = {"joint_modes": len(combos), "joint_modes_used": len(scenarios), "classes": len(probabilities)}
+            cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario = _rank_scenarios(
+                cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario, num_modes)
+            for entry in metadata:
+                entry["merge_first"] = counts
         (means, covariances, active_mask, clearance_scale, chance_confidence, sigma_confidence,
          lead_mode_lk, lead_vehicle_ids, lead_mode_probability) = cells
 

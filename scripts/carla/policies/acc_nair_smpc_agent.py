@@ -154,6 +154,9 @@ class ACCNairSMPCAgent(object):
         self.lead_merge = self._parse_lead_merge(smpc_config)
         if self.lead_merge and self.predictor_type != "stdan_3int":
             raise ValueError("leadmerge needs the stdan_3int predictor")
+        self.merge_first = self._parse_merge_first(smpc_config)
+        if self.merge_first and not self.lead_merge:
+            raise ValueError("mergefirst needs leadmerge")
         # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
         self._entry_previous_plan = None
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
@@ -955,6 +958,7 @@ class ACCNairSMPCAgent(object):
                 lk_sigma=self.lk_sigma,
                 full_footprint=self.full_footprint,
                 lead_merge=self.lead_merge,
+                merge_first=self.merge_first,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
                     "entry_margin": self.entry_pass_margin} if entry_plan is not None else {}),
             )
@@ -1735,6 +1739,16 @@ class ACCNairSMPCAgent(object):
         summed (``acc_postprocess._merge_duplicate_scenarios``), 2026-11-03. Whole-token match.
         """
         return re.search(r"(?:^|_)leadmerge(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_merge_first(smpc_config):
+        """Read ``mergefirst`` from the config string (default: off).
+
+        With ``leadmerge``: every joint mode is merged before the ``modes<N>`` cap, the classes are ordered by their
+        summed probability and the N most likely kept (``acc_postprocess.build_multitarget_lead_prediction``),
+        2026-11-03. Whole-token match.
+        """
+        return re.search(r"(?:^|_)mergefirst(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):

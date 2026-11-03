@@ -3645,7 +3645,9 @@ class NairACCSMPC:
                         linearization_speed=x0[1],
                         clearance_scale=float(prediction.clearance_scale[mode, step]),
                     )
-                    desired = reference.a_ref[mode, step] - 0.25 * min(0.0, gap)
+                    # gap < 0 when the lead is closer than the standoff: brake by 0.25 m/s^2 per
+                    # metre of shortfall (before 2026-11-03 the sign was flipped and it accelerated)
+                    desired = reference.a_ref[mode, step] + 0.25 * min(0.0, gap)
                 else:
                     desired = reference.prev_u[mode, step]
                 if self.config.jerk_input:
