@@ -157,6 +157,9 @@ class ACCNairSMPCAgent(object):
         self.merge_first = self._parse_merge_first(smpc_config)
         if self.merge_first and not self.lead_merge:
             raise ValueError("mergefirst needs leadmerge")
+        self.lk_hold = self._parse_lk_hold(smpc_config)
+        if self.lk_hold and self.predictor_type != "stdan_3int":
+            raise ValueError("lkhold needs the stdan_3int predictor")
         # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
         self._entry_previous_plan = None
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
@@ -963,6 +966,7 @@ class ACCNairSMPCAgent(object):
                 full_footprint=self.full_footprint,
                 lead_merge=self.lead_merge,
                 merge_first=self.merge_first,
+                lk_hold=self.lk_hold,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
                     "entry_margin": self.entry_pass_margin} if entry_plan is not None else {}),
             )
@@ -1753,6 +1757,17 @@ class ACCNairSMPCAgent(object):
         2026-11-03. Whole-token match.
         """
         return re.search(r"(?:^|_)mergefirst(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_lk_hold(smpc_config):
+        """Read ``lkhold`` from the config string (default: off).
+
+        The ego-lane lead's lane-keeping mode stays active at every step when its trajectory is no departure by
+        the 3-step rule (``acc_postprocess.ends_outside_ego_lane``): a wobble out of the lane at a middle step or at
+        the last one or two no longer switches the lead's cells off (final-check item 4, 2026-11-03). Whole-token
+        match.
+        """
+        return re.search(r"(?:^|_)lkhold(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):

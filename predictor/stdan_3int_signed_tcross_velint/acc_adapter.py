@@ -515,6 +515,7 @@ class STDAN3IntACCAdapter:
         full_footprint: bool = False,
         lead_merge: bool = False,
         merge_first: bool = False,
+        lk_hold: bool = False,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -590,6 +591,7 @@ class STDAN3IntACCAdapter:
                     no_cutout=no_cutout,
                     lk_sigma=lk_sigma,
                     full_footprint=full_footprint,
+                    lk_hold=lk_hold,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

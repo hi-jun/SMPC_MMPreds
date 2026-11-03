@@ -905,6 +905,7 @@ def process_vehicle_prediction(
     no_cutout: bool = False,
     lk_sigma: bool = False,
     full_footprint: bool = False,
+    lk_hold: bool = False,
 ) -> ACCProcessedPrediction:
     if no_cutout and use_trajectory_aware_cutin_mapping:
         raise ValueError("nocutout acts on the default mapping, not the trajectory-aware one")
@@ -981,6 +982,11 @@ def process_vehicle_prediction(
     for mode_name, raw_indices, probability in mode_specs:
         rep_idx = _representative_index(raw_probs, raw_indices)
         active = memberships[rep_idx].copy()
+        if (lk_hold and relation_to_ego_lane == REL_EGO_LANE and mode_name == "lk"
+                and not ends_outside_ego_lane(memberships[rep_idx])):
+            # ``lkhold`` (2026-11-03): a lead trajectory that is no departure by the 3-step rule (a wobble out at
+            # a middle step or at the last one or two) keeps the lead at every step instead of switching its cells off
+            active[:] = True
         if probability <= 0.0:
             continue
         mode_predictions.append(
@@ -1057,6 +1063,7 @@ def process_vehicle_prediction(
             "no_cutout": bool(no_cutout),
             "lk_sigma": bool(lk_sigma),
             "full_footprint": bool(full_footprint),
+            "lk_hold": bool(lk_hold),
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),
