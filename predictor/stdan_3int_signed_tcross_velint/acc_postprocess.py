@@ -1160,6 +1160,24 @@ def entry_ego_displacement(vehicle_ids, horizon, dt, ego_speed, previous_plan=No
     return out
 
 
+def pass_cap_displacement(horizon, dt, ego_speed, ego_accel, v_max):
+    """``passmiqp``: the ego's displacement [m] from now to each step ``k * dt`` (k = 0..horizon) with its
+    current acceleration held where it is positive, ``a_cap = max(ego_accel, 0)``, and the speed capped at
+    ``v_max``: the farthest the MIQP's pass branch may be, since that branch never plans an acceleration
+    above ``a_cap`` before the pass step (the cap bounds the plan's position step by step).  The pre-filter
+    ``build_multitarget_lead_prediction(pass_margin=)`` reads a hypothesis's entry gap against it, so a
+    hypothesis gets a binary only where the pass row can be met."""
+    a_cap = max(float(ego_accel), 0.0)
+    v, s = float(ego_speed), 0.0
+    out = np.zeros(int(horizon) + 1)
+    for k in range(1, int(horizon) + 1):
+        v_next = min(v + a_cap * float(dt), float(v_max))
+        s += 0.5 * (v + v_next) * float(dt)
+        v = v_next
+        out[k] = s
+    return out
+
+
 def _lead_sequence_name(effective_lead_keys):
     """``leadmerge``: a scenario class's name, its leads in order ("<vehicle>:<label>+...", the joint-mode
     names' format that ``entry_ego_displacement`` reads; a lead is listed again when it leads again after
@@ -1277,8 +1295,20 @@ def build_multitarget_lead_prediction(
     entry_margin: float = 0.0,
     lead_merge: bool = False,
     merge_first: bool = False,
+    pass_margin: Optional[float] = None,
+    pass_slots: int = 0,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
+
+    ``pass_margin`` (``passmiqp<m>``, 2026-11-04) makes the entry test a pre-filter for the MIQP's pass /
+    yield binaries instead of a decision: ``entry_plan`` is then the ego's no-acceleration displacement
+    (``pass_cap_displacement``), a cut-in mode whose entry gap is below ``-entry_margin`` is still excluded
+    (far behind: it passes without a row), one whose gap is above ``-pass_margin`` keeps today's handling
+    (the pass row could not be met: it yields), and one in between is a **candidate**: it keeps its cells
+    and gets a binary slot (at most ``pass_slots``, the nearest to the ego's front first; the rest are
+    excluded).  Candidate cells carry the slot in ``pass_slot`` and the **next lead** -- the nearest active
+    mode ahead that is no candidate -- in the ``next_*`` arrays, the lead the pass branch's rows use;
+    every decision lists ``candidate`` and ``slot``.
 
     With ``reference_beta`` > 0 (the confidence chance constraint) a cell whose
     lead is seen past a vacating ego-lane vehicle inherits that vehicle's
@@ -1336,7 +1366,9 @@ def build_multitarget_lead_prediction(
 
     entry_excluded = set()
     entry_decisions = []
+    pass_slot_of_mode = {}        # passmiqp: id(mode) -> binary slot
     if entry_plan is not None:
+        candidates = []
         for target in targets:
             for mode in target.mode_predictions:
                 displacement = entry_plan.get(int(mode.vehicle_id))
@@ -1351,8 +1383,22 @@ def build_multitarget_lead_prediction(
                 excluded = gap < -float(entry_margin)
                 if excluded:
                     entry_excluded.add(id(mode))
-                entry_decisions.append({"vehicle_id": int(mode.vehicle_id), "label": str(mode.scenario_label),
-                                        "entry_step": entry, "entry_gap_m": gap, "excluded": excluded})
+                decision = {"vehicle_id": int(mode.vehicle_id), "label": str(mode.scenario_label),
+                            "entry_step": entry, "entry_gap_m": gap, "excluded": excluded}
+                if pass_margin is not None:
+                    decision.update(candidate=bool(not excluded and gap <= -float(pass_margin)), slot=-1)
+                    if decision["candidate"]:
+                        candidates.append((gap, len(entry_decisions), mode))
+                entry_decisions.append(decision)
+        # passmiqp: the slots go to the candidates nearest the ego's front (the most marginal); the rest pass
+        # without a row, as a far-behind entry does
+        for rank, (_, idx, mode) in enumerate(sorted(candidates, key=lambda item: -item[0])):
+            if rank < int(pass_slots):
+                pass_slot_of_mode[id(mode)] = rank
+                entry_decisions[idx]["slot"] = rank
+            else:
+                entry_decisions[idx].update(candidate=False, excluded=True, overflow=True)
+                entry_excluded.add(id(mode))
 
     # branchdec marks a cut-in mode only if it leads at some step: one that never does (gated, excluded, not in
     # the ego lane within the horizon, or behind the ego) has lane keeping's cells, so a branch for it changed no
@@ -1379,6 +1425,16 @@ def build_multitarget_lead_prediction(
     lead_mode_lk = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     lead_vehicle_ids = np.full((len(scenarios), horizon + 1), -1, dtype=int)
     lead_mode_probability = np.zeros((len(scenarios), horizon + 1), dtype=float)
+    # passmiqp: the candidate's slot on the cells it leads (-1 elsewhere) and the next lead of those cells
+    pass_slot = np.full((len(scenarios), horizon + 1), -1, dtype=int)
+    next_means = np.zeros((len(scenarios), horizon + 1, 2), dtype=float)
+    next_covariances = np.zeros((len(scenarios), horizon + 1, 2, 2), dtype=float)
+    next_active = np.zeros((len(scenarios), horizon + 1), dtype=bool)
+    next_clearance_scale = np.ones((len(scenarios), horizon + 1), dtype=float)
+    next_chance_confidence = np.full((len(scenarios), horizon + 1), np.nan)
+    next_sigma_confidence = np.full((len(scenarios), horizon + 1), np.nan)
+    next_lead_mode_lk = np.zeros((len(scenarios), horizon + 1), dtype=bool)
+    next_lead_vehicle_ids = np.full((len(scenarios), horizon + 1), -1, dtype=int)
     mode_names = []
     probabilities = []
     metadata = []
@@ -1388,6 +1444,8 @@ def build_multitarget_lead_prediction(
     for scenario_out_idx, (combo_idx, combo, prob) in enumerate(scenarios):
         means[scenario_out_idx, :, 0] = ego_s
         means[scenario_out_idx, :, 1] = default_speed
+        next_means[scenario_out_idx, :, 0] = ego_s
+        next_means[scenario_out_idx, :, 1] = default_speed
         mode_names.append("+".join(f"{mode.vehicle_id}:{mode.scenario_label}" for mode in combo))
         probabilities.append(prob)
         selected_ids = []
@@ -1444,6 +1502,26 @@ def build_multitarget_lead_prediction(
             lead_mode_lk[scenario_out_idx, step] = selected.mode_name == "lk"
             lead_vehicle_ids[scenario_out_idx, step] = int(selected.vehicle_id)
             lead_mode_probability[scenario_out_idx, step] = float(selected.probability)
+            if id(selected) in pass_slot_of_mode:
+                # passmiqp: a candidate leads this cell; its next lead is the nearest active mode ahead that
+                # is no candidate (no vacating inheritance on it: with nocutout there is none to inherit)
+                pass_slot[scenario_out_idx, step] = pass_slot_of_mode[id(selected)]
+                others = [item for item in candidates if id(item[1]) not in pass_slot_of_mode]
+                if others:
+                    _, nxt = min(others, key=lambda item: item[0])
+                    next_means[scenario_out_idx, step, 0] = nxt.frenet[step, 0]
+                    next_means[scenario_out_idx, step, 1] = nxt.frenet[step, 2]
+                    if nxt.lead_covariance is not None and step < nxt.lead_covariance.shape[0]:
+                        next_covariances[scenario_out_idx, step] = nxt.lead_covariance[step]
+                    else:
+                        next_covariances[scenario_out_idx, step] = base_cov
+                    next_active[scenario_out_idx, step] = True
+                    nxt_scale = np.asarray(nxt.clearance_scale, dtype=float)
+                    next_clearance_scale[scenario_out_idx, step] = float(nxt_scale[step] if nxt_scale.ndim else nxt_scale)
+                    next_chance_confidence[scenario_out_idx, step] = float(nxt.chance_confidence)
+                    next_sigma_confidence[scenario_out_idx, step] = float(nxt.sigma_confidence)
+                    next_lead_mode_lk[scenario_out_idx, step] = nxt.mode_name == "lk"
+                    next_lead_vehicle_ids[scenario_out_idx, step] = int(nxt.vehicle_id)
             selected_ids.append(selected.vehicle_id)
             selected_modes.append(selected.mode_name)
             effective_lead_keys.append((int(selected.vehicle_id), str(selected.scenario_label)) + decided)
@@ -1464,7 +1542,9 @@ def build_multitarget_lead_prediction(
 
     if lead_merge:
         cells = [means, covariances, active_mask, clearance_scale, chance_confidence, sigma_confidence,
-                 lead_mode_lk, lead_vehicle_ids, lead_mode_probability]
+                 lead_mode_lk, lead_vehicle_ids, lead_mode_probability,
+                 pass_slot, next_means, next_covariances, next_active, next_clearance_scale,
+                 next_chance_confidence, next_sigma_confidence, next_lead_mode_lk, next_lead_vehicle_ids]
         cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario = _merge_duplicate_scenarios(
             cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario)
         if merge_first:
@@ -1474,7 +1554,17 @@ def build_multitarget_lead_prediction(
             for entry in metadata:
                 entry["merge_first"] = counts
         (means, covariances, active_mask, clearance_scale, chance_confidence, sigma_confidence,
-         lead_mode_lk, lead_vehicle_ids, lead_mode_probability) = cells
+         lead_mode_lk, lead_vehicle_ids, lead_mode_probability,
+         pass_slot, next_means, next_covariances, next_active, next_clearance_scale,
+         next_chance_confidence, next_sigma_confidence, next_lead_mode_lk, next_lead_vehicle_ids) = cells
+    pass_fields = {}
+    if pass_margin is not None:
+        pass_fields = dict(
+            pass_slot=pass_slot, next_means=next_means, next_covariances=next_covariances,
+            next_active_mask=next_active, next_clearance_scale=next_clearance_scale,
+            next_chance_confidence=next_chance_confidence, next_sigma_confidence=next_sigma_confidence,
+            next_lead_mode_lk=next_lead_mode_lk, next_lead_vehicle_ids=next_lead_vehicle_ids,
+            pass_candidates=[dict(d) for d in entry_decisions if d.get("slot", -1) >= 0])
 
     policy_tree = build_policy_sharing_tree_from_effective_leads(
         effective_lead_keys_by_scenario,
@@ -1506,5 +1596,6 @@ def build_multitarget_lead_prediction(
         lead_mode_probability=lead_mode_probability,
         k_group_map=k_group_map,
         k_group_names=k_group_names,
+        **pass_fields,
     )
     return prediction, metadata

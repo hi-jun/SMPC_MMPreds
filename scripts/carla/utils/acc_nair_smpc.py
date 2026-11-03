@@ -327,6 +327,26 @@ class NairACCConfig:
     #: the problem without them, bit for bit.  ``None`` is off (the branch's
     #: lead is the checked members only).
     failsafe_entrant_decel: Optional[float] = None
+    #: ``passmiqp<m>`` (2026-11-04, final-check item 8): the pass / yield choice for an entering cut-in
+    #: hypothesis made inside the optimization, one binary per candidate hypothesis in one MIQP per tick
+    #: (Gurobi through CasADi's ``discrete`` flags), in place of ``entrypass``'s test on a remembered plan.
+    #: A candidate (``MultimodalLeadPrediction.pass_slot``, chosen by ``acc_postprocess``: its entry gap under
+    #: the ego's no-acceleration displacement lies in ``[-PASS_MIQP_FAR_BEHIND_M, -m]``) keeps its cells; with
+    #: z = 1 (yield) they are today's rows, with z = 0 (pass) they are relaxed by ``PASS_MIQP_BIG_M`` and
+    #: three things hold instead: the **pass row**, the ego's front at least ``m`` ahead of the vehicle's
+    #: rear at the first step it leads in that scenario (``s_k - s_v,k + L - m >= 0``); the **next-lead rows**,
+    #: the standoff to the nearest non-candidate lead of those cells (``next_*`` arrays, the ego-lane lead
+    #: as a rule; priced like the main cells where that lead is a dopt cell, through the cell's own shortfall);
+    #: and the **acceleration cap**, no planned acceleration above ``max(a_0, 0)`` up to the pass step, so a
+    #: pass is never bought with more acceleration than the ego already has.  The binary is shared by every
+    #: scenario (one decision now); a candidate's far-behind twin (gap < -``PASS_MIQP_FAR_BEHIND_M``) passes
+    #: without a row and one whose gap is above ``-m`` yields, as before; at most ``PASS_MIQP_SLOTS`` binaries
+    #: per tick.  The reference follows the previous tick's decision (a passed hypothesis's cells take the next
+    #: lead's reference).  Ticks without a candidate solve the design's QP bit for bit (a separate cache
+    #: entry, ``_pass_rows``).  ``None`` is off.  Needs ``standoff_shortfall_weight`` under
+    #: ``confidence_chance``; cached feedback QP only; not with ``relative_brake_decel``, ``floor_risk``,
+    #: ``accel_lag_tau`` or ``optimize_k``.
+    pass_miqp_margin: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -449,6 +469,17 @@ class NairACCConfig:
                 raise ValueError("failsafe_entrant_decel (entrant<b>) needs failsafe_branch (safebranch)")
             if not float(self.failsafe_entrant_decel) < 0.0:
                 raise ValueError("failsafe_entrant_decel (entrant<b>) must be negative")
+        if self.pass_miqp_margin is not None:
+            if not float(self.pass_miqp_margin) >= 0.0:
+                raise ValueError("pass_miqp_margin (passmiqp<m>) must be non-negative")
+            if self.standoff_shortfall_weight is None or self.safety_constraint_mode != SAFETY_CONFIDENCE_CHANCE:
+                raise ValueError("pass_miqp_margin (passmiqp<m>) needs cutin_chance<beta_ref> and dopt<w>")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("pass_miqp_margin (passmiqp<m>) is implemented only in the cached feedback QP")
+            if self.relative_brake_decel is not None or self.floor_risk is not None:
+                raise ValueError("pass_miqp_margin (passmiqp<m>) is not implemented with relbrake<b> or floorrisk<eps>")
+            if self.accel_lag_tau is not None or self.optimize_k:
+                raise ValueError("pass_miqp_margin (passmiqp<m>) is not implemented with alag<tau> or with_k")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -689,6 +720,20 @@ class MultimodalLeadPrediction:
     lead_mode_probability: Optional[np.ndarray] = None
     k_group_map: Optional[np.ndarray] = None
     k_group_names: Optional[List[str]] = None
+    # ``passmiqp``: the binary slot of the candidate hypothesis leading the cell (-1 elsewhere), the
+    # candidates themselves (dicts: vehicle_id, label, entry_step, entry_gap_m, slot) and the cells' next
+    # lead, the nearest non-candidate mode ahead, with the same per-cell fields as the main lead (the
+    # ``next_*`` arrays; ``next_active_mask`` False where there is none).  None without the token.
+    pass_slot: Optional[np.ndarray] = None
+    pass_candidates: Optional[List[dict]] = None
+    next_means: Optional[np.ndarray] = None
+    next_covariances: Optional[np.ndarray] = None
+    next_active_mask: Optional[np.ndarray] = None
+    next_clearance_scale: Optional[np.ndarray] = None
+    next_chance_confidence: Optional[np.ndarray] = None
+    next_sigma_confidence: Optional[np.ndarray] = None
+    next_lead_mode_lk: Optional[np.ndarray] = None
+    next_lead_vehicle_ids: Optional[np.ndarray] = None
 
     def __post_init__(self):
         self.means = np.asarray(self.means, dtype=float)
@@ -792,6 +837,34 @@ class MultimodalLeadPrediction:
                 raise ValueError("k_group_map must have shape %s" % (expected,))
             if np.any(self.k_group_map < 0):
                 raise ValueError("k_group_map entries must be non-negative")
+        if self.pass_slot is not None:
+            # passmiqp: the slot array and the next-lead arrays come together, cell-shaped
+            self.pass_slot = np.asarray(self.pass_slot, dtype=int)
+            expected = (self.num_modes, horizon + 1)
+            if self.pass_slot.shape != expected:
+                raise ValueError("pass_slot must have shape %s" % (expected,))
+            if self.next_means is None or self.next_active_mask is None:
+                raise ValueError("pass_slot needs next_means and next_active_mask")
+            self.next_means = np.asarray(self.next_means, dtype=float)
+            if self.next_means.shape != (self.num_modes, horizon + 1, NO):
+                raise ValueError("next_means must have shape (J, N+1, 2)")
+            self.next_active_mask = np.asarray(self.next_active_mask, dtype=bool)
+            if self.next_active_mask.shape != expected:
+                raise ValueError("next_active_mask must have shape %s" % (expected,))
+            self.next_covariances = (np.zeros((self.num_modes, horizon + 1, NO, NO)) if self.next_covariances is None
+                                     else np.asarray(self.next_covariances, dtype=float))
+            self.next_clearance_scale = (np.ones(expected) if self.next_clearance_scale is None
+                                         else np.asarray(self.next_clearance_scale, dtype=float))
+            self.next_chance_confidence = (np.full(expected, np.nan) if self.next_chance_confidence is None
+                                           else np.asarray(self.next_chance_confidence, dtype=float))
+            self.next_sigma_confidence = (np.full(expected, np.nan) if self.next_sigma_confidence is None
+                                          else np.asarray(self.next_sigma_confidence, dtype=float))
+            self.next_lead_mode_lk = (np.zeros(expected, dtype=bool) if self.next_lead_mode_lk is None
+                                      else np.asarray(self.next_lead_mode_lk, dtype=bool))
+            self.next_lead_vehicle_ids = (np.full(expected, -1, dtype=int) if self.next_lead_vehicle_ids is None
+                                          else np.asarray(self.next_lead_vehicle_ids, dtype=int))
+            if self.pass_candidates is None:
+                self.pass_candidates = []
 
     @property
     def num_modes(self) -> int:
@@ -863,6 +936,16 @@ FAILSAFE_BRANCH_PROBABILITY = 1.0e-3
 #: The offset at which an absent lead is placed ahead of the ego, where no row binds (also the cached QPs'
 #: convention for inactive cells, ``NairACCSMPC._cached_safety_lead_s``).
 INACTIVE_LEAD_OFFSET_M = 1.0e6
+#: ``passmiqp``: binaries per tick (cached-QP slots); the candidates nearest the ego's front get them.
+PASS_MIQP_SLOTS = 3
+#: ``passmiqp``: a hypothesis whose entry gap under the no-acceleration displacement is below this [m] (two
+#: vehicle lengths: the whole vehicle behind the ego's rear) passes without a row, as ``entrypass9`` drops it.
+PASS_MIQP_FAR_BEHIND_M = 9.0
+#: ``passmiqp``: the big-M of the relaxed rows [m].  The largest violation a relaxed row can have is the ego's
+#: travel over the horizon (60 m at v_max 20) plus the candidate's deficit (9 m), the standoff (33.5 m at 20
+#: m/s) and the sigma term; the pass row's is the vehicle's lead over the ego at its entry step (under 100 m).
+#: Gurobi's IntFeasTol (1e-5) leaks at most 5e-3 m through it.
+PASS_MIQP_BIG_M = 500.0
 
 
 @dataclass
@@ -978,6 +1061,17 @@ class NairACCSolution:
     #: rows, ``min(v_term - v_N, a_c - a_N)`` (NaN without an entrant or after a fallback)
     failsafe_entrants: int = 0
     failsafe_entrant_margin: float = float("nan")
+    #: ``passmiqp`` only: the candidate hypotheses of this solve with their decision (dicts: vehicle_id, label,
+    #: entry_step, entry_gap_m, slot, ``pass``: True where z = 0; empty without a candidate or after a fallback),
+    #: how many were passed, the largest planned acceleration over the capped steps of the passed candidates'
+    #: cells (NaN without a pass; above 0 only where a_0 > 0 was kept), the MIQP's own solver wall time [s]
+    #: and Gurobi's simplex/barrier iteration count (NaN / -1 when the tick solved the plain QP; the node count
+    #: is not exposed by CasADi's interface).
+    pass_decisions: Optional[List[dict]] = None
+    pass_n_pass: int = 0
+    pass_accel_max: float = float("nan")
+    pass_solve_s: float = float("nan")
+    pass_iter_count: int = -1
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -1095,6 +1189,20 @@ class CachedFeedbackScalarChanceQP:
     a_lo_param: Any = None
     j_hi_param: Any = None
     j0_lo_param: Any = None
+    #: passmiqp: the binaries (one per slot, created first so that they are the first entries of the decision
+    #: vector), per slot the cells the candidate leads, the pass-row cells and the capped steps, whether the
+    #: slot is in use, the acceleration cap, and the next lead's position, tightening, factor and dopt mask
+    #: per cell; None without it (the plain QP)
+    pass_z_var: Any = None
+    pass_cand_params: Optional[List[Any]] = None
+    pass_row_params: Optional[List[Any]] = None
+    pass_cap_mask_params: Optional[List[Any]] = None
+    pass_used_param: Any = None
+    pass_cap_param: Any = None
+    next_lead_s_param: Any = None
+    next_tightening_param: Any = None
+    next_clearance_scale_param: Any = None
+    next_mask_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -1301,6 +1409,12 @@ class NairACCSMPC:
         self._failsafe_plan = None
         # failsafe_recovery: (a_lo, j_hi, j0_lo) of this solve's envelope, None outside a recovery
         self._recovery_bounds = None
+        # passmiqp: whether this solve's prediction carries a candidate (the MIQP cache entry), the solved
+        # binaries with their candidates and the MIQP's timing, and the last solve's decision per hypothesis
+        # (vehicle id, label) -> passed, which the reference follows
+        self._pass_active = False
+        self._pass_result = None
+        self._pass_last = {}
         # dopt<w>lkr: vehicles seen with a live cut-in hypothesis, and those of
         # them now followed as the in-lane lead -> ticks the gap has been full.
         self._armed_cutin_vehicles = set()
@@ -1345,7 +1459,7 @@ class NairACCSMPC:
         timing_breakdown["trim_prediction_s"] = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
-        reference = self.reference_adapter.generate(ego_state, prediction)
+        reference = self.reference_adapter.generate(ego_state, self._pass_reference_prediction(prediction))
         timing_breakdown["reference_generate_s"] = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
@@ -1602,7 +1716,43 @@ class NairACCSMPC:
             ),
             k_group_map=k_group_map,
             k_group_names=prediction.k_group_names,
+            **({} if prediction.pass_slot is None else dict(
+                pass_slot=prediction.pass_slot[:, :self.config.horizon + 1],
+                pass_candidates=prediction.pass_candidates,
+                next_means=prediction.next_means[:, :self.config.horizon + 1, :],
+                next_covariances=prediction.next_covariances[:, :self.config.horizon + 1, :, :],
+                next_active_mask=prediction.next_active_mask[:, :self.config.horizon + 1],
+                next_clearance_scale=prediction.next_clearance_scale[:, :self.config.horizon + 1],
+                next_chance_confidence=prediction.next_chance_confidence[:, :self.config.horizon + 1],
+                next_sigma_confidence=prediction.next_sigma_confidence[:, :self.config.horizon + 1],
+                next_lead_mode_lk=prediction.next_lead_mode_lk[:, :self.config.horizon + 1],
+                next_lead_vehicle_ids=prediction.next_lead_vehicle_ids[:, :self.config.horizon + 1])),
         )
+
+    def _pass_reference_prediction(self, prediction):
+        """``passmiqp``: the prediction the reference is generated from.  The cells of a candidate that the
+        previous solve passed take their next lead (position, speed, covariance, factor, confidences, kind),
+        so the tracking terms ask for the lead the pass branch follows; a candidate first seen, or yielded
+        last time, keeps its own cells.  The rows are unchanged.  The prediction object is not modified."""
+        if prediction.pass_slot is None or not self._pass_last:
+            return prediction
+        passed = np.zeros(prediction.pass_slot.shape, dtype=bool)
+        for cand in prediction.pass_candidates or []:
+            if self._pass_last.get((int(cand["vehicle_id"]), str(cand["label"])), False):
+                passed |= prediction.pass_slot == int(cand["slot"])
+        if not np.any(passed):
+            return prediction
+        reference = copy.copy(prediction)
+        reference.means = np.where(passed[:, :, None], prediction.next_means, prediction.means)
+        reference.covariances = np.where(passed[:, :, None, None], prediction.next_covariances, prediction.covariances)
+        reference.active_mask = np.where(passed, prediction.next_active_mask, prediction.active_mask)
+        reference.clearance_scale = np.where(passed, prediction.next_clearance_scale, prediction.clearance_scale)
+        reference.chance_confidence = np.where(passed, prediction.next_chance_confidence, prediction.chance_confidence)
+        if prediction.sigma_confidence is not None:
+            reference.sigma_confidence = np.where(passed, prediction.next_sigma_confidence, prediction.sigma_confidence)
+        if prediction.lead_mode_lk is not None:
+            reference.lead_mode_lk = np.where(passed, prediction.next_lead_mode_lk, prediction.lead_mode_lk)
+        return reference
 
     def _restrict_lk_pricing(self, ego_state, prediction):
         """``dopt<w>lkr``: keep ``lead_mode_lk`` only on vehicles that came in as a
@@ -1668,6 +1818,11 @@ class NairACCSMPC:
         priced_ids = self._armed_cutin_vehicles | set(self._priced_cutin_vehicles)
         restricted = copy.copy(prediction)
         restricted.lead_mode_lk = lk & np.isin(ids, list(priced_ids))
+        if prediction.next_lead_mode_lk is not None:
+            # passmiqp: the next lead's lane-keeping cells are priced by the same rule
+            restricted.next_lead_mode_lk = (np.asarray(prediction.next_lead_mode_lk, dtype=bool)
+                                            & np.isin(np.asarray(prediction.next_lead_vehicle_ids, dtype=int),
+                                                      list(priced_ids)))
         return restricted
 
     def _solve_open_loop(self, ego_state, prediction, reference, risks, policy0):
@@ -1722,6 +1877,11 @@ class NairACCSMPC:
             raise ValueError(
                 "failsafe_recovery (safelayer) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.pass_miqp_margin is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "pass_miqp_margin (passmiqp<m>) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1731,6 +1891,10 @@ class NairACCSMPC:
         solve_path = "fallback"
         self._standoff_shortfall = None
         self._failsafe_plan = None
+        # passmiqp: the MIQP only on a tick with a candidate; the plain QP otherwise (a separate cache entry)
+        self._pass_active = bool(self.config.pass_miqp_margin is not None and prediction.pass_slot is not None
+                                 and np.any(prediction.pass_slot >= 0))
+        self._pass_result = None
 
         try:
             if self._can_use_cached_open_loop_fixed_qp(open_loop, prediction):
@@ -1900,6 +2064,7 @@ class NairACCSMPC:
             planned_v = self.reference_adapter.planned_speed(x0)
             tangent_error = (x_nominal[:, :, 1] - planned_v[None, :]) ** 2 / (2.0 * self.config.relative_brake_decel)
             speed_gap_tangent_error_max = float(np.max(tangent_error[prediction.active_mask]))
+        pass_fields = self._pass_solution_fields(x0, prediction, x_nominal, u_nominal, chance_margin_values)
         failsafe_fields = self._failsafe_solution_fields(x0)
         timing_breakdown["solution_postprocess_s"] = time.perf_counter() - phase_start
 
@@ -1984,7 +2149,55 @@ class NairACCSMPC:
             n_floor_raised=n_floor_raised,
             floor_old_margin_min=floor_old_margin_min,
             **failsafe_fields,
+            **pass_fields,
         )
+
+    def _pass_solution_fields(self, x0, prediction, x_nominal, u_nominal, chance_margin_values):
+        """``passmiqp``: the decisions of this solve (``_pass_result``) as ``NairACCSolution`` fields, the
+        remembered decision per hypothesis for the next reference, and, on the cells of a passed candidate,
+        ``chance_margin_values`` replaced in place by the next-lead row's margin (the relaxed main row is not
+        the plan's requirement there; +inf without a next lead).  Empty without the token."""
+        if self.config.pass_miqp_margin is None:
+            return {}
+        if self._pass_result is None:          # no candidate this tick, or a fallback (which plans no pass)
+            self._pass_last = {}
+            return {"pass_decisions": [], "pass_n_pass": 0}
+        z, solve_s, iter_count = self._pass_result
+        decisions, last = [], {}
+        passed_cells = np.zeros(prediction.pass_slot.shape, dtype=bool)
+        for cand in prediction.pass_candidates or []:
+            slot = int(cand["slot"])
+            passed = bool(z[slot] < 0.5)
+            decisions.append(dict(cand, **{"pass": passed}))
+            last[(int(cand["vehicle_id"]), str(cand["label"]))] = passed
+            if passed:
+                passed_cells |= prediction.pass_slot == slot
+        self._pass_last = last
+        accel_max = float("nan")
+        if np.any(passed_cells):
+            # the next-lead row's margin on the passed cells (the same form as the main row's, scaled footprint
+            # and time gap, the next lead's sigma term; the dopt part counts as asked in full)
+            next_std = np.zeros(passed_cells.shape)
+            for mode, step in zip(*np.nonzero(passed_cells & prediction.next_active_mask)):
+                beta = prediction.next_chance_confidence[mode, step]
+                if not np.isfinite(beta):
+                    beta = prediction.next_sigma_confidence[mode, step]
+                next_std[mode, step] = confidence_tightening(prediction.next_covariances[mode, step], beta, self.config)
+            scale = prediction.next_clearance_scale
+            next_margin = (prediction.next_means[:, :, 0] - x_nominal[:, :, 0]
+                           - scale * (self.config.vehicle_length + self.config.d0)
+                           - self.config.time_headway * x_nominal[:, :, 1] - next_std)
+            chance_margin_values[passed_cells] = np.where(
+                prediction.next_active_mask, next_margin, np.inf)[passed_cells]
+            # the largest planned acceleration over the capped steps (up to each passed candidate's pass step)
+            capped = np.zeros(u_nominal.shape, dtype=bool)
+            for mode in range(prediction.num_modes):
+                steps = np.flatnonzero(passed_cells[mode])
+                if steps.size:
+                    capped[mode, :int(steps[0])] = True
+            accel_max = float(np.max(u_nominal[capped])) if np.any(capped) else float("nan")
+        return {"pass_decisions": decisions, "pass_n_pass": int(sum(d["pass"] for d in decisions)),
+                "pass_accel_max": accel_max, "pass_solve_s": float(solve_s), "pass_iter_count": int(iter_count)}
 
     def _failsafe_solution_fields(self, x0):
         """``safebranch``: the branch's fields of the ``NairACCSolution`` from the cached QP's solved branch
@@ -2490,8 +2703,15 @@ class NairACCSMPC:
             bool(self.config.failsafe_branch),
             bool(self.config.failsafe_recovery),
             self._entrant_rows(),
+            self._pass_rows(),
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
+
+    def _pass_rows(self):
+        """``passmiqp``: whether this solve carries a candidate hypothesis, in which case the cached MIQP (the
+        binaries, the pass, cap and next-lead rows) is used; a tick without one solves the design's QP, the
+        same problem bit for bit (as ``_entrant_rows``).  A separate cache entry per case."""
+        return bool(self.config.pass_miqp_margin is not None and self._pass_active)
 
     def _entrant_rows(self):
         """``entrant<b>``: whether this solve's branch carries a close entrant, in which case the cached QP with
@@ -2610,6 +2830,50 @@ class NairACCSMPC:
                 fs_term = failsafe_entrant_terminal(self._failsafe_branch, self.config)
                 opti.set_value(problem.fs_term_v_param, fs_term[0])
                 opti.set_value(problem.fs_term_a_param, fs_term[1])
+        pass_initial = None
+        if problem.pass_z_var is not None:
+            # passmiqp: per slot the candidate's cells, the pass-row cell (the first it leads per scenario) and
+            # the capped steps before it; the next lead's position (10^6 m ahead where there is none), its
+            # sigma term, factor and dopt mask (the lkr-restricted lane-keeping cells and the cut-in chance
+            # cells, as the main cells'); the cap max(a_0, 0); the binaries start from the last decisions
+            slot_of_cell = np.asarray(prediction.pass_slot, dtype=int)
+            used = np.zeros(PASS_MIQP_SLOTS)
+            pass_initial = np.ones(PASS_MIQP_SLOTS)
+            for slot in range(PASS_MIQP_SLOTS):
+                cand = slot_of_cell == slot
+                row_mask = np.zeros((num_modes, horizon + 1))
+                cap_mask = np.zeros((num_modes, horizon))
+                for mode in range(num_modes):
+                    steps = np.flatnonzero(cand[mode])
+                    if steps.size:
+                        row_mask[mode, int(steps[0])] = 1.0
+                        cap_mask[mode, :int(steps[0])] = 1.0
+                used[slot] = float(np.any(cand))
+                opti.set_value(problem.pass_cand_params[slot], cand.astype(float))
+                opti.set_value(problem.pass_row_params[slot], row_mask)
+                opti.set_value(problem.pass_cap_mask_params[slot], cap_mask)
+            for cand in prediction.pass_candidates or []:
+                if self._pass_last.get((int(cand["vehicle_id"]), str(cand["label"])), False):
+                    pass_initial[int(cand["slot"])] = 0.0
+            opti.set_value(problem.pass_used_param, used)
+            opti.set_value(problem.pass_cap_param, max(float(self._ego_accel), 0.0))
+            next_active = np.asarray(prediction.next_active_mask, dtype=bool)
+            next_lead_s = np.asarray(prediction.next_means[:, :, 0], dtype=float).copy()
+            next_lead_s[~next_active] = float(np.asarray(x0, dtype=float).reshape(-1)[0] + INACTIVE_LEAD_OFFSET_M)
+            next_tightening = np.zeros((num_modes, horizon + 1))
+            for mode, step in zip(*np.nonzero(next_active)):
+                beta = prediction.next_chance_confidence[mode, step]
+                if not np.isfinite(beta):
+                    beta = prediction.next_sigma_confidence[mode, step]
+                next_tightening[mode, step] = confidence_tightening(
+                    prediction.next_covariances[mode, step], beta, self.config)
+            next_mask = next_active & np.isfinite(prediction.next_chance_confidence)
+            if self.config.standoff_shortfall_on_lk:
+                next_mask |= next_active & np.asarray(prediction.next_lead_mode_lk, dtype=bool)
+            opti.set_value(problem.next_lead_s_param, next_lead_s)
+            opti.set_value(problem.next_tightening_param, next_tightening)
+            opti.set_value(problem.next_clearance_scale_param, prediction.next_clearance_scale)
+            opti.set_value(problem.next_mask_param, next_mask.astype(float))
         k_slot_by_step = []
         if problem.optimize_k:
             for step in range(horizon):
@@ -2647,6 +2911,8 @@ class NairACCSMPC:
         opti.set_initial(problem.slack_var, np.zeros((num_modes, horizon + 1)))
         if problem.short_var is not None:
             opti.set_initial(problem.short_var, np.zeros((num_modes, horizon + 1)))
+        if problem.pass_z_var is not None:
+            opti.set_initial(problem.pass_z_var, pass_initial)
         if problem.fs_u_var is not None:
             # safebranch: the branch starts from scenario 0's warm start (its inputs are absolute values)
             opti.set_initial(problem.fs_u_var, np.asarray(reference.prev_u[0], dtype=float) + h_initial[0])
@@ -2718,6 +2984,12 @@ class NairACCSMPC:
 
         opti.set_initial(problem.h_var, h_values)
         opti.set_initial(problem.slack_var, slack)
+        if problem.pass_z_var is not None:
+            # passmiqp: the binaries (rounded: Gurobi's integrality tolerance is 1e-5), the MIQP's solver
+            # time and its iteration count (the node count is not exposed by CasADi's interface)
+            iter_count = stats.get("iter_count")
+            self._pass_result = (np.round(np.asarray(sol.value(problem.pass_z_var), dtype=float).reshape(-1)),
+                                 opti_solve_s, -1 if iter_count is None else int(iter_count))
 
         optimized_eta_data = None
         if problem.optimized_eta:
@@ -2779,6 +3051,10 @@ class NairACCSMPC:
         optimize_k = bool(self.config.optimize_k)
         k_group_capacity = int(num_modes) if optimize_k else 0
         opti = ca.Opti("conic")
+        # passmiqp: the binaries first, so that they are the first PASS_MIQP_SLOTS entries of the decision
+        # vector the solver's ``discrete`` flags refer to
+        pass_rows = self._pass_rows()
+        pass_z_var = opti.variable(PASS_MIQP_SLOTS) if pass_rows else None
         h_var = opti.variable(num_modes, horizon)
         k_var = (
             [[opti.variable(NO) for _ in range(horizon)] for _ in range(k_group_capacity)]
@@ -2836,6 +3112,22 @@ class NairACCSMPC:
         floor_mask_param = opti.parameter(num_modes, horizon + 1) if floor_risk is not None else None
         floor_sigma_param = opti.parameter(num_modes, horizon + 1) if floor_risk is not None else None
         sharing_params = []
+        pass_cand_params = pass_row_params = pass_cap_mask_params = None
+        pass_used_param = pass_cap_param = None
+        next_lead_s_param = next_tightening_param = next_clearance_scale_param = next_mask_param = None
+        if pass_rows:
+            pass_cand_params = [opti.parameter(num_modes, horizon + 1) for _ in range(PASS_MIQP_SLOTS)]
+            pass_row_params = [opti.parameter(num_modes, horizon + 1) for _ in range(PASS_MIQP_SLOTS)]
+            pass_cap_mask_params = [opti.parameter(num_modes, horizon) for _ in range(PASS_MIQP_SLOTS)]
+            pass_used_param = opti.parameter(PASS_MIQP_SLOTS)
+            pass_cap_param = opti.parameter()
+            next_lead_s_param = opti.parameter(num_modes, horizon + 1)
+            next_tightening_param = opti.parameter(num_modes, horizon + 1)
+            next_clearance_scale_param = opti.parameter(num_modes, horizon + 1)
+            next_mask_param = opti.parameter(num_modes, horizon + 1)
+            opti.subject_to(pass_z_var >= 0.0)
+            opti.subject_to(pass_z_var <= 1.0)
+            opti.subject_to(pass_z_var >= 1.0 - pass_used_param)     # an unused slot yields (its rows are empty)
 
         opti.subject_to(ca.vec(slack_var) >= 0.0)
         if short_var is not None:
@@ -3030,6 +3322,26 @@ class NairACCSMPC:
                     slack = (slack + short_var[mode, step]
                              - shortfall_mask_param[mode, step]
                              * (1.0 - clearance_scale_param[mode, step]) * timegap)
+                if pass_rows:
+                    # passmiqp: on a candidate's cell the main row is relaxed by big-M when its binary is 0
+                    # (pass), and the next-lead row -- the same form with the next lead's position, factor
+                    # and sigma term, the cell's slack and, where that lead is a dopt cell, its shortfall --
+                    # is relaxed when the binary is 1 (yield); on every other cell the next lead sits 10^6 m
+                    # ahead and the cand masks are 0, so neither term acts
+                    relax_pass = relax_yield = 0.0
+                    for slot in range(PASS_MIQP_SLOTS):
+                        relax_pass += pass_cand_params[slot][mode, step] * (1.0 - pass_z_var[slot])
+                        relax_yield += pass_cand_params[slot][mode, step] * pass_z_var[slot]
+                    slack = slack + PASS_MIQP_BIG_M * relax_pass
+                    next_slack = (slack_var[mode, step] + next_mask_param[mode, step] * short_var[mode, step]
+                                  - next_mask_param[mode, step] * (1.0 - next_clearance_scale_param[mode, step])
+                                  * self.config.time_headway * states_v[step]
+                                  + PASS_MIQP_BIG_M * relax_yield)
+                    opti.subject_to(
+                        self._symbolic_safety_margin(
+                            next_lead_s_param[mode, step], states_s[step], states_v[step],
+                            tightening=next_tightening_param[mode, step], slack=next_slack,
+                            clearance_scale=next_clearance_scale_param[mode, step]) >= 0.0)
                 self._add_symbolic_safety_constraints(
                     opti,
                     lead_s_param[mode, step],
@@ -3063,6 +3375,28 @@ class NairACCSMPC:
                             self._symbolic_min_clearance_margin(lead_s_param[mode, step], states_s[step])
                             - floor_sigma_param[mode, step])
                         + slack_var[mode, step] >= 0.0)
+
+        if pass_rows:
+            # passmiqp: per slot and scenario the pass row at the first cell the candidate leads (one masked
+            # cell per scenario, or none), the ego's front at least pass_miqp_margin ahead of the vehicle's rear
+            # there, and the cap rows, no planned acceleration above the cap on the steps before that cell;
+            # both relaxed by big-M when the binary is 1 (yield) and on the cells the masks leave out
+            margin = float(self.config.pass_miqp_margin)
+            accel_m = 2.0 * (self.config.a_max - self.config.a_min)
+            for slot in range(PASS_MIQP_SLOTS):
+                for mode in range(num_modes):
+                    states_s, _, inputs = mean_states_by_mode[mode]
+                    pass_row = 0.0
+                    row_mask = 0.0
+                    for step in range(horizon + 1):
+                        pass_row += pass_row_params[slot][mode, step] * (
+                            states_s[step] - lead_s_param[mode, step] + self.config.vehicle_length - margin)
+                        row_mask += pass_row_params[slot][mode, step]
+                    opti.subject_to(pass_row + PASS_MIQP_BIG_M * pass_z_var[slot]
+                                    + PASS_MIQP_BIG_M * (1.0 - row_mask) >= 0.0)
+                    for step in range(horizon):
+                        opti.subject_to(inputs[step] <= pass_cap_param + accel_m * pass_z_var[slot]
+                                        + accel_m * (1.0 - pass_cap_mask_params[slot][mode, step]))
 
         if short_var is not None:
             for mode in range(num_modes):
@@ -3189,6 +3523,11 @@ class NairACCSMPC:
 
         opti.minimize(objective)
         p_opts, s_opts = self._gurobi_options()
+        if pass_rows:
+            # passmiqp: the binaries are the first entries of the decision vector; one thread, so that the
+            # branch-and-bound does not fan out under the replay's parallel load
+            p_opts["discrete"] = [True] * PASS_MIQP_SLOTS + [False] * (int(opti.nx) - PASS_MIQP_SLOTS)
+            s_opts["Threads"] = 1
         opti.solver(self.config.solver_name, p_opts, s_opts)
 
         problem = CachedFeedbackScalarChanceQP(
@@ -3244,6 +3583,16 @@ class NairACCSMPC:
             a_lo_param=a_lo_param,
             j_hi_param=j_hi_param,
             j0_lo_param=j0_lo_param,
+            pass_z_var=pass_z_var,
+            pass_cand_params=pass_cand_params,
+            pass_row_params=pass_row_params,
+            pass_cap_mask_params=pass_cap_mask_params,
+            pass_used_param=pass_used_param,
+            pass_cap_param=pass_cap_param,
+            next_lead_s_param=next_lead_s_param,
+            next_tightening_param=next_tightening_param,
+            next_clearance_scale_param=next_clearance_scale_param,
+            next_mask_param=next_mask_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem

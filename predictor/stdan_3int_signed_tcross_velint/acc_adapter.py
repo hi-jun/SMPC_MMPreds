@@ -516,6 +516,8 @@ class STDAN3IntACCAdapter:
         lead_merge: bool = False,
         merge_first: bool = False,
         lk_hold: bool = False,
+        pass_margin: Optional[float] = None,
+        pass_slots: int = 0,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -609,6 +611,8 @@ class STDAN3IntACCAdapter:
             entry_margin=entry_margin,
             lead_merge=lead_merge,
             merge_first=merge_first,
+            pass_margin=pass_margin,
+            pass_slots=pass_slots,
         )
         return {
             "prediction": prediction,

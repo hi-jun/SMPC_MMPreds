@@ -25,6 +25,8 @@ from utils.acc_nair_smpc import (
     failsafe_recovery_floor,
     MultimodalLeadPrediction,
     NairACCSMPC,
+    PASS_MIQP_FAR_BEHIND_M,
+    PASS_MIQP_SLOTS,
     PolicySharingTree,
     RISK_FIXED,
     RISK_OPTIMIZED_ETA,
@@ -59,6 +61,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
     REL_RIGHT_ADJACENT,
     decision_point_branch_step,
     entry_ego_displacement,
+    pass_cap_displacement,
 )
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 from predictor.lstm.acc_adapter import LSTMACCAdapter
@@ -153,6 +156,14 @@ class ACCNairSMPCAgent(object):
         self.entry_pass_margin = self._parse_entry_pass_margin(smpc_config)
         if self.entry_pass and self.predictor_type != "stdan_3int":
             raise ValueError("entrypass needs the stdan_3int predictor")
+        # passmiqp<m> (2026-11-04, item 8): the pass / yield choice inside the optimization; it replaces
+        # entrypass's test on the remembered plan by a pre-filter on the no-acceleration displacement
+        self.pass_miqp_margin = self._parse_pass_miqp(smpc_config)
+        if self.pass_miqp_margin is not None:
+            if self.predictor_type != "stdan_3int":
+                raise ValueError("passmiqp needs the stdan_3int predictor")
+            if not self.cutin_chance_ref or self.standoff_shortfall_weight is None:
+                raise ValueError("passmiqp needs cutin_chance<beta_ref> and dopt<w>")
         self.lead_merge = self._parse_lead_merge(smpc_config)
         if self.lead_merge and self.predictor_type != "stdan_3int":
             raise ValueError("leadmerge needs the stdan_3int predictor")
@@ -264,6 +275,7 @@ class ACCNairSMPCAgent(object):
             # without lksigma the lane-keeping cells have no sigma term, so the token would change nothing
             raise ValueError("lkrsigma needs lksigma")
         self.controller_config.standoff_shortfall_cell_price = self.standoff_shortfall_cell_price
+        self.controller_config.pass_miqp_margin = self.pass_miqp_margin
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
@@ -720,6 +732,15 @@ class ACCNairSMPCAgent(object):
                     "new_entrant_vids": safety.new_entrant_vids,
                     "new_unavoidable_vids": safety.new_unavoidable_vids,
                 }
+            if self.pass_miqp_margin is not None:
+                # passmiqp: the candidates and their decisions, the MIQP's solver time and iteration count
+                self.policy_log[-1]["pass_miqp"] = {
+                    "decisions": list(solution.pass_decisions or []),
+                    "n_pass": int(solution.pass_n_pass),
+                    "accel_max": float(solution.pass_accel_max),
+                    "solve_s": float(solution.pass_solve_s),
+                    "iter_count": int(solution.pass_iter_count),
+                }
             if self.controller_config.failsafe_branch:
                 # safebranch: the fail-safe branch of this solve (NairACCSolution.failsafe_*)
                 self.policy_log[-1]["failsafe_branch"] = {
@@ -949,7 +970,17 @@ class ACCNairSMPCAgent(object):
         branch_floor_by_vehicle, branch_decision_debug = self._decision_point_branch_floors(
             target_states, target_relations, other_states)
         entry_plan = None
-        if self.entry_pass:
+        entry_margin = self.entry_pass_margin
+        pass_kw = {}
+        if self.pass_miqp_margin is not None:
+            # passmiqp: the entry test is a pre-filter on the no-acceleration displacement from the previous
+            # command (the ideal actuator's acceleration); far-behind entries pass without a row
+            displacement = pass_cap_displacement(self.N, self.DT, speed, self._prev_accel_cmd,
+                                                 self.controller_config.v_max)
+            entry_plan = {int(vid): displacement for vid in target_states.keys()}
+            entry_margin = PASS_MIQP_FAR_BEHIND_M
+            pass_kw = {"pass_margin": self.pass_miqp_margin, "pass_slots": PASS_MIQP_SLOTS}
+        elif self.entry_pass:
             now_s = self._elapsed_seconds()
             previous = self._entry_previous_plan
             entry_plan = entry_ego_displacement(
@@ -991,7 +1022,8 @@ class ACCNairSMPCAgent(object):
                 merge_first=self.merge_first,
                 lk_hold=self.lk_hold,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
-                    "entry_margin": self.entry_pass_margin} if entry_plan is not None else {}),
+                    "entry_margin": entry_margin} if entry_plan is not None else {}),
+                **pass_kw,
             )
             predictor_time = time.time() - predictor_start
         except Exception as exc:
@@ -1951,6 +1983,21 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"entrypass([0-9]+(?:\.[0-9]+)?)", str(smpc_config))
         return float(match.group(1)) if match else 0.0
+
+    @staticmethod
+    def _parse_pass_miqp(smpc_config):
+        """Read ``passmiqp<m>`` from the config string (default: off, ``None``; ``passmiqp`` alone: m = 0).
+
+        The pass / yield choice for an entering cut-in hypothesis made inside the optimization, one binary per
+        candidate in one MIQP per tick (``NairACCConfig.pass_miqp_margin``, 2026-11-04, final-check item 8):
+        on the pass branch the ego's front must be at least m metres ahead of the vehicle's rear at the step
+        it would lead, without planning more acceleration than it has.  It replaces ``entrypass``'s test on
+        the remembered plan (that token may stay in the string).  Whole-token match.
+        """
+        match = re.search(r"(?:^|_)passmiqp([0-9]*\.?[0-9]*)(?=_|$)", str(smpc_config))
+        if match is None:
+            return None
+        return float(match.group(1)) if match.group(1) else 0.0
 
     @staticmethod
     def _parse_lk_entry_as_cutin(smpc_config):
