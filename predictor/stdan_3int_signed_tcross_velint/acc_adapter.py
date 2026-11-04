@@ -518,6 +518,7 @@ class STDAN3IntACCAdapter:
         lk_hold: bool = False,
         pass_margin: Optional[float] = None,
         pass_slots: int = 0,
+        pass_plan: Optional[Dict[int, np.ndarray]] = None,
     ):
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
@@ -613,6 +614,7 @@ class STDAN3IntACCAdapter:
             merge_first=merge_first,
             pass_margin=pass_margin,
             pass_slots=pass_slots,
+            pass_plan=pass_plan,
         )
         return {
             "prediction": prediction,

@@ -347,6 +347,14 @@ class NairACCConfig:
     #: ``confidence_chance``; cached feedback QP only; not with ``relative_brake_decel``, ``floor_risk``,
     #: ``accel_lag_tau`` or ``optimize_k``.
     pass_miqp_margin: Optional[float] = None
+    #: ``passnocap`` (2026-11-04, maintainer's request after the ``passmiqp`` result): no acceleration cap
+    #: on the pass branch.  The pass is then bounded by the design's own limits only (a <= a_max, |j| <=
+    #: jerk_limit, v <= v_max), so the MIQP may plan to accelerate past a merging car; the pass row stays
+    #: hard, so an unreachable pass still yields.  The candidate pre-filter then tests the pass row's
+    #: reachability against the ego's **maximum-acceleration** displacement (``acc_postprocess.
+    #: pass_maxacc_displacement``, through ``build_multitarget_lead_prediction(pass_plan=)``); the far-behind
+    #: rule keeps the no-acceleration displacement.  Needs ``pass_miqp_margin``.  ``False`` is the cap.
+    pass_miqp_no_cap: bool = False
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -480,6 +488,8 @@ class NairACCConfig:
                 raise ValueError("pass_miqp_margin (passmiqp<m>) is not implemented with relbrake<b> or floorrisk<eps>")
             if self.accel_lag_tau is not None or self.optimize_k:
                 raise ValueError("pass_miqp_margin (passmiqp<m>) is not implemented with alag<tau> or with_k")
+        if self.pass_miqp_no_cap and self.pass_miqp_margin is None:
+            raise ValueError("pass_miqp_no_cap (passnocap) needs pass_miqp_margin (passmiqp<m>)")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -1063,8 +1073,9 @@ class NairACCSolution:
     failsafe_entrant_margin: float = float("nan")
     #: ``passmiqp`` only: the candidate hypotheses of this solve with their decision (dicts: vehicle_id, label,
     #: entry_step, entry_gap_m, slot, ``pass``: True where z = 0; empty without a candidate or after a fallback),
-    #: how many were passed, the largest planned acceleration over the capped steps of the passed candidates'
-    #: cells (NaN without a pass; above 0 only where a_0 > 0 was kept), the MIQP's own solver wall time [s]
+    #: how many were passed, the largest planned acceleration over the steps before the pass step of the passed
+    #: candidates' cells (NaN without a pass; with the cap above 0 only where a_0 > 0 was kept, with
+    #: ``passnocap`` the acceleration the pass plans), the MIQP's own solver wall time [s]
     #: and Gurobi's simplex/barrier iteration count (NaN / -1 when the tick solved the plain QP; the node count
     #: is not exposed by CasADi's interface).
     pass_decisions: Optional[List[dict]] = None
@@ -2704,6 +2715,7 @@ class NairACCSMPC:
             bool(self.config.failsafe_recovery),
             self._entrant_rows(),
             self._pass_rows(),
+            bool(self.config.pass_miqp_no_cap),
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
 
@@ -2851,12 +2863,14 @@ class NairACCSMPC:
                 used[slot] = float(np.any(cand))
                 opti.set_value(problem.pass_cand_params[slot], cand.astype(float))
                 opti.set_value(problem.pass_row_params[slot], row_mask)
-                opti.set_value(problem.pass_cap_mask_params[slot], cap_mask)
+                if problem.pass_cap_mask_params is not None:      # the cap (not with passnocap)
+                    opti.set_value(problem.pass_cap_mask_params[slot], cap_mask)
             for cand in prediction.pass_candidates or []:
                 if self._pass_last.get((int(cand["vehicle_id"]), str(cand["label"])), False):
                     pass_initial[int(cand["slot"])] = 0.0
             opti.set_value(problem.pass_used_param, used)
-            opti.set_value(problem.pass_cap_param, max(float(self._ego_accel), 0.0))
+            if problem.pass_cap_param is not None:
+                opti.set_value(problem.pass_cap_param, max(float(self._ego_accel), 0.0))
             next_active = np.asarray(prediction.next_active_mask, dtype=bool)
             next_lead_s = np.asarray(prediction.next_means[:, :, 0], dtype=float).copy()
             next_lead_s[~next_active] = float(np.asarray(x0, dtype=float).reshape(-1)[0] + INACTIVE_LEAD_OFFSET_M)
@@ -3115,12 +3129,15 @@ class NairACCSMPC:
         pass_cand_params = pass_row_params = pass_cap_mask_params = None
         pass_used_param = pass_cap_param = None
         next_lead_s_param = next_tightening_param = next_clearance_scale_param = next_mask_param = None
+        pass_no_cap = bool(self.config.pass_miqp_no_cap)
         if pass_rows:
             pass_cand_params = [opti.parameter(num_modes, horizon + 1) for _ in range(PASS_MIQP_SLOTS)]
             pass_row_params = [opti.parameter(num_modes, horizon + 1) for _ in range(PASS_MIQP_SLOTS)]
-            pass_cap_mask_params = [opti.parameter(num_modes, horizon) for _ in range(PASS_MIQP_SLOTS)]
+            # passnocap: no cap rows, so no cap parameters either (the problem is the one without them)
+            pass_cap_mask_params = (None if pass_no_cap
+                                    else [opti.parameter(num_modes, horizon) for _ in range(PASS_MIQP_SLOTS)])
             pass_used_param = opti.parameter(PASS_MIQP_SLOTS)
-            pass_cap_param = opti.parameter()
+            pass_cap_param = None if pass_no_cap else opti.parameter()
             next_lead_s_param = opti.parameter(num_modes, horizon + 1)
             next_tightening_param = opti.parameter(num_modes, horizon + 1)
             next_clearance_scale_param = opti.parameter(num_modes, horizon + 1)
@@ -3394,6 +3411,8 @@ class NairACCSMPC:
                         row_mask += pass_row_params[slot][mode, step]
                     opti.subject_to(pass_row + PASS_MIQP_BIG_M * pass_z_var[slot]
                                     + PASS_MIQP_BIG_M * (1.0 - row_mask) >= 0.0)
+                    if pass_no_cap:
+                        continue        # passnocap: the pass is bounded by the design's own limits only
                     for step in range(horizon):
                         opti.subject_to(inputs[step] <= pass_cap_param + accel_m * pass_z_var[slot]
                                         + accel_m * (1.0 - pass_cap_mask_params[slot][mode, step]))

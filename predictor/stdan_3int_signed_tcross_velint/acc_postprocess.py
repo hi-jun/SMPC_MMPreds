@@ -1178,6 +1178,35 @@ def pass_cap_displacement(horizon, dt, ego_speed, ego_accel, v_max):
     return out
 
 
+def pass_maxacc_displacement(horizon, dt, ego_speed, ego_accel, v_max, a_max, jerk_limit):
+    """``passnocap``: the farthest the ego can be at each step ``k * dt`` (k = 0..horizon) under the design's
+    own limits, from its current speed and acceleration: the jerk at ``jerk_limit`` (unbounded if None) until
+    the acceleration reaches ``a_max``, then ``a_max``, on the controller's grid (the jerk held over each step,
+    the exact triple integrator), the speed capped at ``v_max`` (the step that reaches it ends at ``v_max``
+    with the acceleration set to 0, which slightly over-states the position: an upper bound, which is all the
+    candidate pre-filter needs).  The pre-filter of ``build_multitarget_lead_prediction(pass_plan=)`` reads a
+    hypothesis's entry gap against it: without the cap the pass row can be met only if the ego can be ahead of
+    the vehicle's rear at the entry step while accelerating at most this hard."""
+    dt = float(dt)
+    v, a, s = float(ego_speed), float(ego_accel), 0.0
+    out = np.zeros(int(horizon) + 1)
+    for k in range(1, int(horizon) + 1):
+        if v >= float(v_max):
+            s += float(v_max) * dt         # at the bound: held there
+            out[k] = s
+            continue
+        a_next = float(a_max) if jerk_limit is None else min(a + float(jerk_limit) * dt, float(a_max))
+        a_next = max(a_next, a)        # never below the current acceleration (a_0 above a_max stays)
+        j = (a_next - a) / dt
+        s += v * dt + 0.5 * a * dt ** 2 + j * dt ** 3 / 6.0
+        v_next = v + a * dt + 0.5 * j * dt ** 2
+        if v_next >= float(v_max):
+            v_next, a_next = float(v_max), 0.0
+        v, a = v_next, a_next
+        out[k] = s
+    return out
+
+
 def _lead_sequence_name(effective_lead_keys):
     """``leadmerge``: a scenario class's name, its leads in order ("<vehicle>:<label>+...", the joint-mode
     names' format that ``entry_ego_displacement`` reads; a lead is listed again when it leads again after
@@ -1297,8 +1326,15 @@ def build_multitarget_lead_prediction(
     merge_first: bool = False,
     pass_margin: Optional[float] = None,
     pass_slots: int = 0,
+    pass_plan: Optional[Dict[int, np.ndarray]] = None,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
+
+    ``pass_plan`` (``passnocap``) is the displacement the candidate test reads in place of ``entry_plan``
+    (the ego's maximum-acceleration displacement, ``pass_maxacc_displacement``): a hypothesis is a candidate
+    when its entry gap under ``pass_plan`` is at most ``-pass_margin`` (the pass row can be met by
+    accelerating at most that hard), while the far-behind exclusion keeps ``entry_plan``'s gap; the decision
+    lists it as ``pass_gap_m``, and the slots go by it.  None reads ``entry_plan`` for both (the cap's case).
 
     ``pass_margin`` (``passmiqp<m>``, 2026-11-04) makes the entry test a pre-filter for the MIQP's pass /
     yield binaries instead of a decision: ``entry_plan`` is then the ego's no-acceleration displacement
@@ -1386,9 +1422,13 @@ def build_multitarget_lead_prediction(
                 decision = {"vehicle_id": int(mode.vehicle_id), "label": str(mode.scenario_label),
                             "entry_step": entry, "entry_gap_m": gap, "excluded": excluded}
                 if pass_margin is not None:
-                    decision.update(candidate=bool(not excluded and gap <= -float(pass_margin)), slot=-1)
+                    pass_disp = None if pass_plan is None else pass_plan.get(int(mode.vehicle_id))
+                    gap_pass = gap if pass_disp is None else (
+                        float(mode.frenet[entry, 0]) - (ego_s + float(pass_disp[entry])) - float(entry_clearance))
+                    decision.update(candidate=bool(not excluded and gap_pass <= -float(pass_margin)), slot=-1,
+                                    pass_gap_m=gap_pass)
                     if decision["candidate"]:
-                        candidates.append((gap, len(entry_decisions), mode))
+                        candidates.append((gap_pass, len(entry_decisions), mode))
                 entry_decisions.append(decision)
         # passmiqp: the slots go to the candidates nearest the ego's front (the most marginal); the rest pass
         # without a row, as a far-behind entry does

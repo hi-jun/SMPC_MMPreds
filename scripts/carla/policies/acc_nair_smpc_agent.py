@@ -62,6 +62,7 @@ from predictor.stdan_3int_signed_tcross_velint.acc_postprocess import (
     decision_point_branch_step,
     entry_ego_displacement,
     pass_cap_displacement,
+    pass_maxacc_displacement,
 )
 from predictor.stdan_vel.acc_adapter import STDANVelACCAdapter
 from predictor.lstm.acc_adapter import LSTMACCAdapter
@@ -164,6 +165,11 @@ class ACCNairSMPCAgent(object):
                 raise ValueError("passmiqp needs the stdan_3int predictor")
             if not self.cutin_chance_ref or self.standoff_shortfall_weight is None:
                 raise ValueError("passmiqp needs cutin_chance<beta_ref> and dopt<w>")
+        # passnocap (2026-11-04): no acceleration cap on the pass branch; the candidate test reads the
+        # maximum-acceleration displacement
+        self.pass_no_cap = self._parse_pass_no_cap(smpc_config)
+        if self.pass_no_cap and self.pass_miqp_margin is None:
+            raise ValueError("passnocap needs passmiqp<m>")
         self.lead_merge = self._parse_lead_merge(smpc_config)
         if self.lead_merge and self.predictor_type != "stdan_3int":
             raise ValueError("leadmerge needs the stdan_3int predictor")
@@ -276,6 +282,7 @@ class ACCNairSMPCAgent(object):
             raise ValueError("lkrsigma needs lksigma")
         self.controller_config.standoff_shortfall_cell_price = self.standoff_shortfall_cell_price
         self.controller_config.pass_miqp_margin = self.pass_miqp_margin
+        self.controller_config.pass_miqp_no_cap = self.pass_no_cap
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
@@ -980,6 +987,12 @@ class ACCNairSMPCAgent(object):
             entry_plan = {int(vid): displacement for vid in target_states.keys()}
             entry_margin = PASS_MIQP_FAR_BEHIND_M
             pass_kw = {"pass_margin": self.pass_miqp_margin, "pass_slots": PASS_MIQP_SLOTS}
+            if self.pass_no_cap:
+                # passnocap: the candidate test against the maximum-acceleration displacement
+                reach = pass_maxacc_displacement(
+                    self.N, self.DT, speed, self._prev_accel_cmd, self.controller_config.v_max,
+                    self.controller_config.a_max, self.controller_config.jerk_limit)
+                pass_kw["pass_plan"] = {int(vid): reach for vid in target_states.keys()}
         elif self.entry_pass:
             now_s = self._elapsed_seconds()
             previous = self._entry_previous_plan
@@ -1998,6 +2011,16 @@ class ACCNairSMPCAgent(object):
         if match is None:
             return None
         return float(match.group(1)) if match.group(1) else 0.0
+
+    @staticmethod
+    def _parse_pass_no_cap(smpc_config):
+        """Read ``passnocap`` from the config string (default: off).
+
+        With ``passmiqp<m>``: no acceleration cap on the pass branch, so the MIQP may plan to accelerate past
+        a merging car within the design's own limits; the candidate test reads the maximum-acceleration
+        displacement (``NairACCConfig.pass_miqp_no_cap``, 2026-11-04). Whole-token match.
+        """
+        return re.search(r"(?:^|_)passnocap(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_lk_entry_as_cutin(smpc_config):
