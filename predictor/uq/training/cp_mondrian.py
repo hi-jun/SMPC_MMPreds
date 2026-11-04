@@ -125,6 +125,21 @@ def evaluate(p_te, y_te, group_te, thresholds, default_thr):
     return covered, keep.sum(1)
 
 
+def evaluate_class_conditional(p_te, y_te, thresholds, default_thr):
+    """Coverage / set size under a per-class threshold (Mondrian by true class).
+
+    Each candidate class is kept iff its score is at or below that class's own
+    threshold; ``evaluate`` with the true class as the group tests every
+    candidate against the true class's threshold, which gets the coverage
+    right but the set size wrong.
+    """
+    s = lac_scores(p_te)                                  # (N, 3)
+    thr = np.array([thresholds.get(c, default_thr) for c in range(s.shape[1])])
+    keep = s <= thr[None, :]
+    covered = keep[np.arange(len(y_te)), y_te]
+    return covered, keep.sum(1)
+
+
 def report_by(name, groups_te, covered, sizes, y_te, p_te, labels_map):
     rows = []
     for g in sorted(set(groups_te.tolist())):
@@ -213,7 +228,7 @@ if __name__ == "__main__":
 
     # ---------------- 2. Mondrian by true class ----------------------------
     thr_cls = {c: quantile_threshold(s_cal[y_cal == c], alpha) for c in range(3)}
-    cov_c, sz_c = evaluate(p_te, y_te, y_te, thr_cls, thr_marg)
+    cov_c, sz_c = evaluate_class_conditional(p_te, y_te, thr_cls, thr_marg)
     print(f"\n[2] Mondrian - 정답 클래스별 분위수 "
           f"(임계 {', '.join(f'{CLASS_NAMES[c]} {thr_cls[c]:.3f}' for c in range(3))})")
     out["mondrian_class"] = report_by(
