@@ -191,6 +191,11 @@ class ACCNairSMPCAgent(object):
                 raise ValueError("occin<eps> needs trajcutin")
             raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
                              "(lane_membership_prob_fn); the CARLA agent has none (NGSIM replay only)")
+        # pcal (2026-11-05): the calibration maps are fitted on natural NGSIM traffic and read NGSIM's lateral
+        # features; the replay applies them, and CARLA has neither a map nor those features
+        if self._parse_probability_calibration(smpc_config):
+            raise ValueError("pcal's calibration maps are fitted on NGSIM traffic (NGSIM replay only); "
+                             "CARLA has no map")
         # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
         self._entry_previous_plan = None
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
@@ -1881,6 +1886,17 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"(?:^|_)occin([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
         return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_probability_calibration(smpc_config):
+        """Read ``pcal`` from the config string (default: off).
+
+        Every target's intention probabilities are replaced, before the mode mapping, by calibrated probabilities of
+        each lane change within 3 s from the predictor's probability and the vehicle's measured lateral state
+        (``acc_postprocess.calibrate_intention_probabilities``), with maps fitted on natural NGSIM traffic
+        (2026-11-05). NGSIM replay only. Whole-token match.
+        """
+        return re.search(r"(?:^|_)pcal(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_cutin_cvar(smpc_config):

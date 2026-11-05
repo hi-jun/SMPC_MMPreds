@@ -523,6 +523,7 @@ class STDAN3IntACCAdapter:
         pass_plan: Optional[Dict[int, np.ndarray]] = None,
         lane_membership_prob_fn: Optional[Callable[[int, np.ndarray, Optional[np.ndarray]], np.ndarray]] = None,
         occupancy_risk: Optional[float] = None,
+        intention_calibration: Optional[Callable[[int, np.ndarray], np.ndarray]] = None,
     ):
         """``occupancy_risk`` (``occin<eps>``, 2026-11-05) needs ``lane_membership_prob_fn(target_id,
         sampled_raw_traj_xy, sampled_raw_position_cov)``: per raw trajectory and step 0..N the probability
@@ -530,7 +531,12 @@ class STDAN3IntACCAdapter:
         2-D position covariance in the same global frame (``raw_position_cov_global`` sampled like the
         trajectory; None when the model gives none).  The rows keep the longitudinal variance only
         (``_lead_covariance_from_frenet_moments``); the lateral one is used for this test alone.  Only
-        adjacent targets are tested (``process_vehicle_prediction``)."""
+        adjacent targets are tested (``process_vehicle_prediction``).
+
+        ``intention_calibration`` (``pcal``, 2026-11-05): ``f(target_id, raw_intention_prob)`` returns the
+        calibrated intention probabilities that every step below reads (the caller's map,
+        ``acc_postprocess.calibrate_intention_probabilities``); the predictor's own stay in
+        ``raw_intention_prob_uncal``.  None leaves them as the predictor gave them."""
         if occupancy_risk is not None and lane_membership_prob_fn is None:
             raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
                              "(lane_membership_prob_fn)")
@@ -538,6 +544,10 @@ class STDAN3IntACCAdapter:
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
         processed = []
         for target_id, raw in raw_predictions.items():
+            if intention_calibration is not None:
+                # a new array: the IAIMM-KF's raw probabilities are its filter state
+                raw["raw_intention_prob_uncal"] = np.array(raw["raw_intention_prob"], dtype=float)
+                raw["raw_intention_prob"] = intention_calibration(int(target_id), raw["raw_intention_prob_uncal"])
             # All modes and steps in one pass; the nearest reference sample is
             # found once per point and reused for the covariance rotations.
             traj_frenet, psi_nearest = global_to_frenet_points(raw["raw_traj_xy"], frenet_handler)

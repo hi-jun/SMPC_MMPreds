@@ -380,6 +380,78 @@ def mix_cutin_probability(
     return probs, info
 
 
+def restricted_cubic_spline(x: float, knots: Sequence[float]) -> np.ndarray:
+    """Harrell's restricted cubic spline basis ``[x, f_1(x), .., f_{K-2}(x)]`` of a scalar ``x``: cubic between
+    the knots, linear beyond the outer two, the nonlinear terms scaled by ``(t_K - t_1)^2``."""
+    k = np.asarray(knots, dtype=float)
+    x = float(x)
+    cols = [x]
+    for j in range(k.size - 2):
+        cols.append((max(x - k[j], 0.0) ** 3
+                     - max(x - k[-2], 0.0) ** 3 * (k[-1] - k[j]) / (k[-1] - k[-2])
+                     + max(x - k[-1], 0.0) ** 3 * (k[-2] - k[j]) / (k[-1] - k[-2])) / (k[-1] - k[0]) ** 2)
+    return np.asarray(cols, dtype=float)
+
+
+def calibrated_lane_change_probability(probability: float, offset_m: float, lateral_speed_mps: Optional[float],
+                                       moved_toward: bool, moved_away: bool, side_map: dict) -> float:
+    """``pcal``: one side's probability that the vehicle changes lanes toward that side within 3 s, from the
+    predictor's probability of that lane change and the vehicle's measured lateral state, all signed toward the
+    side: the logistic model ``side_map`` (``load_probability_calibration``) on ``z = logit p``, the offset from the
+    own lane centre [m] and the lateral speed [m/s] (restricted cubic splines), the net lane change over the last
+    3 s toward / away from the side, and ``z`` times each of the four (an unknown offset or speed reads as 0)."""
+    p = float(np.clip(probability, *side_map["p_clip"]))
+    z = np.log(p / (1.0 - p))
+    o = float(np.clip(offset_m if np.isfinite(offset_m) else 0.0, *side_map["o_clip"]))
+    v = float(np.clip(0.0 if lateral_speed_mps is None else lateral_speed_mps, *side_map["v_clip"]))
+    toward, away = float(moved_toward), float(moved_away)
+    x = np.concatenate((restricted_cubic_spline(z, side_map["z_knots"]),
+                        restricted_cubic_spline(o, side_map["o_knots"]),
+                        restricted_cubic_spline(v, side_map["v_knots"]),
+                        [toward, away, z * o, z * v, z * toward, z * away]))
+    eta = float(((x - side_map["mu"]) / side_map["sd"]) @ side_map["coef"] + side_map["b"])
+    return float(1.0 / (1.0 + np.exp(-eta)))
+
+
+def calibrate_intention_probabilities(raw_probs: Sequence[float], calibration: Dict[str, dict], offset_m: float,
+                                      lateral_speed_mps: Optional[float], lane_change: int, has_left: bool,
+                                      has_right: bool) -> np.ndarray:
+    """``pcal`` (2026-11-05): the intention probabilities (LK, LLC, RLC) replaced by the calibrated probabilities
+    of each lane change within 3 s (``calibrated_lane_change_probability`` with the side's map of
+    ``calibration``), lane keeping taking the rest; 0 toward a side without a lane.  ``offset_m``,
+    ``lateral_speed_mps`` and ``lane_change`` (the net lane-index change over the last 3 s) are signed toward
+    RLC's side (NGSIM: larger Local_X, higher Lane_ID).  The predictor's probabilities are odds-inflated by its
+    balanced training set and over-confident (``replay_out/pcal_reliability_20261105/``), so every probability
+    threshold of the design means something else on this scale."""
+    probs = normalize_probabilities(raw_probs)
+    q = []
+    for idx, sign, has in ((1, -1.0, has_left), (2, 1.0, has_right)):
+        if not has:
+            q.append(0.0)
+            continue
+        q.append(calibrated_lane_change_probability(
+            probs[idx], sign * float(offset_m), None if lateral_speed_mps is None else sign * float(lateral_speed_mps),
+            sign * lane_change > 0, sign * lane_change < 0, calibration[INTENTION_NAMES[idx]]))
+    total = q[0] + q[1]
+    if total > 1.0:
+        q, total = [qi / total for qi in q], 1.0
+    return np.array([1.0 - total, q[0], q[1]], dtype=float)
+
+
+def load_probability_calibration(path, recording: Optional[int] = None) -> Dict[str, dict]:
+    """``pcal``: the per-side maps of a calibration file (``LLC`` / ``RLC``), as fitted without NGSIM recording
+    ``recording`` (cross-fitting: an episode of that recording reads a map that never saw it) or on every
+    recording (None)."""
+    import json
+    data = json.loads(open(path).read())
+    out = {}
+    for side in ("LLC", "RLC"):
+        fit = data[side]["all"] if recording is None else data[side]["folds"][str(int(recording))]
+        out[side] = dict(data["design"], **{k: (np.asarray(v, dtype=float) if isinstance(v, list) else v)
+                                            for k, v in fit.items()})
+    return out
+
+
 def _mode_specs_for_relation(
     relation: str,
     raw_probs: np.ndarray,
