@@ -876,6 +876,31 @@ def gate_unlikely_cutin_modes(
     return gated
 
 
+def occupancy_memberships(
+    memberships: np.ndarray,
+    lane_probabilities: np.ndarray,
+    raw_probs: np.ndarray,
+    risk: float,
+) -> np.ndarray:
+    """``occin<eps>`` (2026-11-05): an adjacent vehicle's per-trajectory ego-path occupancy by the
+    total-probability bound on a floor breach by that hypothesis.
+
+    ``lane_probabilities[i, k]`` is ``P_in,i(k)``, the probability that the vehicle's body overlaps the
+    ego's path laterally at step k if it follows raw trajectory i (the caller's Gaussian test on the
+    predicted lateral mean and std); ``raw_probs[i]`` is that trajectory's probability ``p_i``.  The
+    probability that hypothesis i breaches the floor at step k is at most ``p_i * P_in,i(k)``, so a step
+    k >= 1 is in iff ``p_i * P_in,i(k) > risk``: an unlikely hypothesis switches on later or never, a
+    likely one as soon as its lateral spread reaches the path.  With ``p_i <= risk`` it is never in, so
+    ``risk`` = 0.1 contains the 0.1 activation gate as its limit.  Step 0 keeps the measured test
+    (``memberships[:, 0]``, the lane the vehicle is in now).  Returns a new array.
+    """
+    out = np.asarray(memberships, dtype=bool).copy()
+    pin = np.asarray(lane_probabilities, dtype=float)
+    probs = np.asarray(raw_probs, dtype=float).reshape(-1)[: out.shape[0]]
+    out[:, 1:] = probs[:, None] * np.nan_to_num(pin[:, 1:], nan=0.0) > float(risk)
+    return out
+
+
 def process_vehicle_prediction(
     raw_prediction: dict,
     relation_to_ego_lane: str,
@@ -906,9 +931,19 @@ def process_vehicle_prediction(
     lk_sigma: bool = False,
     full_footprint: bool = False,
     lk_hold: bool = False,
+    mode_lane_probabilities: Optional[np.ndarray] = None,
+    occupancy_risk: Optional[float] = None,
 ) -> ACCProcessedPrediction:
+    """``occupancy_risk`` (``occin<eps>``, 2026-11-05): for an adjacent vehicle the per-trajectory occupancy
+    at steps 1.. is ``occupancy_memberships`` (``p_i * P_in,i(k) > eps``, with ``mode_lane_probabilities``
+    the caller's ``P_in``) in place of ``mode_lane_memberships``' mean-trajectory test, so every downstream
+    rule (``trajcutin``'s entering trajectories, the active masks, ``entrypass``) reads it; the 0.1 gate is
+    not applied (``eps`` replaces it).  Needs ``lk_entry_as_cutin``; ego-lane and other vehicles are
+    unchanged."""
     if no_cutout and use_trajectory_aware_cutin_mapping:
         raise ValueError("nocutout acts on the default mapping, not the trajectory-aware one")
+    if occupancy_risk is not None and not lk_entry_as_cutin:
+        raise ValueError("occin<eps> needs trajcutin (lk_entry_as_cutin): it generalises its entering-trajectory rule")
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     context_trust_info = None
     if context_trust is not None:
@@ -963,6 +998,30 @@ def process_vehicle_prediction(
             memberships[mode] = lane_occupancy_from_d(mode_sd, ego_lane_d, ego_lane_threshold)
         else:
             memberships[mode] = provided_memberships[mode]
+
+    occupancy_info = None
+    if occupancy_risk is not None and relation_to_ego_lane in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT):
+        # occin<eps>: the probabilistic occupancy replaces the mean-trajectory test at steps 1..
+        if mode_lane_probabilities is None:
+            raise ValueError("occin<eps> needs the per-step ego-path occupancy probabilities (mode_lane_probabilities)")
+        lane_probabilities = np.asarray(mode_lane_probabilities, dtype=float)
+        if lane_probabilities.shape != memberships.shape:
+            raise ValueError(
+                f"mode_lane_probabilities must have shape {memberships.shape}, got {lane_probabilities.shape}")
+        mean_memberships = memberships.copy()
+        memberships = occupancy_memberships(memberships, lane_probabilities, raw_probs, occupancy_risk)
+        # against today's rule (trajcutin: every entering trajectory is a cut-in mode, active where the mean
+        # trajectory is in and its probability passes the gate), per trajectory and step 1..
+        today = mean_memberships[:, 1:] & (raw_probs[: memberships.shape[0], None]
+                                           >= float(cutin_probability_threshold))
+        occin = memberships[:, 1:]
+        occupancy_info = {
+            "risk": float(occupancy_risk),
+            "mode_lane_probability": lane_probabilities,
+            "mode_lane_membership_mean": mean_memberships,
+            "activated": int(np.sum(occin & ~today)),
+            "suppressed": int(np.sum(today & ~occin)),
+        }
 
     ego_lane_membership_split_step = ego_lane_membership_split_step_from_mask(memberships)
     trajectory_mode_specs, trajectory_cutin_raw_idx = _trajectory_aware_mode_specs(
@@ -1020,7 +1079,8 @@ def process_vehicle_prediction(
             mode.probability = float(norm[idx])
 
     gated_cutin_modes = gate_unlikely_cutin_modes(
-        mode_predictions, cutin_probability_threshold
+        # occin<eps>: the occupancy bound replaces the gate (p <= eps never activates)
+        mode_predictions, cutin_probability_threshold if occupancy_risk is None else 0.0
     )
     cutin_clearance_scales = ramp_cutin_clearance(
         mode_predictions, cutin_clearance_ramp_ref
@@ -1064,6 +1124,7 @@ def process_vehicle_prediction(
             "lk_sigma": bool(lk_sigma),
             "full_footprint": bool(full_footprint),
             "lk_hold": bool(lk_hold),
+            "occupancy": occupancy_info,
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),

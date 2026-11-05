@@ -11,7 +11,9 @@ from predictor.stdan.stdan_predictor import M2FT, FT2M, transform_points
 from predictor.stdan_3int_signed_tcross_velint.configs.config_3int_signed_tcross import args as BASE_ARGS
 
 from .acc_postprocess import (
+    REL_LEFT_ADJACENT,
     REL_OTHER,
+    REL_RIGHT_ADJACENT,
     build_multitarget_lead_prediction,
     global_to_frenet_points,
     process_vehicle_prediction,
@@ -519,7 +521,19 @@ class STDAN3IntACCAdapter:
         pass_margin: Optional[float] = None,
         pass_slots: int = 0,
         pass_plan: Optional[Dict[int, np.ndarray]] = None,
+        lane_membership_prob_fn: Optional[Callable[[int, np.ndarray, Optional[np.ndarray]], np.ndarray]] = None,
+        occupancy_risk: Optional[float] = None,
     ):
+        """``occupancy_risk`` (``occin<eps>``, 2026-11-05) needs ``lane_membership_prob_fn(target_id,
+        sampled_raw_traj_xy, sampled_raw_position_cov)``: per raw trajectory and step 0..N the probability
+        that the vehicle's body overlaps the ego's path, from the sampled predicted positions and their
+        2-D position covariance in the same global frame (``raw_position_cov_global`` sampled like the
+        trajectory; None when the model gives none).  The rows keep the longitudinal variance only
+        (``_lead_covariance_from_frenet_moments``); the lateral one is used for this test alone.  Only
+        adjacent targets are tested (``process_vehicle_prediction``)."""
+        if occupancy_risk is not None and lane_membership_prob_fn is None:
+            raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
+                             "(lane_membership_prob_fn)")
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
         processed = []
@@ -557,6 +571,16 @@ class STDAN3IntACCAdapter:
             if lane_membership_fn is not None:
                 mode_lane_memberships = lane_membership_fn(int(target_id), raw["sampled_raw_traj_xy"])
                 lane_membership_source = "carla_waypoint"
+            mode_lane_probabilities = None
+            if occupancy_risk is not None and target_relations.get(target_id) in (REL_LEFT_ADJACENT,
+                                                                                  REL_RIGHT_ADJACENT):
+                # occin<eps>: the 2-D position covariance at the same samples as the trajectory
+                position_cov = raw.get("raw_position_cov_global")
+                raw["sampled_raw_position_cov_global"] = (
+                    None if position_cov is None
+                    else self._sample_future(np.asarray(position_cov, dtype=float), horizon, controller_dt))
+                mode_lane_probabilities = lane_membership_prob_fn(
+                    int(target_id), raw["sampled_raw_traj_xy"], raw["sampled_raw_position_cov_global"])
             processed.append(
                 process_vehicle_prediction(
                     raw,
@@ -595,6 +619,8 @@ class STDAN3IntACCAdapter:
                     lk_sigma=lk_sigma,
                     full_footprint=full_footprint,
                     lk_hold=lk_hold,
+                    mode_lane_probabilities=mode_lane_probabilities,
+                    occupancy_risk=occupancy_risk,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

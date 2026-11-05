@@ -179,6 +179,18 @@ class ACCNairSMPCAgent(object):
         self.lk_hold = self._parse_lk_hold(smpc_config)
         if self.lk_hold and self.predictor_type != "stdan_3int":
             raise ValueError("lkhold needs the stdan_3int predictor")
+        # occin<eps> (2026-11-05): a cut-in cell is active where p * P(body overlaps the ego's path) > eps, which
+        # needs a probabilistic ego-path test of the predicted trajectories (predict_acc(lane_membership_prob_fn=));
+        # only the NGSIM replay has one, and inside the agent a predictor exception would be swallowed silently
+        # (the synthetic prediction, AGENTS.md 8.12), so the token is refused here
+        self.occupancy_risk = self._parse_occupancy_risk(smpc_config)
+        if self.occupancy_risk is not None:
+            if self.predictor_type != "stdan_3int":
+                raise ValueError("occin<eps> needs the stdan_3int predictor")
+            if not self.lk_entry_as_cutin:
+                raise ValueError("occin<eps> needs trajcutin")
+            raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
+                             "(lane_membership_prob_fn); the CARLA agent has none (NGSIM replay only)")
         # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
         self._entry_previous_plan = None
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
@@ -283,6 +295,13 @@ class ACCNairSMPCAgent(object):
         self.controller_config.standoff_shortfall_cell_price = self.standoff_shortfall_cell_price
         self.controller_config.pass_miqp_margin = self.pass_miqp_margin
         self.controller_config.pass_miqp_no_cap = self.pass_no_cap
+        # cvar<eps>_<c> (2026-11-05): a CVaR bound on the cut-in chance cells' shortfall in place of their price
+        cutin_cvar = self._parse_cutin_cvar(smpc_config)
+        if cutin_cvar is not None and not self.full_footprint:
+            # its hard floor is fullfoot's L + d0 + q(beta_j) sigma (with cutin_chance<beta_ref> and dopt<w>)
+            raise ValueError("cvar<eps>_<c> needs fullfoot (with cutin_chance<beta_ref> and dopt<w>)")
+        self.controller_config.cutin_cvar_risk, self.controller_config.cutin_cvar_bound = (
+            (None, None) if cutin_cvar is None else cutin_cvar)
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
@@ -1849,6 +1868,31 @@ class ACCNairSMPCAgent(object):
         match.
         """
         return re.search(r"(?:^|_)lkhold(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_occupancy_risk(smpc_config):
+        """Read ``occin<eps>`` from the config string (default: off, ``None``).
+
+        A cut-in hypothesis's cell at step k >= 1 is active iff ``p_j * P_in,j(k) > eps``, ``P_in,j(k)`` the
+        probability that the vehicle's body overlaps the ego's path laterally at step k under trajectory j
+        (``acc_postprocess.occupancy_memberships``), in place of the mean-trajectory lane test and the 0.1
+        gate (2026-11-05). ``occin0.1`` reads as 0.1. Needs ``stdan_3int``, ``trajcutin`` and a probabilistic
+        lane test, which only the NGSIM replay has. Whole-token match.
+        """
+        match = re.search(r"(?:^|_)occin([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_cutin_cvar(smpc_config):
+        """Read ``cvar<eps>_<c>`` from the config string (default: off, ``None``), as ``(eps, c)``.
+
+        The dopt price on the cut-in chance cells' shortfall replaced by the CVaR bound
+        ``CVaR_eps(short_k) <= c`` [m] per step over the scenarios (``NairACCConfig.cutin_cvar_risk`` /
+        ``cutin_cvar_bound``, 2026-11-05). ``cvar0.5_2`` reads as (0.5, 2.0). Needs ``cutin_chance<beta_ref>``,
+        ``dopt<w>`` and ``fullfoot``. Whole-token match (both parts).
+        """
+        match = re.search(r"(?:^|_)cvar([0-9]*\.?[0-9]+)_([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return (float(match.group(1)), float(match.group(2))) if match else None
 
     @staticmethod
     def _parse_intention_lpf_s(smpc_config):

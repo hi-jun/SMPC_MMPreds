@@ -355,6 +355,26 @@ class NairACCConfig:
     #: pass_maxacc_displacement``, through ``build_multitarget_lead_prediction(pass_plan=)``); the far-behind
     #: rule keeps the no-acceleration displacement.  Needs ``pass_miqp_margin``.  ``False`` is the cap.
     pass_miqp_no_cap: bool = False
+    #: ``cvar<eps>_<c>`` (2026-11-05, maintainer): on the cut-in chance cells (active, finite
+    #: ``chance_confidence``: ``cutin`` and ``trajcutin``'s ``cutin/LK``) the ``dopt`` price
+    #: ``w * P_j * short_jk^2`` is replaced by a CVaR bound per step over the scenarios,
+    #: ``CVaR_eps(short_k) <= c`` [m] with the scenario probabilities the QP weights (``P_j``, leadmerge /
+    #: mergefirst class probabilities), in Rockafellar-Uryasev form: ``eta_k >= 0``, ``s_jk >= 0``,
+    #: ``s_jk >= short_jk - eta_k`` on those cells, ``eta_k + (1 / eps) sum_j P_j s_jk <= c + xi_k`` (scenarios
+    #: without such a cell at k contribute 0; ``eta_k >= 0`` is exact since the shortfall is >= 0).  A lone
+    #: hypothesis may then give up ``c * max(1, eps / P_j)`` of its time gap (capped at ``tau v``); the hard
+    #: floor ``L + d0 + q(beta_j) sigma`` (``fullfoot``) stays.  ``xi_k >= 0`` is the emergency slack of the
+    #: row, priced like the safety rows' (``slack_l1_weight``, else ``slack_weight * xi^2``), so the rows never
+    #: make the QP infeasible.  ``lkr``'s priced lane-keeping cells keep the price.  Ticks without a cut-in
+    #: chance cell solve the design's QP bit for bit (a separate cache entry, ``_cvar_rows``).  With no price
+    #: the solver's shortfall is not unique where the row does not bind, so after the solve the CVaR cells'
+    #: shortfall is the least the plan needs (``max(0, deficit - xi)``, at most the solver's), which is what a
+    #: priced cell's shortfall is at its optimum; the remembered standoff and the margins use it.  ``None`` is
+    #: off (both fields together).  Needs ``standoff_shortfall_weight`` under ``confidence_chance`` (and the
+    #: agent's ``fullfoot``); cached feedback QP only; not with ``relative_brake_decel``, ``floor_risk`` or
+    #: ``pass_miqp_margin``.
+    cutin_cvar_risk: Optional[float] = None
+    cutin_cvar_bound: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -490,6 +510,21 @@ class NairACCConfig:
                 raise ValueError("pass_miqp_margin (passmiqp<m>) is not implemented with alag<tau> or with_k")
         if self.pass_miqp_no_cap and self.pass_miqp_margin is None:
             raise ValueError("pass_miqp_no_cap (passnocap) needs pass_miqp_margin (passmiqp<m>)")
+        if (self.cutin_cvar_risk is None) != (self.cutin_cvar_bound is None):
+            raise ValueError("cutin_cvar_risk and cutin_cvar_bound (cvar<eps>_<c>) are set together")
+        if self.cutin_cvar_risk is not None:
+            if not 0.0 < float(self.cutin_cvar_risk) <= 1.0:
+                raise ValueError("cutin_cvar_risk (cvar<eps>_<c>) must lie in (0, 1]")
+            if not float(self.cutin_cvar_bound) >= 0.0:
+                raise ValueError("cutin_cvar_bound (cvar<eps>_<c>) must be non-negative")
+            if self.standoff_shortfall_weight is None or self.safety_constraint_mode != SAFETY_CONFIDENCE_CHANCE:
+                raise ValueError("cutin_cvar_risk (cvar<eps>_<c>) needs cutin_chance<beta_ref> and dopt<w>")
+            if self.controller_variant == VARIANT_MULTIMODAL_OL:
+                raise ValueError("cutin_cvar_risk (cvar<eps>_<c>) is implemented only in the cached feedback QP")
+            if (self.relative_brake_decel is not None or self.floor_risk is not None
+                    or self.pass_miqp_margin is not None):
+                raise ValueError("cutin_cvar_risk (cvar<eps>_<c>) is not implemented with relbrake<b>, "
+                                 "floorrisk<eps> or passmiqp<m>")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -1083,6 +1118,19 @@ class NairACCSolution:
     pass_accel_max: float = float("nan")
     pass_solve_s: float = float("nan")
     pass_iter_count: int = -1
+    #: ``cvar<eps>_<c>`` only (0 / NaN without it, on ticks that solved the design's QP and after a fallback):
+    #: the CVaR cells (cut-in chance cells) and the steps that carry one; the steps whose bound binds, the exact
+    #: CVaR of the plan's needed shortfall (``shortfall_cvar``) within 1e-3 m of ``c`` or above; the largest such
+    #: CVaR over the steps [m]; the solver's largest ``eta_k`` and ``s_jk`` (not unique where a row does not
+    #: bind); the largest emergency slack of the CVaR rows [m]; and the largest needed shortfall on a CVaR cell [m].
+    cvar_cells: int = 0
+    cvar_rows: int = 0
+    cvar_active_rows: int = 0
+    cvar_max: float = float("nan")
+    cvar_eta_max: float = float("nan")
+    cvar_s_max: float = float("nan")
+    cvar_slack_max: float = float("nan")
+    cvar_short_max: float = float("nan")
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -1214,6 +1262,12 @@ class CachedFeedbackScalarChanceQP:
     next_tightening_param: Any = None
     next_clearance_scale_param: Any = None
     next_mask_param: Any = None
+    #: cvar<eps>_<c>: 1 on the CVaR cells (cut-in chance cells, unpriced), the R-U auxiliaries eta_k and s_jk, and
+    #: the rows' emergency slack per step; None without it (and in the cache entry of ticks without such a cell)
+    cvar_mask_param: Any = None
+    cvar_eta_var: Any = None
+    cvar_s_var: Any = None
+    cvar_slack_var: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -1426,6 +1480,10 @@ class NairACCSMPC:
         self._pass_active = False
         self._pass_result = None
         self._pass_last = {}
+        # cvar<eps>_<c>: whether this solve's prediction has a cut-in chance cell (the CVaR cache entry), and the
+        # cached QP's solved eta, s and row slacks
+        self._cvar_active = False
+        self._cvar_plan = None
         # dopt<w>lkr: vehicles seen with a live cut-in hypothesis, and those of
         # them now followed as the in-lane lead -> ticks the gap has been full.
         self._armed_cutin_vehicles = set()
@@ -1893,6 +1951,11 @@ class NairACCSMPC:
             raise ValueError(
                 "pass_miqp_margin (passmiqp<m>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.cutin_cvar_risk is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "cutin_cvar_risk (cvar<eps>_<c>) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -1906,6 +1969,10 @@ class NairACCSMPC:
         self._pass_active = bool(self.config.pass_miqp_margin is not None and prediction.pass_slot is not None
                                  and np.any(prediction.pass_slot >= 0))
         self._pass_result = None
+        # cvar<eps>_<c>: the CVaR rows only on a tick with a cut-in chance cell; the design's QP otherwise
+        self._cvar_active = bool(self.config.cutin_cvar_risk is not None and np.any(
+            np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)))
+        self._cvar_plan = None
 
         try:
             if self._can_use_cached_open_loop_fixed_qp(open_loop, prediction):
@@ -2042,6 +2109,29 @@ class NairACCSMPC:
                     safety_values[mode, step] = np.inf
                     tightening_values[mode, step] = 0.0
                     chance_margin_values[mode, step] = np.inf
+        cvar_fields = {}
+        if self._cvar_rows() and shortfall is not None and self._cvar_plan is not None:
+            # cvar<eps>_<c>: no price, so where a CVaR row does not bind the solver's shortfall is any feasible
+            # value; take the least the plan needs, max(0, deficit - slack), at most the solver's (so it keeps the
+            # CVaR and cap rows), which is a priced cell's shortfall at its optimum; the margins and the remembered
+            # standoff use it
+            needed = np.clip(
+                optimized_standoff(prediction.clearance_scale, x_nominal[:, :, 1], self.config)
+                + tightening_values - (prediction.means[:, :, 0] - x_nominal[:, :, 0]) - slack,
+                0.0, shortfall)
+            needed = np.where(cutin_cells, needed, shortfall)
+            chance_margin_values = np.where(cutin_cells, chance_margin_values + needed - shortfall,
+                                            chance_margin_values)
+            shortfall = needed
+            eta, s_aux, row_slack = self._cvar_plan
+            values = shortfall_cvar(shortfall, prediction.probabilities, cutin_cells, self.config.cutin_cvar_risk)
+            rows = np.any(cutin_cells, axis=0)
+            cvar_fields = dict(
+                cvar_cells=int(np.sum(cutin_cells)), cvar_rows=int(np.sum(rows)),
+                cvar_active_rows=int(np.sum(rows & (values >= float(self.config.cutin_cvar_bound) - 1.0e-3))),
+                cvar_max=float(np.max(values[rows])), cvar_eta_max=float(np.max(eta)),
+                cvar_s_max=float(np.max(s_aux)), cvar_slack_max=float(np.max(row_slack)),
+                cvar_short_max=float(np.max(shortfall[cutin_cells])))
         n_floor_free = n_floor_lowered = n_floor_raised = 0
         floor_old_margin_min = float("nan")
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE and np.any(cutin_cells):
@@ -2161,6 +2251,7 @@ class NairACCSMPC:
             floor_old_margin_min=floor_old_margin_min,
             **failsafe_fields,
             **pass_fields,
+            **cvar_fields,
         )
 
     def _pass_solution_fields(self, x0, prediction, x_nominal, u_nominal, chance_margin_values):
@@ -2716,8 +2807,18 @@ class NairACCSMPC:
             self._entrant_rows(),
             self._pass_rows(),
             bool(self.config.pass_miqp_no_cap),
+            None if self.config.cutin_cvar_risk is None
+            else (float(self.config.cutin_cvar_risk), float(self.config.cutin_cvar_bound)),
+            self._cvar_rows(),
+            # last: tests/test_termcost.py and test_l1slack.py read it as key[-1]
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
+
+    def _cvar_rows(self):
+        """``cvar<eps>_<c>``: whether this solve has a cut-in chance cell, in which case the cached QP with the CVaR
+        rows (and without the price on those cells) is used; a tick without one solves the design's QP bit for bit
+        (as ``_entrant_rows``).  A separate cache entry per case."""
+        return bool(self.config.cutin_cvar_risk is not None and self._cvar_active)
 
     def _pass_rows(self):
         """``passmiqp``: whether this solve carries a candidate hypothesis, in which case the cached MIQP (the
@@ -2822,6 +2923,10 @@ class NairACCSMPC:
             opti.set_value(problem.shortfall_price_param, (
                 np.ones((num_modes, horizon + 1)) if prediction.lead_mode_probability is None
                 else prediction.lead_mode_probability))
+        if problem.cvar_mask_param is not None:
+            # cvar<eps>_<c>: the cut-in chance cells, unpriced and under the CVaR rows
+            opti.set_value(problem.cvar_mask_param, (np.asarray(prediction.active_mask, dtype=bool)
+                                                     & np.isfinite(prediction.chance_confidence)).astype(float))
         if problem.floor_cell_param is not None:
             # floorrisk<eps>: the cap off on every cut-in chance cell, the floor row on those that keep one
             floor_cells, floor_sigma = floor_risk_cells(prediction, self.config)
@@ -2925,6 +3030,10 @@ class NairACCSMPC:
         opti.set_initial(problem.slack_var, np.zeros((num_modes, horizon + 1)))
         if problem.short_var is not None:
             opti.set_initial(problem.short_var, np.zeros((num_modes, horizon + 1)))
+        if problem.cvar_eta_var is not None:
+            opti.set_initial(problem.cvar_eta_var, np.zeros(horizon + 1))
+            opti.set_initial(problem.cvar_s_var, np.zeros((num_modes, horizon + 1)))
+            opti.set_initial(problem.cvar_slack_var, np.zeros(horizon + 1))
         if problem.pass_z_var is not None:
             opti.set_initial(problem.pass_z_var, pass_initial)
         if problem.fs_u_var is not None:
@@ -2983,6 +3092,12 @@ class NairACCSMPC:
         if problem.short_var is not None:
             shortfall = np.asarray(sol.value(problem.short_var), dtype=float).reshape((num_modes, horizon + 1))
             shortfall = np.where(shortfall_mask, shortfall, 0.0)
+        cvar_plan = None
+        if problem.cvar_eta_var is not None:
+            # cvar<eps>_<c>: the solver's eta_k, s_jk and row slacks
+            cvar_plan = (np.asarray(sol.value(problem.cvar_eta_var), dtype=float).reshape(horizon + 1),
+                         np.asarray(sol.value(problem.cvar_s_var), dtype=float).reshape((num_modes, horizon + 1)),
+                         np.asarray(sol.value(problem.cvar_slack_var), dtype=float).reshape(horizon + 1))
         failsafe_plan = None
         if problem.fs_u_var is not None:
             fs_u = np.asarray(sol.value(problem.fs_u_var), dtype=float).reshape(horizon)
@@ -3052,6 +3167,7 @@ class NairACCSMPC:
         )
         self._standoff_shortfall = shortfall
         self._failsafe_plan = failsafe_plan
+        self._cvar_plan = cvar_plan
         return NairACCPolicy(h=h, M=m, K=k), slack, cost, "optimal", message, layout, optimized_eta_data
 
     def _get_feedback_scalar_chance_qp(self, num_modes):
@@ -3417,13 +3533,45 @@ class NairACCSMPC:
                         opti.subject_to(inputs[step] <= pass_cap_param + accel_m * pass_z_var[slot]
                                         + accel_m * (1.0 - pass_cap_mask_params[slot][mode, step]))
 
+        cvar_rows = self._cvar_rows()
+        cvar_mask_param = cvar_eta_var = cvar_s_var = cvar_slack_var = None
+        if cvar_rows:
+            cvar_mask_param = opti.parameter(num_modes, horizon + 1)
         if short_var is not None:
             for mode in range(num_modes):
                 for step in range(horizon + 1):
                     price = shortfall_weight * probability_param[mode]
                     if shortfall_price_param is not None:
                         price = price * shortfall_price_param[mode, step]
+                    if cvar_mask_param is not None:
+                        # cvar<eps>_<c>: no price on the CVaR cells (the rows below bound their shortfall)
+                        price = price * (1.0 - cvar_mask_param[mode, step])
                     objective += price * short_var[mode, step] ** 2
+
+        if cvar_rows:
+            # cvar<eps>_<c> (2026-11-05): per step CVaR_eps of the CVaR cells' shortfall over the scenarios <= c, in
+            # Rockafellar-Uryasev form with eta_k >= 0 (exact for a non-negative shortfall, so a scenario without
+            # such a cell contributes (0 - eta)+ = 0); each row has its own emergency slack, priced as the safety
+            # rows' slack
+            eps = float(self.config.cutin_cvar_risk)
+            bound = float(self.config.cutin_cvar_bound)
+            cvar_eta_var = opti.variable(horizon + 1)
+            cvar_s_var = opti.variable(num_modes, horizon + 1)
+            cvar_slack_var = opti.variable(horizon + 1)
+            opti.subject_to(ca.vec(cvar_eta_var) >= 0.0)
+            opti.subject_to(ca.vec(cvar_s_var) >= 0.0)
+            opti.subject_to(ca.vec(cvar_slack_var) >= 0.0)
+            for step in range(horizon + 1):
+                tail = 0.0
+                for mode in range(num_modes):
+                    opti.subject_to(cvar_s_var[mode, step]
+                                    >= cvar_mask_param[mode, step] * short_var[mode, step] - cvar_eta_var[step])
+                    tail += probability_param[mode] * cvar_s_var[mode, step]
+                opti.subject_to(cvar_eta_var[step] + tail / eps <= bound + cvar_slack_var[step])
+            if self.config.slack_l1_weight is not None:
+                objective += self.config.slack_l1_weight * ca.sum1(ca.vec(cvar_slack_var))
+            else:
+                objective += self.config.slack_weight * ca.sumsqr(cvar_slack_var)
 
         if self.config.terminal_cost_scale is not None:
             # termcost<c>: the cost-to-go on (e_N, a_N) of each scenario's nominal
@@ -3612,6 +3760,10 @@ class NairACCSMPC:
             next_tightening_param=next_tightening_param,
             next_clearance_scale_param=next_clearance_scale_param,
             next_mask_param=next_mask_param,
+            cvar_mask_param=cvar_mask_param,
+            cvar_eta_var=cvar_eta_var,
+            cvar_s_var=cvar_s_var,
+            cvar_slack_var=cvar_slack_var,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
@@ -4485,6 +4637,23 @@ def optimized_standoff(clearance_scale, speed, config, lead_speed=None):
     """
     return (clearance_scale * (config.vehicle_length + config.d0)
             + speed_gap(speed, lead_speed, config))
+
+
+def shortfall_cvar(shortfall, probabilities, cells, risk):
+    """``cvar<eps>_<c>``: per step k the exact ``CVaR_eps`` of the shortfall over the scenarios, the random
+    variable ``X_k`` that is ``shortfall[j, k]`` with probability ``P_j`` on ``cells`` and 0 elsewhere (and on
+    any probability mass the scenarios leave out): ``min_{eta >= 0} eta + (1 / eps) sum_j P_j (X_jk - eta)+``,
+    piecewise linear and convex in ``eta``, so evaluated at its breakpoints 0 and the ``X_jk``.  For a lone
+    shortfall ``x`` with probability ``P`` it is ``x * min(1, P / eps)``."""
+    shortfall = np.where(np.asarray(cells, dtype=bool), np.maximum(np.asarray(shortfall, dtype=float), 0.0), 0.0)
+    probabilities = np.asarray(probabilities, dtype=float).reshape(-1)
+    values = np.zeros(shortfall.shape[1])
+    for step in range(shortfall.shape[1]):
+        x = shortfall[:, step]
+        eta = np.concatenate(([0.0], x))
+        tail = np.sum(probabilities[None, :] * np.maximum(x[None, :] - eta[:, None], 0.0), axis=1)
+        values[step] = float(np.min(eta + tail / float(risk)))
+    return values
 
 
 def floor_risk_quantile(probabilities, risk):
