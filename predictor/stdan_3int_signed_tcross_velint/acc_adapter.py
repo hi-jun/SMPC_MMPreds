@@ -518,6 +518,7 @@ class STDAN3IntACCAdapter:
         lead_merge: bool = False,
         merge_first: bool = False,
         lk_hold: bool = False,
+        no_lk_entry: bool = False,
         pass_margin: Optional[float] = None,
         pass_slots: int = 0,
         pass_plan: Optional[Dict[int, np.ndarray]] = None,
@@ -631,6 +632,7 @@ class STDAN3IntACCAdapter:
                     lk_hold=lk_hold,
                     mode_lane_probabilities=mode_lane_probabilities,
                     occupancy_risk=occupancy_risk,
+                    no_lk_entry=no_lk_entry,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

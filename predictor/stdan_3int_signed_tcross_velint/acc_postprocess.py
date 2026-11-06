@@ -1028,15 +1028,22 @@ def process_vehicle_prediction(
     lk_hold: bool = False,
     mode_lane_probabilities: Optional[np.ndarray] = None,
     occupancy_risk: Optional[float] = None,
+    no_lk_entry: bool = False,
 ) -> ACCProcessedPrediction:
     """``occupancy_risk`` (``occin<eps>``, 2026-11-05): for an adjacent vehicle the per-trajectory occupancy
     at steps 1.. is ``occupancy_memberships`` (``p_i * P_in,i(k) > eps``, with ``mode_lane_probabilities``
     the caller's ``P_in``) in place of ``mode_lane_memberships``' mean-trajectory test, so every downstream
     rule (``trajcutin``'s entering trajectories, the active masks, ``entrypass``) reads it; the 0.1 gate is
     not applied (``eps`` replaces it).  Needs ``lk_entry_as_cutin``; ego-lane and other vehicles are
-    unchanged."""
+    unchanged.
+
+    ``no_lk_entry`` (``nolkentry``, 2026-11-06): an adjacent vehicle's trajectories other than its lane change
+    toward the ego lane (lane keeping, the change away) are out of the ego's path at steps 1.., whatever the
+    lane test says, so they never lead and ``trajcutin`` finds no entering trajectory."""
     if no_cutout and use_trajectory_aware_cutin_mapping:
         raise ValueError("nocutout acts on the default mapping, not the trajectory-aware one")
+    if no_lk_entry and use_trajectory_aware_cutin_mapping:
+        raise ValueError("nolkentry acts on the default mapping, not the trajectory-aware one")
     if occupancy_risk is not None and not lk_entry_as_cutin:
         raise ValueError("occin<eps> needs trajcutin (lk_entry_as_cutin): it generalises its entering-trajectory rule")
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
@@ -1117,6 +1124,14 @@ def process_vehicle_prediction(
             "activated": int(np.sum(occin & ~today)),
             "suppressed": int(np.sum(today & ~occin)),
         }
+    if no_lk_entry and relation_to_ego_lane in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT):
+        # nolkentry: a vehicle that keeps its lane, or changes away from the ego lane, stays out of the ego's path;
+        # a predicted trajectory of those hypotheses that reaches the path (its drift or, with occin, its lateral
+        # spread) is the predictor's error, not a cut-in.  Only the lane change toward the ego lane may enter.
+        toward = _labelled_cutin_index(relation_to_ego_lane)
+        for mode in range(memberships.shape[0]):
+            if mode != toward:
+                memberships[mode, 1:] = False
 
     ego_lane_membership_split_step = ego_lane_membership_split_step_from_mask(memberships)
     trajectory_mode_specs, trajectory_cutin_raw_idx = _trajectory_aware_mode_specs(
@@ -1219,6 +1234,7 @@ def process_vehicle_prediction(
             "lk_sigma": bool(lk_sigma),
             "full_footprint": bool(full_footprint),
             "lk_hold": bool(lk_hold),
+            "no_lk_entry": bool(no_lk_entry),
             "occupancy": occupancy_info,
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,

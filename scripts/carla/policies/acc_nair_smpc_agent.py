@@ -179,6 +179,9 @@ class ACCNairSMPCAgent(object):
         self.lk_hold = self._parse_lk_hold(smpc_config)
         if self.lk_hold and self.predictor_type != "stdan_3int":
             raise ValueError("lkhold needs the stdan_3int predictor")
+        self.no_lk_entry = self._parse_no_lk_entry(smpc_config)
+        if self.no_lk_entry and self.predictor_type != "stdan_3int":
+            raise ValueError("nolkentry needs the stdan_3int predictor")
         # occin<eps> (2026-11-05): a cut-in cell is active where p * P(body overlaps the ego's path) > eps, which
         # needs a probabilistic ego-path test of the predicted trajectories (predict_acc(lane_membership_prob_fn=));
         # only the NGSIM replay has one, and inside the agent a predictor exception would be swallowed silently
@@ -1061,6 +1064,7 @@ class ACCNairSMPCAgent(object):
                 lead_merge=self.lead_merge,
                 merge_first=self.merge_first,
                 lk_hold=self.lk_hold,
+                no_lk_entry=self.no_lk_entry,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
                     "entry_margin": entry_margin} if entry_plan is not None else {}),
                 **pass_kw,
@@ -1876,6 +1880,16 @@ class ACCNairSMPCAgent(object):
         match.
         """
         return re.search(r"(?:^|_)lkhold(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_no_lk_entry(smpc_config):
+        """Read ``nolkentry`` from the config string (default: off).
+
+        An adjacent vehicle's lane-keeping and away-direction trajectories never enter the ego's path at steps 1..
+        (``acc_postprocess.process_vehicle_prediction(no_lk_entry=)``): only its lane change toward the ego lane can
+        lead, so ``trajcutin`` finds no entering lane-keeping trajectory (2026-11-06). Whole-token match.
+        """
+        return re.search(r"(?:^|_)nolkentry(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_occupancy_risk(smpc_config):
