@@ -452,6 +452,29 @@ def load_probability_calibration(path, recording: Optional[int] = None) -> Dict[
     return out
 
 
+def bcts_intention_probabilities(raw_probs: Sequence[float], calibration: Dict[str, float]) -> np.ndarray:
+    """``bcts`` (2026-11-06): the intention probabilities (LK, LLC, RLC) recalibrated by bias-corrected temperature
+    scaling (Alexandari et al., ICML 2020), ``softmax(log p / T + b)`` with ``b = (0, b_left, b_right)`` from
+    ``calibration`` (``load_bcts_calibration``), fitted by the 3-class log loss to the predictor's own intention
+    label on natural NGSIM traffic.  No side is zeroed where there is no lane: the label keeps a lane change's
+    direction for 2.8 s after the crossing, into an edge lane too, and an adjacent vehicle's side without a lane is
+    never its cut-in side.  The predictor's probabilities are odds-inflated by its balanced training set, so every
+    probability threshold of the design means something else on this scale."""
+    p = np.clip(normalize_probabilities(raw_probs), 1.0e-7, 1.0)
+    z = np.log(p / p.sum()) / calibration["T"] + np.array([0.0, calibration["b_left"], calibration["b_right"]])
+    q = np.exp(z - z.max())
+    return q / q.sum()
+
+
+def load_bcts_calibration(path, recording: Optional[int] = None) -> Dict[str, float]:
+    """``bcts``: the temperature and the two class biases of a calibration file, as fitted without NGSIM recording
+    ``recording`` (cross-fitting) or on every recording (None)."""
+    import json
+    data = json.loads(open(path).read())
+    fit = data["all"] if recording is None else data["folds"][str(int(recording))]
+    return {k: float(fit[k]) for k in ("T", "b_left", "b_right")}
+
+
 def _mode_specs_for_relation(
     relation: str,
     raw_probs: np.ndarray,

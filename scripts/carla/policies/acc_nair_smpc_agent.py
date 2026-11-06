@@ -196,6 +196,9 @@ class ACCNairSMPCAgent(object):
         if self._parse_probability_calibration(smpc_config):
             raise ValueError("pcal's calibration maps are fitted on NGSIM traffic (NGSIM replay only); "
                              "CARLA has no map")
+        # bcts (2026-11-06): the same for the bias-corrected temperature scaling fitted on NGSIM
+        if self._parse_bcts_calibration(smpc_config):
+            raise ValueError("bcts's calibration is fitted on NGSIM traffic (NGSIM replay only); CARLA has none")
         # entrypass: (time_s, scenario names, probabilities, planned speeds) of the last solve
         self._entry_previous_plan = None
         self.branch_decision_brake = self._parse_branch_decision_brake(smpc_config)
@@ -1897,6 +1900,17 @@ class ACCNairSMPCAgent(object):
         (2026-11-05). NGSIM replay only. Whole-token match.
         """
         return re.search(r"(?:^|_)pcal(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_bcts_calibration(smpc_config):
+        """Read ``bcts`` from the config string (default: off).
+
+        Every target's intention probabilities are replaced, before the mode mapping, by bias-corrected temperature
+        scaling of the predictor's own (``acc_postprocess.bcts_intention_probabilities``), fitted to the predictor's
+        intention label on natural NGSIM traffic (2026-11-06). NGSIM replay only; not with ``pcal``. Whole-token
+        match.
+        """
+        return re.search(r"(?:^|_)bcts(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_cutin_cvar(smpc_config):

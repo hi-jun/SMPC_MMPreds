@@ -1,0 +1,245 @@
+{
+ "meta": {
+  "date": "2026-11-06",
+  "data": "results/ngsim_lambda_cal_20261019/out/p_S.npz: the 10 Hz frames of the 2,954 Val+Test calibration vehicles (natural NGSIM traffic, final-set vehicles included) with a STDAN probability (>= 30 frames of history) whose +-28-frame label window lies inside the track: 2378400 frames of 2954 vehicles, label LK / LLC / RLC 2314949 / 46933 / 16518",
+  "label": "STDAN's own intention label (predictor/stdan_3int_signed_tcross_velint/preprocessing/preprocess_3int_signed_tcross.py, label_vehicle_rows): a frame within +-28 frames (2.8 s) of a Lane_ID transition takes that transition's direction (LLC to a lower Lane_ID, RLC to a higher one), the nearest transition winning (a tie to the earlier one); LK otherwise. On US-101 (recordings 1-3) Lane_IDs >= 6 are one lane",
+  "model": "bias-corrected temperature scaling (Alexandari et al., ICML 2020; temperature scaling of Guo et al., ICML 2017, with one bias per class): q = softmax(log p / T + b), b = (0, b_left, b_right), p the predictor's (LK, LLC, RLC) clipped at 1e-7 and renormalised; fitted by the mean 3-class log loss (L-BFGS-B, analytic gradient, start T 1, b 0) on every frame of the training recordings",
+  "sides": "no lane mask: a side without a lane keeps its fitted probability, at run time and in the evaluation (the label keeps a lane change's direction for 2.8 s after the crossing, into an edge lane too; an adjacent vehicle's side without a lane is never its cut-in side)",
+  "folds": "folds[k] is fitted without NGSIM recording k (1-3 US-101, 4-6 I-80); the replay applies folds[ds] to an episode of recording ds (cross-fitting); all = every recording",
+  "result": "results/ngsim_lambda_cal_20261019/replay_out/pcal_model_20261105/result.md (sections on BCTS)",
+  "predictor": "IAIMM-KF with the paper's ISA-MPC setting (ISAMPC_IAIMM_CFG), R_NGSIM, the lane markings",
+  "iaimm_cfg": {
+   "lat_speedup": 2.0,
+   "proj_horizon_s": 3.0,
+   "q_lat_scale": 1.0,
+   "trans_eps": 0.25,
+   "weight": [
+    0.1,
+    0.3,
+    10.0,
+    0.02
+   ]
+  }
+ },
+ "all": {
+  "T": 1.578387322305794,
+  "b_left": -2.2912884596823053,
+  "b_right": -3.4911282975479536
+ },
+ "folds": {
+  "1": {
+   "T": 1.6190541791640256,
+   "b_left": -2.3055363536168167,
+   "b_right": -3.574115768328891
+  },
+  "2": {
+   "T": 1.6296880421143596,
+   "b_left": -2.3165121309069963,
+   "b_right": -3.5860930576024623
+  },
+  "3": {
+   "T": 1.6389901888293197,
+   "b_left": -2.366193295803854,
+   "b_right": -3.5597010912909615
+  },
+  "4": {
+   "T": 1.526111195818507,
+   "b_left": -2.341316299330014,
+   "b_right": -3.4848065123931677
+  },
+  "5": {
+   "T": 1.5155214187754837,
+   "b_left": -2.196089038144857,
+   "b_right": -3.3491259501015604
+  },
+  "6": {
+   "T": 1.5329331591721256,
+   "b_left": -2.2049912576193105,
+   "b_right": -3.38123638920981
+  }
+ },
+ "check_rows": [
+  {
+   "fold": 5,
+   "raw": [
+    0.8830605074763298,
+    0.008523218333721161,
+    0.10841627418994904
+   ],
+   "q": [
+    0.9861891137408954,
+    0.005133105530297037,
+    0.008677780728807524
+   ]
+  },
+  {
+   "fold": 2,
+   "raw": [
+    0.8021512851119041,
+    0.09975006431341171,
+    0.09809865057468414
+   ],
+   "q": [
+    0.9661148898544433,
+    0.026512385446974512,
+    0.0073727246985822404
+   ]
+  },
+  {
+   "fold": null,
+   "raw": [
+    0.9519267193973064,
+    0.02476249635219574,
+    0.023310784250497818
+   ],
+   "q": [
+    0.9872407043116874,
+    0.009891463538476128,
+    0.0028678321498363663
+   ]
+  },
+  {
+   "fold": 1,
+   "raw": [
+    0.9082164713181555,
+    0.08737567067146301,
+    0.00440785801038146
+   ],
+   "q": [
+    0.9760633211638036,
+    0.022917962332953002,
+    0.0010187165032434608
+   ]
+  },
+  {
+   "fold": null,
+   "raw": [
+    0.967752386815846,
+    0.004665621556341648,
+    0.027581991627812386
+   ],
+   "q": [
+    0.9934019105445662,
+    0.0034211260435965036,
+    0.003176963411837394
+   ]
+  },
+  {
+   "fold": 6,
+   "raw": [
+    0.3195505365729332,
+    0.5763234496116638,
+    0.10412601381540298
+   ],
+   "q": [
+    0.8486475969981863,
+    0.13746579046591187,
+    0.013886612535901906
+   ]
+  },
+  {
+   "fold": null,
+   "raw": [
+    0.8912337776273489,
+    0.0811210423707962,
+    0.027645180001854897
+   ],
+   "q": [
+    0.9751067135210096,
+    0.02160300520401364,
+    0.003290281274976767
+   ]
+  },
+  {
+   "fold": 5,
+   "raw": [
+    0.851977308280766,
+    0.005647207610309124,
+    0.14237548410892487
+   ],
+   "q": [
+    0.9853707179755972,
+    0.004002478722867639,
+    0.010626803301535101
+   ]
+  },
+  {
+   "fold": 4,
+   "raw": [
+    0.9282794464379549,
+    0.051730379462242126,
+    0.01999017409980297
+   ],
+   "q": [
+    0.9832990013349864,
+    0.014263048359303953,
+    0.002437950305709724
+   ]
+  },
+  {
+   "fold": 6,
+   "raw": [
+    0.991564110852778,
+    0.004159652162343264,
+    0.0042762369848787785
+   ],
+   "q": [
+    0.9959408536485876,
+    0.003089042307698793,
+    0.0009701040437134716
+   ]
+  },
+  {
+   "fold": null,
+   "raw": [
+    0.9750071689486504,
+    0.011723301373422146,
+    0.013269529677927494
+   ],
+   "q": [
+    0.9919189318357413,
+    0.006095052734621039,
+    0.0019860154296376252
+   ]
+  },
+  {
+   "fold": 3,
+   "raw": [
+    0.7836256697773933,
+    0.0967789888381958,
+    0.11959534138441086
+   ],
+   "q": [
+    0.9659712135330424,
+    0.02530113326910821,
+    0.008727653197849418
+   ]
+  },
+  {
+   "fold": null,
+   "raw": [
+    0.8414304852485657,
+    0.017792120575904846,
+    0.14077739417552948
+   ],
+   "q": [
+    0.9817383023224836,
+    0.008626304265464691,
+    0.00963539341205179
+   ]
+  },
+  {
+   "fold": 5,
+   "raw": [
+    0.5206969156861305,
+    0.09474840015172958,
+    0.3845546841621399
+   ],
+   "q": [
+    0.9390659496614999,
+    0.03393573756347605,
+    0.02699831277502407
+   ]
+  }
+ ]
+}
