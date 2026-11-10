@@ -525,6 +525,7 @@ class STDAN3IntACCAdapter:
         lane_membership_prob_fn: Optional[Callable[[int, np.ndarray, Optional[np.ndarray]], np.ndarray]] = None,
         occupancy_risk: Optional[float] = None,
         intention_calibration: Optional[Callable[[int, np.ndarray], np.ndarray]] = None,
+        occupancy_pin_gate: bool = False,
     ):
         """``occupancy_risk`` (``occin<eps>``, 2026-11-05) needs ``lane_membership_prob_fn(target_id,
         sampled_raw_traj_xy, sampled_raw_position_cov)``: per raw trajectory and step 0..N the probability
@@ -532,7 +533,8 @@ class STDAN3IntACCAdapter:
         2-D position covariance in the same global frame (``raw_position_cov_global`` sampled like the
         trajectory; None when the model gives none).  The rows keep the longitudinal variance only
         (``_lead_covariance_from_frenet_moments``); the lateral one is used for this test alone.  Only
-        adjacent targets are tested (``process_vehicle_prediction``).
+        adjacent targets are tested (``process_vehicle_prediction``).  ``occupancy_pin_gate`` (``pingate``,
+        2026-11-09): the step is ``P_in > eps`` for a trajectory with ``p > eps``, not ``p * P_in > eps``.
 
         ``intention_calibration`` (``pcal``, 2026-11-05): ``f(target_id, raw_intention_prob)`` returns the
         calibrated intention probabilities that every step below reads (the caller's map,
@@ -541,6 +543,8 @@ class STDAN3IntACCAdapter:
         if occupancy_risk is not None and lane_membership_prob_fn is None:
             raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
                              "(lane_membership_prob_fn)")
+        if occupancy_pin_gate and occupancy_risk is None:
+            raise ValueError("pingate needs occin<eps>")
         controller_dt = float(self.dt if controller_dt is None else controller_dt)
         raw_predictions = self.predict_raw(target_states_frenet.keys(), trackings, model_yaw=model_yaw)
         processed = []
@@ -633,6 +637,7 @@ class STDAN3IntACCAdapter:
                     mode_lane_probabilities=mode_lane_probabilities,
                     occupancy_risk=occupancy_risk,
                     no_lk_entry=no_lk_entry,
+                    occupancy_pin_gate=occupancy_pin_gate,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(

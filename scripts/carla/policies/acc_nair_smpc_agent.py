@@ -187,6 +187,8 @@ class ACCNairSMPCAgent(object):
         # only the NGSIM replay has one, and inside the agent a predictor exception would be swallowed silently
         # (the synthetic prediction, AGENTS.md 8.12), so the token is refused here
         self.occupancy_risk = self._parse_occupancy_risk(smpc_config)
+        if self._parse_occupancy_pin_gate(smpc_config) and self.occupancy_risk is None:
+            raise ValueError("pingate needs occin<eps>")
         if self.occupancy_risk is not None:
             if self.predictor_type != "stdan_3int":
                 raise ValueError("occin<eps> needs the stdan_3int predictor")
@@ -283,6 +285,9 @@ class ACCNairSMPCAgent(object):
         if self.controller_config.floor_risk is not None and not self.full_footprint:
             # Its floor replaces the one fullfoot gives a cut-in chance cell, L + d0 + q(beta_j) sigma.
             raise ValueError("floorrisk<eps> needs fullfoot (with cutin_chance<beta_ref> and dopt<w>)")
+        self.controller_config.floor_risk_hypothesis = self._parse_floor_risk_hypothesis(smpc_config)
+        if self.controller_config.floor_risk_hypothesis and self.controller_config.floor_risk is None:
+            raise ValueError("floorhyp needs floorrisk<eps>")
         self.controller_config.failsafe_branch = self._parse_failsafe_branch(smpc_config)
         if self.controller_config.failsafe_branch and not self._parse_safety_layer(smpc_config):
             # The branch is the layer's fail-safe against the layer's checked members.
@@ -1822,6 +1827,16 @@ class ACCNairSMPCAgent(object):
         return float(match.group(1)) if match else None
 
     @staticmethod
+    def _parse_floor_risk_hypothesis(smpc_config):
+        """Read ``floorhyp`` from the config string (default: off).
+
+        With ``floorrisk<eps>``: the floor's ``Phi^-1(1 - eps / p)`` takes ``p``, the probability of the
+        cell's own hypothesis, in place of the scenario probability ``P_j``
+        (``NairACCConfig.floor_risk_hypothesis``), 2026-11-09. Whole-token match.
+        """
+        return re.search(r"(?:^|_)floorhyp(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
     def _parse_safety_layer(smpc_config):
         """Read ``safelayer`` from the config string (default: off).
 
@@ -1903,6 +1918,17 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"(?:^|_)occin([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
         return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_occupancy_pin_gate(smpc_config):
+        """Read ``pingate`` from the config string (default: off).
+
+        With ``occin<eps>``: a trajectory with ``p_j > eps`` is in the ego's path at step k >= 1 iff
+        ``P_in,j(k) > eps``, in place of ``p_j * P_in,j(k) > eps``, so the step does not depend on the
+        probability (``acc_postprocess.occupancy_memberships(pin_gate=)``), 2026-11-09. NGSIM replay only, as
+        ``occin``. Whole-token match.
+        """
+        return re.search(r"(?:^|_)pingate(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_probability_calibration(smpc_config):

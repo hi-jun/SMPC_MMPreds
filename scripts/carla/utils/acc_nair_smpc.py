@@ -273,6 +273,13 @@ class NairACCConfig:
     #: ``confidence_chance`` (and the agent's ``fullfoot``); cached feedback QP
     #: only; not with ``relative_brake_decel``.
     floor_risk: Optional[float] = None
+    #: ``floorhyp`` (2026-11-09, maintainer): with ``floor_risk``, ``z`` takes the probability of the cell's
+    #: own hypothesis, ``p`` = the probability of the cell's lead mode for its vehicle
+    #: (``MultimodalLeadPrediction.lead_mode_probability``), in place of the scenario probability ``P_j``:
+    #: ``z = Phi^-1(1 - eps / p)`` per cell (``floor_risk_cell_quantile``), so the floor bounds that
+    #: hypothesis's breach probability ``p P(gap < L + d0) <= eps`` however many scenarios carry it (``P_j``
+    #: splits ``p`` over them and relaxes each).  Off by default.
+    floor_risk_hypothesis: bool = False
     #: ``safebranch``: the safety layer's fail-safe as one more branch of the
     #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
     #: contingency plan).  The branch shares the first input with every
@@ -483,6 +490,8 @@ class NairACCConfig:
                 raise ValueError("floor_risk (floorrisk<eps>) is not implemented with relative_brake_decel (relbrake<b>)")
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("floor_risk (floorrisk<eps>) is implemented only in the cached feedback QP")
+        if self.floor_risk_hypothesis and self.floor_risk is None:
+            raise ValueError("floor_risk_hypothesis (floorhyp) needs floor_risk (floorrisk<eps>)")
         if self.failsafe_branch:
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
@@ -2141,14 +2150,14 @@ class NairACCSMPC:
                                 - (self.config.vehicle_length + self.config.d0) - tightening_values)
             floor_old_margin_min = float(np.min(old_floor_margin[cutin_cells]))
             if floor_sigma is not None:
-                z = floor_risk_quantile(prediction.probabilities, self.config.floor_risk)
+                z = floor_risk_cell_quantile(prediction, self.config)
                 for mode, step in zip(*np.nonzero(cutin_cells)):
                     q = confidence_quantile(prediction.chance_confidence[mode, step])
-                    if not np.isfinite(z[mode]):
+                    if not np.isfinite(z[mode, step]):
                         n_floor_free += 1
-                    elif z[mode] < q:
+                    elif z[mode, step] < q:
                         n_floor_lowered += 1
-                    elif z[mode] > q:
+                    elif z[mode, step] > q:
                         n_floor_raised += 1
         planned_standoff = None
         if self.config.standoff_shortfall_weight is not None:
@@ -4670,21 +4679,35 @@ def floor_risk_quantile(probabilities, risk):
     return z
 
 
+def floor_risk_cell_quantile(prediction, config):
+    """``floorrisk<eps>``: ``z`` per (mode, step), the scenario's ``floor_risk_quantile`` on every step,
+    or with ``floorhyp`` (``config.floor_risk_hypothesis``) the quantile of the probability of each cell's
+    own hypothesis (``prediction.lead_mode_probability``).  A prediction without those probabilities and
+    without a cut-in chance cell (the synthetic placeholder of a tick with no target) needs none."""
+    if config.floor_risk_hypothesis:
+        if prediction.lead_mode_probability is not None:
+            return floor_risk_quantile(prediction.lead_mode_probability, config.floor_risk)
+        if np.any(np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)):
+            raise ValueError("floorhyp needs the cells' hypothesis probabilities (lead_mode_probability)")
+    z = floor_risk_quantile(prediction.probabilities, config.floor_risk)
+    return np.repeat(z[:, None], np.asarray(prediction.active_mask).shape[1], axis=1)
+
+
 def floor_risk_cells(prediction, config):
     """``floorrisk<eps>``: the cut-in chance cells (active, finite ``chance_confidence``)
     and the sigma term of the floor each keeps.
 
-    Returns ``(cells, floor_sigma)``: a bool mask, and per cell ``z_j sigma_jk``
-    (``floor_risk_quantile`` times ``safety_std``, the std of the row's sigma term),
-    ``-inf`` where the cell keeps no floor (``P_j <= eps``), NaN off the cut-in
-    chance cells.
+    Returns ``(cells, floor_sigma)``: a bool mask, and per cell ``z sigma_jk``
+    (``floor_risk_cell_quantile`` times ``safety_std``, the std of the row's sigma term),
+    ``-inf`` where the cell keeps no floor (``P_j <= eps``, with ``floorhyp`` the
+    hypothesis's ``p <= eps``), NaN off the cut-in chance cells.
     """
     cells = np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
-    z = floor_risk_quantile(prediction.probabilities, config.floor_risk)
+    z = floor_risk_cell_quantile(prediction, config)
     floor_sigma = np.full(cells.shape, np.nan)
     for mode, step in zip(*np.nonzero(cells)):
-        floor_sigma[mode, step] = (z[mode] * safety_std(prediction.covariances[mode, step], config)
-                                   if np.isfinite(z[mode]) else -np.inf)
+        floor_sigma[mode, step] = (z[mode, step] * safety_std(prediction.covariances[mode, step], config)
+                                   if np.isfinite(z[mode, step]) else -np.inf)
     return cells, floor_sigma
 
 

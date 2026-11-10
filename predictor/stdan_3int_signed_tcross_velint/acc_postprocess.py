@@ -976,6 +976,7 @@ def occupancy_memberships(
     lane_probabilities: np.ndarray,
     raw_probs: np.ndarray,
     risk: float,
+    pin_gate: bool = False,
 ) -> np.ndarray:
     """``occin<eps>`` (2026-11-05): an adjacent vehicle's per-trajectory ego-path occupancy by the
     total-probability bound on a floor breach by that hypothesis.
@@ -988,11 +989,20 @@ def occupancy_memberships(
     likely one as soon as its lateral spread reaches the path.  With ``p_i <= risk`` it is never in, so
     ``risk`` = 0.1 contains the 0.1 activation gate as its limit.  Step 0 keeps the measured test
     (``memberships[:, 0]``, the lane the vehicle is in now).  Returns a new array.
+
+    ``pin_gate`` (``pingate``, 2026-11-09, maintainer: the probability and the entry step are handled apart):
+    a trajectory with ``p_i > risk`` is in at step k >= 1 iff ``P_in,i(k) > risk``, so the step no longer
+    depends on ``p_i``.  The bound still holds at every step left out, ``p_i * P_in,i(k) <= P_in,i(k) <=
+    risk``; it is the more conservative rule, switching a hypothesis on at the same step whatever its
+    probability (``floorrisk<eps>`` with ``floorhyp`` then scales the floor by ``p_i``).
     """
     out = np.asarray(memberships, dtype=bool).copy()
     pin = np.asarray(lane_probabilities, dtype=float)
     probs = np.asarray(raw_probs, dtype=float).reshape(-1)[: out.shape[0]]
-    out[:, 1:] = probs[:, None] * np.nan_to_num(pin[:, 1:], nan=0.0) > float(risk)
+    if pin_gate:
+        out[:, 1:] = (probs[:, None] > float(risk)) & (np.nan_to_num(pin[:, 1:], nan=0.0) > float(risk))
+    else:
+        out[:, 1:] = probs[:, None] * np.nan_to_num(pin[:, 1:], nan=0.0) > float(risk)
     return out
 
 
@@ -1029,13 +1039,15 @@ def process_vehicle_prediction(
     mode_lane_probabilities: Optional[np.ndarray] = None,
     occupancy_risk: Optional[float] = None,
     no_lk_entry: bool = False,
+    occupancy_pin_gate: bool = False,
 ) -> ACCProcessedPrediction:
     """``occupancy_risk`` (``occin<eps>``, 2026-11-05): for an adjacent vehicle the per-trajectory occupancy
     at steps 1.. is ``occupancy_memberships`` (``p_i * P_in,i(k) > eps``, with ``mode_lane_probabilities``
     the caller's ``P_in``) in place of ``mode_lane_memberships``' mean-trajectory test, so every downstream
     rule (``trajcutin``'s entering trajectories, the active masks, ``entrypass``) reads it; the 0.1 gate is
     not applied (``eps`` replaces it).  Needs ``lk_entry_as_cutin``; ego-lane and other vehicles are
-    unchanged.
+    unchanged.  ``occupancy_pin_gate`` (``pingate``, 2026-11-09): ``p_i > eps`` and ``P_in,i(k) > eps``
+    instead (``occupancy_memberships(pin_gate=)``).
 
     ``no_lk_entry`` (``nolkentry``, 2026-11-06): an adjacent vehicle's trajectories other than its lane change
     toward the ego lane (lane keeping, the change away) are out of the ego's path at steps 1.., whatever the
@@ -1046,6 +1058,8 @@ def process_vehicle_prediction(
         raise ValueError("nolkentry acts on the default mapping, not the trajectory-aware one")
     if occupancy_risk is not None and not lk_entry_as_cutin:
         raise ValueError("occin<eps> needs trajcutin (lk_entry_as_cutin): it generalises its entering-trajectory rule")
+    if occupancy_pin_gate and occupancy_risk is None:
+        raise ValueError("pingate needs occin<eps>")
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     context_trust_info = None
     if context_trust is not None:
@@ -1111,7 +1125,8 @@ def process_vehicle_prediction(
             raise ValueError(
                 f"mode_lane_probabilities must have shape {memberships.shape}, got {lane_probabilities.shape}")
         mean_memberships = memberships.copy()
-        memberships = occupancy_memberships(memberships, lane_probabilities, raw_probs, occupancy_risk)
+        memberships = occupancy_memberships(memberships, lane_probabilities, raw_probs, occupancy_risk,
+                                            pin_gate=occupancy_pin_gate)
         # against today's rule (trajcutin: every entering trajectory is a cut-in mode, active where the mean
         # trajectory is in and its probability passes the gate), per trajectory and step 1..
         today = mean_memberships[:, 1:] & (raw_probs[: memberships.shape[0], None]
