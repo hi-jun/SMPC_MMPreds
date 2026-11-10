@@ -291,6 +291,12 @@ class ACCNairSMPCAgent(object):
         self.controller_config.floor_risk_top = self._parse_floor_risk_top(smpc_config)
         if self.controller_config.floor_risk_top and not self.controller_config.floor_risk_hypothesis:
             raise ValueError("floortop needs floorhyp")
+        self.controller_config.lane_keep_risk = self._parse_lane_keep_risk(smpc_config)
+        if self.controller_config.lane_keep_risk is not None and not (
+                self._parse_lk_sigma(smpc_config) and self._parse_no_cutout(smpc_config)):
+            # lksigma gives the lane-keeping cells their sigma term, nocutout their p = 1 (so z always exists)
+            raise ValueError("lkonesided<eps> needs lksigma and nocutout")
+        self.controller_config.price_row_no_sigma = self._parse_price_row_no_sigma(smpc_config)
         self.controller_config.failsafe_branch = self._parse_failsafe_branch(smpc_config)
         if self.controller_config.failsafe_branch and not self._parse_safety_layer(smpc_config):
             # The branch is the layer's fail-safe against the layer's checked members.
@@ -1848,6 +1854,26 @@ class ACCNairSMPCAgent(object):
         Whole-token match.
         """
         return re.search(r"(?:^|_)floortop(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_lane_keep_risk(smpc_config):
+        """Read ``lkonesided<eps>`` from the config string (None = off).
+
+        With ``lksigma`` and ``nocutout``: a lane-keeping cell's sigma term is the one-sided ``z sigma``,
+        ``z = Phi^-1(1 - eps)`` at its ``p = 1``, in place of ``q(min(p, beta_ref)) sigma``
+        (``NairACCConfig.lane_keep_risk``), 2026-11-10. Whole-token match; ``lkonesided0.05`` reads as 0.05.
+        """
+        match = re.search(r"(?:^|_)lkonesided([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_price_row_no_sigma(smpc_config):
+        """Read ``nopricesigma`` from the config string (default: off).
+
+        With ``floorrisk<eps>``: a priced cell asks for its standoff on the mean gap, without a sigma term; its
+        floor row keeps the sigma term (``NairACCConfig.price_row_no_sigma``), 2026-11-10. Whole-token match.
+        """
+        return re.search(r"(?:^|_)nopricesigma(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_safety_layer(smpc_config):

@@ -286,6 +286,20 @@ class NairACCConfig:
     #: time gap, ``D = L + d0 + tau v + z sigma``, the gap at which ``p P(gap < L + d0 + tau v) <= eps``.
     #: Lane-keeping cells (``lksigma``) keep ``q(beta) sigma``.  Off by default.
     floor_risk_top: bool = False
+    #: ``lkonesided<eps>`` (2026-11-10, maintainer: the lane-keeping sigma term one-sided, without the beta_ref
+    #: cap): a lane-keeping cell's sigma term (``lksigma``: finite ``sigma_confidence``, NaN ``chance_confidence``)
+    #: is ``z sigma`` with ``z = Phi^-1(1 - eps / p)`` (``p`` the lead mode's probability, 1 under ``nocutout``:
+    #: 1.645 at eps 0.05) in place of ``q(min(p, beta_ref)) sigma`` (0.84 sigma), in its row (hard, or with ``lkr``
+    #: its priced range), in the reference and in ``lkrsigma``'s release test, so the hard row keeps
+    #: ``p P(gap < d_safe) <= eps``.  Its own eps, apart from ``floor_risk``'s.  ``None`` is off.
+    lane_keep_risk: Optional[float] = None
+    #: ``nopricesigma`` (2026-11-10, maintainer: a sigma term only where a probability bound is converted): with
+    #: ``floor_risk``, every priced cell (``standoff_shortfall_mask``: the cut-in chance cells and ``lkr``'s priced
+    #: lane-keeping cells) asks for its standoff D on the mean gap, ``gap >= D``, in its priced row and in the
+    #: reference, with no sigma term; its floor keeps the sigma term in its own hard row (``floor_risk_cells``): a
+    #: cut-in cell's ``L + d0 + z sigma``, a priced lane-keeping cell's ``L + d0`` plus its own sigma term
+    #: (``cell_sigma_term``), whose time-gap cap is lifted for it.  Off by default.
+    price_row_no_sigma: bool = False
     #: ``safebranch``: the safety layer's fail-safe as one more branch of the
     #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
     #: contingency plan).  The branch shares the first input with every
@@ -500,6 +514,10 @@ class NairACCConfig:
             raise ValueError("floor_risk_hypothesis (floorhyp) needs floor_risk (floorrisk<eps>)")
         if self.floor_risk_top and not self.floor_risk_hypothesis:
             raise ValueError("floor_risk_top (floortop) needs floor_risk_hypothesis (floorhyp)")
+        if self.lane_keep_risk is not None and not 0.0 < self.lane_keep_risk < 1.0:
+            raise ValueError("lane_keep_risk (lkonesided<eps>) must lie in (0, 1)")
+        if self.price_row_no_sigma and self.floor_risk is None:
+            raise ValueError("price_row_no_sigma (nopricesigma) needs floor_risk (floorrisk<eps>), whose rows hold the floors")
         if self.failsafe_branch:
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
@@ -1367,8 +1385,10 @@ class OldACCReferenceAdapter:
                         float(lead_prediction.clearance_scale[mode, step]), planned_v[step], self.config,
                         lead_speed=lead_v))
                 # Same reasoning for the sigma term: the constraint below adds
-                # it, so the reference has to ask for it too.
-                if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+                # it, so the reference has to ask for it too (with nopricesigma a
+                # priced row has none).
+                if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE and not (
+                        self.config.price_row_no_sigma and dopt_cells is not None and dopt_cells[mode, step]):
                     safe_gap += cell_sigma_term(lead_prediction, mode, step, self.config)
                 target_s = lead_s - safe_gap
 
@@ -1874,9 +1894,8 @@ class NairACCSMPC:
                 continue
             sigma_term = 0.0
             if self.config.standoff_shortfall_lk_release_sigma:
-                beta = cell_sigma_confidence(prediction, j, 0)
-                if np.isfinite(beta):
-                    sigma_term = confidence_quantile(beta) * safety_std(prediction.covariances[j, 0], self.config)
+                # the sigma term the released cell's row asks for (with lkonesided its z sigma)
+                sigma_term = cell_sigma_term(prediction, j, 0, self.config)
             leads_now[int(ids[j, 0])] = (float(prediction.means[j, 0, 0]), float(prediction.means[j, 0, 1]), sigma_term)
         for vid in leads_now:
             if vid in self._armed_cutin_vehicles:
@@ -2051,9 +2070,12 @@ class NairACCSMPC:
         shortfall = self._standoff_shortfall
         dopt_cells = (standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
                       if shortfall is not None else None)
-        # the cut-in chance cells and, with floorrisk<eps>, the sigma term of the floor each keeps
+        # the cut-in chance cells and, with floorrisk<eps>, the cells with a floor row (with nopricesigma also
+        # lkr's priced lane-keeping cells) and the sigma term of the floor each keeps
         cutin_cells = np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
-        floor_sigma = floor_risk_cells(prediction, self.config)[1] if self.config.floor_risk is not None else None
+        floor_cells = floor_sigma = None
+        if self.config.floor_risk is not None:
+            floor_cells, floor_sigma = floor_risk_cells(prediction, self.config)
         if optimized_eta_data is not None:
             eta_levels = np.asarray(optimized_eta_data["eta_levels"], dtype=float).reshape(-1)
             safe_probability_levels = np.asarray(
@@ -2111,10 +2133,11 @@ class NairACCSMPC:
                                 shortfall[mode, step]
                                 - (1.0 - scale) * float(speed_gap(
                                     x_nominal[mode, step, 1], prediction.means[mode, step, 1], self.config)))
-                        if floor_sigma is not None and cutin_cells[mode, step]:
+                        if floor_cells is not None and floor_cells[mode, step]:
                             # floorrisk<eps>: the margin to the floor the QP imposed on this cell,
-                            # L + d0 + z_j sigma_jk (inf where it keeps none); the priced row above
-                            # it never needs the emergency slack, its shortfall being uncapped
+                            # L + d0 + z_j sigma_jk (inf where it keeps none; with nopricesigma on a
+                            # priced lane-keeping cell its own sigma term); the priced row above it
+                            # never needs the emergency slack, its shortfall being uncapped
                             chance_margin_values[mode, step] = (
                                 prediction.means[mode, step, 0] - x_nominal[mode, step, 0]
                                 - (self.config.vehicle_length + self.config.d0) - floor_sigma[mode, step])
@@ -2149,9 +2172,16 @@ class NairACCSMPC:
         floor_old_margin_min = float("nan")
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE and np.any(cutin_cells):
             # the plan's margin to the floor these cells have without floorrisk<eps>,
-            # L + d0 + q(beta_j) sigma_jk (tightening_values is that sigma term on them)
+            # L + d0 + q(beta_j) sigma_jk (tightening_values is that sigma term on them, but with floortop the
+            # floor's z sigma and with nopricesigma 0)
+            old_sigma = tightening_values
+            if self.config.floor_risk_top or self.config.price_row_no_sigma:
+                old_sigma = tightening_values.copy()
+                for mode, step in zip(*np.nonzero(cutin_cells)):
+                    old_sigma[mode, step] = confidence_tightening(
+                        prediction.covariances[mode, step], prediction.chance_confidence[mode, step], self.config)
             old_floor_margin = (prediction.means[:, :, 0] - x_nominal[:, :, 0]
-                                - (self.config.vehicle_length + self.config.d0) - tightening_values)
+                                - (self.config.vehicle_length + self.config.d0) - old_sigma)
             floor_old_margin_min = float(np.min(old_floor_margin[cutin_cells]))
             if floor_sigma is not None:
                 z = floor_risk_cell_quantile(prediction, self.config)
@@ -2485,6 +2515,9 @@ class NairACCSMPC:
                 prediction.covariances[mode, step], risks[mode, step], self.config
             )
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+            if self.config.price_row_no_sigma and standoff_shortfall_mask(
+                    prediction, self.config.standoff_shortfall_on_lk)[mode, step]:
+                return 0.0      # nopricesigma: a priced row asks for D on the mean gap; its floor row keeps sigma
             return cell_sigma_term(prediction, mode, step, self.config)
         return 0.0
 
@@ -2937,7 +2970,8 @@ class NairACCSMPC:
             opti.set_value(problem.cvar_mask_param, (np.asarray(prediction.active_mask, dtype=bool)
                                                      & np.isfinite(prediction.chance_confidence)).astype(float))
         if problem.floor_cell_param is not None:
-            # floorrisk<eps>: the cap off on every cut-in chance cell, the floor row on those that keep one
+            # floorrisk<eps>: the cap off on every cut-in chance cell (with nopricesigma also on lkr's priced
+            # lane-keeping cells), the floor row on those that keep one
             floor_cells, floor_sigma = floor_risk_cells(prediction, self.config)
             floored = np.isfinite(floor_sigma)
             opti.set_value(problem.floor_cell_param, floor_cells.astype(float))
@@ -4622,12 +4656,24 @@ def confidence_tightening(lead_covariance, beta, config):
 def cell_sigma_term(prediction, mode, step, config):
     """The sigma term of cell (mode, step) in its safety row and in the reference: ``q(beta) sigma``
     (``confidence_tightening``), or with ``floortop`` on a cut-in chance cell the floor's one-sided ``z sigma``
-    (``floor_risk_cell_quantile``), which makes the priced row's top the floor plus the time gap.  A cut-in cell
-    whose hypothesis has ``p <= eps`` has no such quantile; ``occin<eps>`` at the same eps keeps it off."""
-    if config.floor_risk_top and np.isfinite(prediction.chance_confidence[mode, step]):
+    (``floor_risk_cell_quantile``), which makes the priced row's top the floor plus the time gap, and with
+    ``lkonesided<eps>`` on a lane-keeping cell with a sigma term (``lksigma``) the one-sided ``z sigma`` of its own
+    hypothesis at that eps.  A cell whose hypothesis has ``p <= eps`` has no such quantile; ``occin<eps>`` at the
+    same eps keeps such a cut-in cell off, and ``nocutout`` gives a lane-keeping cell ``p = 1``.  With
+    ``nopricesigma`` this stays the floor's sigma term; the priced row drops it (``_cell_tightening``)."""
+    chance = np.isfinite(prediction.chance_confidence[mode, step])
+    if config.floor_risk_top and chance:
         z = floor_risk_cell_quantile(prediction, config)[mode, step]
         if not np.isfinite(z):
             raise ValueError("floortop: an active cut-in cell with p <= eps has no one-sided quantile")
+        return float(z * safety_std(prediction.covariances[mode, step], config))
+    if (config.lane_keep_risk is not None and not chance and prediction.sigma_confidence is not None
+            and np.isfinite(prediction.sigma_confidence[mode, step])):
+        if prediction.lead_mode_probability is None:
+            raise ValueError("lkonesided needs the cells' hypothesis probabilities (lead_mode_probability)")
+        z = floor_risk_quantile(prediction.lead_mode_probability[mode, step], config.lane_keep_risk)
+        if not np.isfinite(z):
+            raise ValueError("lkonesided: an active lane-keeping cell with p <= eps has no one-sided quantile")
         return float(z * safety_std(prediction.covariances[mode, step], config))
     return confidence_tightening(prediction.covariances[mode, step],
                                  cell_sigma_confidence(prediction, mode, step), config)
@@ -4714,7 +4760,9 @@ def floor_risk_cells(prediction, config):
     Returns ``(cells, floor_sigma)``: a bool mask, and per cell ``z sigma_jk``
     (``floor_risk_cell_quantile`` times ``safety_std``, the std of the row's sigma term),
     ``-inf`` where the cell keeps no floor (``P_j <= eps``, with ``floorhyp`` the
-    hypothesis's ``p <= eps``), NaN off the cut-in chance cells.
+    hypothesis's ``p <= eps``), NaN off the cut-in chance cells.  With ``nopricesigma`` the cells also
+    include ``lkr``'s priced lane-keeping cells, whose floor is ``L + d0`` plus their own sigma term
+    (``cell_sigma_term``): their priced row drops that term, and with it the floor the time-gap cap gave.
     """
     cells = np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
     z = floor_risk_cell_quantile(prediction, config)
@@ -4722,6 +4770,11 @@ def floor_risk_cells(prediction, config):
     for mode, step in zip(*np.nonzero(cells)):
         floor_sigma[mode, step] = (z[mode, step] * safety_std(prediction.covariances[mode, step], config)
                                    if np.isfinite(z[mode, step]) else -np.inf)
+    if config.price_row_no_sigma:
+        lane_keep = standoff_shortfall_mask(prediction, config.standoff_shortfall_on_lk) & ~cells
+        for mode, step in zip(*np.nonzero(lane_keep)):
+            floor_sigma[mode, step] = cell_sigma_term(prediction, mode, step, config)
+        cells = cells | lane_keep
     return cells, floor_sigma
 
 
