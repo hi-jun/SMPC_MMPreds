@@ -1633,7 +1633,7 @@ class ACCNairSMPCAgent(object):
     @staticmethod
     def _parse_safety_constraint_mode(smpc_config):
         config = str(smpc_config).lower()
-        if re.search(r"cutin_chance[0-9]", config):
+        if re.search(r"cutin_chance[0-9]", config) or re.search(r"(?:^|_)chancecells(?=_|$)", config):
             return SAFETY_CONFIDENCE_CHANCE
         if (
                 "brake_distance" in config
@@ -2024,8 +2024,18 @@ class ACCNairSMPCAgent(object):
         the controller to ``confidence_chance`` safety constraints.  Modes below
         ``CUTIN_CHANCE_VANISH_BELOW`` vanish as for every STDAN policy.  See
         ``chance_cutin_clearance``.
+
+        ``chancecells`` (2026-11-10, maintainer: a name without the beta_ref the NGSIM design no longer uses) is the
+        same switch with ``beta_ref`` 0.6, i.e. ``cutin_chance0.6``: the cut-in cells become chance cells (the cells
+        that ``dopt<w>`` prices and ``floorrisk<eps>`` floors) and the sigma terms are on.  Whole-token match; not
+        together with ``cutin_chance<value>``.
         """
         match = re.search(r"cutin_chance([0-9]*\.?[0-9]+)", str(smpc_config))
+        cells = re.search(r"(?:^|_)chancecells(?=_|$)", str(smpc_config)) is not None
+        if match and cells:
+            raise ValueError("chancecells is cutin_chance0.6 under another name; use one of them")
+        if cells:
+            return 0.6
         return float(match.group(1)) if match else 0.0
 
     @staticmethod
