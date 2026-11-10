@@ -288,6 +288,9 @@ class ACCNairSMPCAgent(object):
         self.controller_config.floor_risk_hypothesis = self._parse_floor_risk_hypothesis(smpc_config)
         if self.controller_config.floor_risk_hypothesis and self.controller_config.floor_risk is None:
             raise ValueError("floorhyp needs floorrisk<eps>")
+        self.controller_config.floor_risk_top = self._parse_floor_risk_top(smpc_config)
+        if self.controller_config.floor_risk_top and not self.controller_config.floor_risk_hypothesis:
+            raise ValueError("floortop needs floorhyp")
         self.controller_config.failsafe_branch = self._parse_failsafe_branch(smpc_config)
         if self.controller_config.failsafe_branch and not self._parse_safety_layer(smpc_config):
             # The branch is the layer's fail-safe against the layer's checked members.
@@ -1835,6 +1838,16 @@ class ACCNairSMPCAgent(object):
         (``NairACCConfig.floor_risk_hypothesis``), 2026-11-09. Whole-token match.
         """
         return re.search(r"(?:^|_)floorhyp(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_floor_risk_top(smpc_config):
+        """Read ``floortop`` from the config string (default: off).
+
+        With ``floorhyp``: a cut-in chance cell's sigma term in its priced row and the reference is the floor's
+        one-sided ``z sigma``, so D = the floor + tau v (``NairACCConfig.floor_risk_top``), 2026-11-10.
+        Whole-token match.
+        """
+        return re.search(r"(?:^|_)floortop(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_safety_layer(smpc_config):

@@ -280,6 +280,12 @@ class NairACCConfig:
     #: hypothesis's breach probability ``p P(gap < L + d0) <= eps`` however many scenarios carry it (``P_j``
     #: splits ``p`` over them and relaxes each).  Off by default.
     floor_risk_hypothesis: bool = False
+    #: ``floortop`` (2026-11-10, maintainer: the sigma term of D one-sided too): with ``floor_risk_hypothesis``,
+    #: a cut-in chance cell's sigma term in its priced row and in the reference is the floor's ``z sigma``
+    #: (``cell_sigma_term``) in place of ``q(beta) sigma``, so the top of the priced range is the floor plus the
+    #: time gap, ``D = L + d0 + tau v + z sigma``, the gap at which ``p P(gap < L + d0 + tau v) <= eps``.
+    #: Lane-keeping cells (``lksigma``) keep ``q(beta) sigma``.  Off by default.
+    floor_risk_top: bool = False
     #: ``safebranch``: the safety layer's fail-safe as one more branch of the
     #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
     #: contingency plan).  The branch shares the first input with every
@@ -492,6 +498,8 @@ class NairACCConfig:
                 raise ValueError("floor_risk (floorrisk<eps>) is implemented only in the cached feedback QP")
         if self.floor_risk_hypothesis and self.floor_risk is None:
             raise ValueError("floor_risk_hypothesis (floorhyp) needs floor_risk (floorrisk<eps>)")
+        if self.floor_risk_top and not self.floor_risk_hypothesis:
+            raise ValueError("floor_risk_top (floortop) needs floor_risk_hypothesis (floorhyp)")
         if self.failsafe_branch:
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
@@ -1361,11 +1369,7 @@ class OldACCReferenceAdapter:
                 # Same reasoning for the sigma term: the constraint below adds
                 # it, so the reference has to ask for it too.
                 if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
-                    safe_gap += confidence_tightening(
-                        lead_prediction.covariances[mode, step],
-                        cell_sigma_confidence(lead_prediction, mode, step),
-                        self.config,
-                    )
+                    safe_gap += cell_sigma_term(lead_prediction, mode, step, self.config)
                 target_s = lead_s - safe_gap
 
                 if target_s < s_ref[mode, step]:
@@ -2481,11 +2485,7 @@ class NairACCSMPC:
                 prediction.covariances[mode, step], risks[mode, step], self.config
             )
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
-            return confidence_tightening(
-                prediction.covariances[mode, step],
-                cell_sigma_confidence(prediction, mode, step),
-                self.config,
-            )
+            return cell_sigma_term(prediction, mode, step, self.config)
         return 0.0
 
     def _can_use_cached_open_loop_fixed_qp(self, open_loop, prediction):
@@ -4617,6 +4617,20 @@ def confidence_tightening(lead_covariance, beta, config):
     if not np.isfinite(beta):
         return 0.0
     return float(confidence_quantile(beta) * safety_std(lead_covariance, config))
+
+
+def cell_sigma_term(prediction, mode, step, config):
+    """The sigma term of cell (mode, step) in its safety row and in the reference: ``q(beta) sigma``
+    (``confidence_tightening``), or with ``floortop`` on a cut-in chance cell the floor's one-sided ``z sigma``
+    (``floor_risk_cell_quantile``), which makes the priced row's top the floor plus the time gap.  A cut-in cell
+    whose hypothesis has ``p <= eps`` has no such quantile; ``occin<eps>`` at the same eps keeps it off."""
+    if config.floor_risk_top and np.isfinite(prediction.chance_confidence[mode, step]):
+        z = floor_risk_cell_quantile(prediction, config)[mode, step]
+        if not np.isfinite(z):
+            raise ValueError("floortop: an active cut-in cell with p <= eps has no one-sided quantile")
+        return float(z * safety_std(prediction.covariances[mode, step], config))
+    return confidence_tightening(prediction.covariances[mode, step],
+                                 cell_sigma_confidence(prediction, mode, step), config)
 
 
 def standoff_shortfall_mask(prediction, include_lk=False):
