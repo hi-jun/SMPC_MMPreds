@@ -27,8 +27,9 @@ standoff d0 + tau v = 3 + 1.3 v on that gap, a in [-3, 2] m/s^2, |j| <= 5
 m/s^3; the lead's a_p_min = -10.5 of Table I stays.  ``paperdsafe`` restores
 the paper's braking-based d_safe and ``amin10_amax3_jlim10`` Table I's
 limits; ``amin<x>``, ``amax<x>``, ``jlim<x>``, ``apmin<x>``, ``acutin<x>``,
-``tc<x>`` in the policy string override the numbers.  ``reachfix`` works
-here; ``physcheck`` is refused (NGSIM replay only, ``utils/pcacc.py``).
+``tc<x>`` in the policy string override the numbers, and ``jlimup<x>`` bounds
+the command's rise apart (2026-11-11).  ``reachfix`` works here; ``physcheck``,
+``emamin<x>`` and ``emjlim<x>`` are refused (NGSIM replay only, ``utils/pcacc.py``).
 The issued command is clipped to the acceleration bounds and, except on the
 acceleration-bounded path, to the jerk bound.  The ego's acceleration state of
 the paper's model is the last issued command (the ideal actuator realises it).
@@ -85,9 +86,10 @@ class PCACCAgent(object):
         self.nominal_speed = float(nominal_speed_mps)
         self.policy_string = str(smpc_config)
         self.config = PCACCConfig.from_policy_string(self.policy_string)
-        if self.config.physical_check:
+        if self.config.split_limits:
             # ``_limit_accel_command`` clips at the comfort a_min; the replay uses PCACCController.command_bounds
-            raise ValueError("physcheck: NGSIM replay only (this agent's command limiter clips the fail-safe at a_min)")
+            raise ValueError("physcheck / emamin<x> / emjlim<x>: NGSIM replay only (this agent's command limiter "
+                             "clips the fail-safe at a_min)")
         self.controller = PCACCController(self.config)
         self.tracker = LaneMembershipTracker(self.config)
         self.predictor_type = "none"
@@ -269,7 +271,8 @@ class PCACCAgent(object):
         if not jerk_limited:
             return action
         max_delta = float(cfg.jerk_max) * max(float(command_dt), 1.0e-6)
-        limited = np.clip(action, float(previous_accel_cmd) - max_delta, float(previous_accel_cmd) + max_delta)
+        max_rise = cfg.jerk_up_max * max(float(command_dt), 1.0e-6)     # jlimup<x> (2026-11-11); else max_delta
+        limited = np.clip(action, float(previous_accel_cmd) - max_delta, float(previous_accel_cmd) + max_rise)
         return float(np.clip(limited, cfg.a_min, cfg.a_max))
 
     def _command_jerk(self, action, command_dt):

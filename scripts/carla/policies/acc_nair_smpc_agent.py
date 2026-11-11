@@ -21,8 +21,8 @@ from utils.acc_nair_smpc import (
     BRAKE_DISTANCE_BOUND_HARD_BAND,
     BRAKE_DISTANCE_BOUND_REACHABLE_INTERVAL,
     FailsafeBranch,
-    failsafe_recovery_command,
     failsafe_recovery_floor,
+    limit_accel_command,
     MultimodalLeadPrediction,
     NairACCSMPC,
     PASS_MIQP_FAR_BEHIND_M,
@@ -273,6 +273,9 @@ class ACCNairSMPCAgent(object):
         jerk_limit = self._parse_jerk_limit(smpc_config)
         if jerk_limit is not None:
             self.controller_config.jerk_limit = jerk_limit
+        # amin<x> amax<x> jlimup<x> fsdecel<x> fsjerk<x> (2026-11-11, unified limits)
+        for name, value in self._parse_limit_tokens(smpc_config).items():
+            setattr(self.controller_config, name, value)
         r_a = self._parse_r_a(smpc_config)
         if r_a is not None:
             self.controller_config.r_a = r_a
@@ -334,7 +337,9 @@ class ACCNairSMPCAgent(object):
         if self._parse_safety_layer(smpc_config):
             from utils.pcacc import LaneMembershipTracker
             from utils.safety_layer import SafetyLayer
-            self.safety_layer = SafetyLayer(self.controller_config.a_max, entrant_decel=entrant_decel)
+            self.safety_layer = SafetyLayer(self.controller_config.a_max, entrant_decel=entrant_decel,
+                                            failsafe_decel=self.controller_config.failsafe_decel,
+                                            failsafe_jerk=self.controller_config.failsafe_jerk)
             self._safety_tracker = LaneMembershipTracker(self.safety_layer.cfg)
             self._safety_clock = 0.0
         self.synthetic_predictor = SyntheticLaneKeepingCutInPredictor(
@@ -1033,9 +1038,10 @@ class ACCNairSMPCAgent(object):
             pass_kw = {"pass_margin": self.pass_miqp_margin, "pass_slots": PASS_MIQP_SLOTS}
             if self.pass_no_cap:
                 # passnocap: the candidate test against the maximum-acceleration displacement
+                cfg = self.controller_config
                 reach = pass_maxacc_displacement(
-                    self.N, self.DT, speed, self._prev_accel_cmd, self.controller_config.v_max,
-                    self.controller_config.a_max, self.controller_config.jerk_limit)
+                    self.N, self.DT, speed, self._prev_accel_cmd, cfg.v_max, cfg.a_max,
+                    cfg.jerk_limit if cfg.jerk_limit_up is None else cfg.jerk_limit_up)   # the rise: jlimup<x>
                 pass_kw["pass_plan"] = {int(vid): reach for vid in target_states.keys()}
         elif self.entry_pass:
             now_s = self._elapsed_seconds()
@@ -1754,6 +1760,37 @@ class ACCNairSMPCAgent(object):
         match = re.search(r"jlim([0-9]*\.?[0-9]+)", str(smpc_config))
         return float(match.group(1)) if match else None
 
+    #: ``_parse_limit_tokens``: token -> (NairACCConfig field, sign of the value); the number is a magnitude
+    LIMIT_TOKENS = (
+        ("amin", "a_min", -1.0),
+        ("amax", "a_max", 1.0),
+        ("jlimup", "jerk_limit_up", 1.0),
+        ("fsdecel", "failsafe_decel", -1.0),
+        ("fsjerk", "failsafe_jerk", 1.0),
+    )
+
+    @classmethod
+    def _parse_limit_tokens(cls, smpc_config):
+        """Read the limit tokens of 2026-11-11 (unified limits) from the config string: a dict of the
+        ``NairACCConfig`` fields to set, empty without any (every string before them).
+
+        * ``amin<x>`` / ``amax<x>``: the comfort acceleration bounds ``a_min = -x`` / ``a_max = x`` [m/s^2]
+          (default -3 / 2, ``original_nair_acc_config``), PC-ACC's token names.
+        * ``jlimup<x>``: ``jerk_limit_up = x`` [m/s^3], the bound on the rising side of the acceleration;
+          ``jlim<x>`` (``_parse_jerk_limit``) then bounds the falling side only.
+        * ``fsdecel<x>`` / ``fsjerk<x>``: the safety layer's fail-safe, ``failsafe_decel = -x`` [m/s^2] and
+          ``failsafe_jerk = x`` [m/s^3] (default -8 / 20, ``utils/safety_layer.py``); need ``safelayer``.
+
+        Whole-token match; the numbers are magnitudes."""
+        out = {}
+        for token, name, sign in cls.LIMIT_TOKENS:
+            match = re.search(r"(?:^|_)" + token + r"([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+            if match:
+                out[name] = sign * float(match.group(1))
+        if ("failsafe_decel" in out or "failsafe_jerk" in out) and not cls._parse_safety_layer(smpc_config):
+            raise ValueError("fsdecel<x> / fsjerk<x> set the safety layer's fail-safe; they need safelayer")
+        return out
+
     @staticmethod
     def _parse_r_a(smpc_config):
         """Read ``ra<value>`` from the config string (None = keep the default 1).
@@ -2357,25 +2394,13 @@ class ACCNairSMPCAgent(object):
         return dt
 
     def _limit_accel_command(self, action, previous_accel_cmd, command_dt):
-        """Clip to the limits, then the command jerk limit around the previous command.
+        """Clip to the limits, then the command jerk limit around the previous command
+        (``utils.acc_nair_smpc.limit_accel_command``; ``jlimup<x>`` bounds the rising side apart).
 
         ``safelayer`` (``failsafe_recovery``): while the previous command lies below ``a_min`` (the layer's
         fail-safe) the window is the fail-safe's jerk around it, within its deceleration and ``a_max``, so the
         MPC's recovery ramp passes as planned instead of being clipped to ``a_min`` at once."""
-        cfg = self.controller_config
-        jerk_limit = cfg.jerk_limit
-        if cfg.failsafe_recovery and float(previous_accel_cmd) < cfg.a_min and jerk_limit is not None:
-            return failsafe_recovery_command(action, previous_accel_cmd, cfg, command_dt)
-        action = float(np.clip(action, cfg.a_min, cfg.a_max))
-        if jerk_limit is None:
-            return action
-        max_delta = float(jerk_limit) * max(float(command_dt), 1.0e-6)
-        limited = np.clip(
-            action,
-            float(previous_accel_cmd) - max_delta,
-            float(previous_accel_cmd) + max_delta,
-        )
-        return float(np.clip(limited, cfg.a_min, cfg.a_max))
+        return limit_accel_command(self.controller_config, action, previous_accel_cmd, command_dt)
 
     def _observe_safety_layer(self, time_s, s_ego, ey, command_dt):
         """``safelayer``: PC-ACC's perception this tick (``policies/pcacc_agent.observe_preceding_vehicles``):

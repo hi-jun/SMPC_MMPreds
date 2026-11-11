@@ -164,12 +164,17 @@ class ISAMPCPlanner:
                  zeta_l=0.0, zeta_w=ZHOU_ZETA_W, k_lon=ZHOU_K_LON_EV,
                  q_snap=ZHOU_Q_SNAP, q_accel=ZHOU_Q_ACCEL, q_terminal_v=ZHOU_Q_TERMINAL_V,
                  q_slack=ZHOU_Q_SLACK, gurobi_time_limit=0.15, solver_tol=1.0e-4,
-                 accel_input=False, r_jerk=None, r_move=None):
+                 accel_input=False, r_jerk=None, r_move=None, jerk_limit_up=None):
         self.N = int(horizon)
         self.dt = float(dt)
         self.v_des = float(v_des)
         self.a_min, self.a_max = float(a_min), float(a_max)
         self.jerk_limit = None if jerk_limit is None else float(jerk_limit)
+        # ``jlimup<x>`` (2026-11-11): the bound on the rising side alone; ``jerk_limit`` then bounds the falling
+        # side (None = ``jerk_limit``, symmetric)
+        if jerk_limit_up is not None and self.jerk_limit is None:
+            raise ValueError("jerk_limit_up (jlimup<x>) needs a jerk_limit")
+        self.jerk_limit_up = self.jerk_limit if jerk_limit_up is None else float(jerk_limit_up)
         self.v_min, self.v_max = float(v_min), float(v_max)
         self.lane_half_width = float(lane_half_width)
         self.epsilon = float(epsilon)
@@ -260,7 +265,7 @@ class ISAMPCPlanner:
         opti.subject_to(opti.bounded(self.v_min, v, self.v_max))
         opti.subject_to(opti.bounded(self.a_min, a, self.a_max))
         if self.jerk_limit is not None:
-            opti.subject_to(opti.bounded(-self.jerk_limit, j, self.jerk_limit))
+            opti.subject_to(opti.bounded(-self.jerk_limit, j, self.jerk_limit_up))
         opti.subject_to(v * self.time_headway - RHO.T <= XDV.T - s - (self.vehicle_length + self.d0))
         opti.subject_to(RHO >= 0.0)
         w = self.weights
@@ -299,9 +304,9 @@ class ISAMPCPlanner:
         opti.subject_to(opti.bounded(self.v_min, v, self.v_max))
         opti.subject_to(opti.bounded(self.a_min, U, self.a_max))
         if self.jerk_limit is not None:
-            opti.subject_to(U[0] - UPREV <= self.jerk_limit * CMD_DT)
+            opti.subject_to(U[0] - UPREV <= self.jerk_limit_up * CMD_DT)
             opti.subject_to(UPREV - U[0] <= self.jerk_limit * CMD_DT)
-            opti.subject_to(opti.bounded(-self.jerk_limit * T, U[1:] - U[:-1], self.jerk_limit * T))
+            opti.subject_to(opti.bounded(-self.jerk_limit * T, U[1:] - U[:-1], self.jerk_limit_up * T))
         opti.subject_to(v * self.time_headway - RHO.T <= XDV.T - s - (self.vehicle_length + self.d0))
         opti.subject_to(RHO >= 0.0)
         w = self.weights
@@ -399,7 +404,7 @@ class ISAMPCPlanner:
     def _clip_jerk(self, jerk):
         if self.jerk_limit is None:
             return float(jerk)
-        return float(np.clip(jerk, -self.jerk_limit, self.jerk_limit))
+        return float(np.clip(jerk, -self.jerk_limit, self.jerk_limit_up))
 
 
 def isampc_targets_from_bundle(bundle, horizon, controller_dt, sample_future):
@@ -445,7 +450,9 @@ class ISAMPCAgent(ACCNairSMPCAgent):
     selects the acceleration-input ablation QP, priced with the ``r_jerk`` /
     ``r_move`` the parent reads into ``controller_config`` (``rjerk<w>`` /
     ``rmove<w>``), as for D-opt.  ``qslack<w>`` (2026-10-22) sets the standoff
-    slack weight in place of Zhou's 0.055 (the NGSIM lab table uses 5).
+    slack weight in place of Zhou's 0.055 (the NGSIM lab table uses 5).  The
+    limits are the parent's ``controller_config``'s, so ``amin<x>``, ``amax<x>``,
+    ``jlim<x>`` and ``jlimup<x>`` (2026-11-11) set them as for D-opt.
     """
 
     def __init__(self, vehicle, goal_location, nominal_speed_mps=8.0, dt=0.2, N=8,
@@ -455,7 +462,7 @@ class ISAMPCAgent(ACCNairSMPCAgent):
         cfg = self.controller_config
         self.planner = ISAMPCPlanner(
             horizon=N, dt=dt, v_des=nominal_speed_mps,
-            a_min=cfg.a_min, a_max=cfg.a_max, jerk_limit=cfg.jerk_limit,
+            a_min=cfg.a_min, a_max=cfg.a_max, jerk_limit=cfg.jerk_limit, jerk_limit_up=cfg.jerk_limit_up,
             v_min=cfg.v_min, v_max=cfg.v_max, lane_half_width=self.EGO_LANE_HALF_WIDTH_M,
             vehicle_length=cfg.vehicle_length, d0=cfg.d0, time_headway=cfg.time_headway,
             gurobi_time_limit=cfg.gurobi_time_limit,

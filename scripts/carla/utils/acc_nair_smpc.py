@@ -354,6 +354,24 @@ class NairACCConfig:
     #: the problem without them, bit for bit.  ``None`` is off (the branch's
     #: lead is the checked members only).
     failsafe_entrant_decel: Optional[float] = None
+    #: ``jlimup<x>`` (2026-11-11, unified limits): the bound [m/s^3] on the rate at which the acceleration rises
+    #: (positive jerk: building up acceleration, releasing the brake), apart from ``jerk_limit``, which then bounds
+    #: only its fall (negative jerk: building up braking; ISO 15622 limits only that one).  It replaces
+    #: ``jerk_limit`` as the upper bound of every jerk row (``jinput``'s ``j_k``, the input-change rows), of the
+    #: warm start, the rollout and the fallback, of the comfort part of the recovery envelope and window
+    #: (``failsafe_recovery_*``), and of the callers' command limiter (``limit_accel_command``).  ``None`` is
+    #: ``jerk_limit`` (symmetric, every run before it).  Needs ``jerk_limit``.
+    jerk_limit_up: Optional[float] = None
+    #: ``fsdecel<x>`` / ``fsjerk<x>`` with ``safelayer`` (2026-11-11, unified limits): the safety layer's fail-safe
+    #: deceleration ``a_em = -x`` [m/s^2] and the magnitude of its constant jerk [m/s^3] in place of
+    #: ``utils/safety_layer.py``'s ``FAILSAFE_DECEL`` (-8) and ``FAILSAFE_JERK`` (20), wherever the MPC uses them
+    #: (``_failsafe_limits``): the start acceleration's lower clip, the recovery envelope, floor and command window
+    #: (``failsafe_recovery_*``), and the fail-safe branch's limits and terminal row
+    #: (``failsafe_terminal_coefficients``).  The caller builds the layer with the same values
+    #: (``SafetyLayer(failsafe_decel=, failsafe_jerk=)``); its check then guarantees against that fail-safe.
+    #: ``None`` keeps the module constants (every run before it).
+    failsafe_decel: Optional[float] = None
+    failsafe_jerk: Optional[float] = None
     #: ``passmiqp<m>`` (2026-11-04, final-check item 8): the pass / yield choice for an entering cut-in
     #: hypothesis made inside the optimization, one binary per candidate hypothesis in one MIQP per tick
     #: (Gurobi through CasADi's ``discrete`` flags), in place of ``entrypass``'s test on a remembered plan.
@@ -566,6 +584,20 @@ class NairACCConfig:
             raise ValueError("eta_std_max must be larger than eta_std_min")
         if self.jerk_limit is not None and self.jerk_limit < 0.0:
             raise ValueError("jerk_limit must be non-negative or None")
+        if self.jerk_limit_up is not None:
+            if self.jerk_limit is None:
+                raise ValueError("jerk_limit_up (jlimup<x>) needs a jerk_limit, which then bounds the falling side")
+            if not float(self.jerk_limit_up) > 0.0:
+                raise ValueError("jerk_limit_up (jlimup<x>) must be positive")
+        if self.failsafe_decel is not None and not float(self.failsafe_decel) <= float(self.a_min):
+            raise ValueError("failsafe_decel (fsdecel<x>) must not lie above a_min (the fail-safe brakes at least "
+                             "as hard as the comfort bound)")
+        if self.failsafe_jerk is not None and not float(self.failsafe_jerk) > 0.0:
+            raise ValueError("failsafe_jerk (fsjerk<x>) must be positive")
+        if self.failsafe_branch and not float(self.a_max) <= 0.5 * abs(_failsafe_limits(self)[0]):
+            # failsafe_terminal_coefficients bounds the fail-safe's ramp distance by v t_r, which needs
+            # a_N + a_em / 2 <= 0 for every a_N <= a_max
+            raise ValueError("failsafe_branch (safebranch) needs a_max <= |a_em| / 2 (failsafe_terminal_coefficients)")
         if self.solver_name != "gurobi":
             raise ValueError("NairACCSMPC currently supports only the gurobi solver backend")
 
@@ -1606,7 +1638,7 @@ class NairACCSMPC:
         if not np.isfinite(previous_accel_cmd):
             previous_accel_cmd = 0.0
         # failsafe_recovery (safelayer): the fail-safe's acceleration, below a_min, is a valid start
-        a_lower = _failsafe_limits()[0] if self.config.failsafe_recovery else self.config.a_min
+        a_lower = _failsafe_limits(self.config)[0] if self.config.failsafe_recovery else self.config.a_min
         self._previous_accel_cmd = float(np.clip(
             previous_accel_cmd,
             a_lower,
@@ -1654,13 +1686,18 @@ class NairACCSMPC:
             return None
         return float(self.config.jerk_limit)
 
+    def _jerk_up_value(self):
+        """The bound on the rising side (``jlimup<x>``: ``jerk_limit_up``; else ``jerk_limit``); None without a
+        jerk limit."""
+        return None if self.config.jerk_limit is None else _jerk_limit_up(self.config)
+
     def _add_symbolic_jerk_constraints(self, opti, control, previous_input, dt, upper=None):
         """The jerk rows on an input change; ``upper`` (failsafe_recovery) replaces the limit on the
-        increase."""
+        increase (``jerk_limit_up``, else ``jerk_limit``)."""
         jerk_limit = self._jerk_limit_value()
         if jerk_limit is None:
             return
-        opti.subject_to(control - previous_input <= (jerk_limit if upper is None else upper) * dt)
+        opti.subject_to(control - previous_input <= (self._jerk_up_value() if upper is None else upper) * dt)
         opti.subject_to(previous_input - control <= jerk_limit * dt)
 
     def _rate_limited_accel(self, accel, previous_input, dt):
@@ -1673,7 +1710,7 @@ class NairACCSMPC:
         return float(np.clip(
             accel,
             previous_input - max_delta,
-            previous_input + max_delta,
+            previous_input + self._jerk_up_value() * dt,
         ))
 
     def _brake_speed_intervals(self, x0, num_modes):
@@ -1727,7 +1764,7 @@ class NairACCSMPC:
         if self.config.jerk_input:
             # jinput: the warm start is the shifted previous jerk plan (a_ref is 0 either way)
             jerk_limit = self._jerk_limit_value()
-            prev_u = prev_u if jerk_limit is None else np.clip(prev_u, -jerk_limit, jerk_limit)
+            prev_u = prev_u if jerk_limit is None else np.clip(prev_u, -jerk_limit, self._jerk_up_value())
         else:
             prev_u = np.clip(prev_u, self.config.a_min, self.config.a_max)
         return ACCReference(
@@ -2221,7 +2258,7 @@ class NairACCSMPC:
         else:
             first_accel = reference.prev_u[0, 0] + policy.h[0, 0, 0]
         # failsafe_recovery: inside a recovery the command may lie below a_min (the envelope's ramp)
-        a_lower = self.config.a_min if self._recovery_bounds is None else _failsafe_limits()[0]
+        a_lower = self.config.a_min if self._recovery_bounds is None else _failsafe_limits(self.config)[0]
         action = float(np.clip(first_accel, a_lower, self.config.a_max))
 
         if self.config.safety_constraint_mode in CHANCE_SAFETY_MODES:
@@ -2387,14 +2424,14 @@ class NairACCSMPC:
         return fields
 
     def _clipped_jerk(self, jerk, plan=False, step=None):
-        """jinput: a jerk plan within ``[-jerk_limit, jerk_limit]`` (unbounded with ``jerk_limit`` None).
-        Inside a recovery (failsafe_recovery) the upper bound is the envelope's per step: ``plan`` for a
-        whole ``(modes, horizon)`` plan, ``step`` for one step's value."""
+        """jinput: a jerk plan within ``[-jerk_limit, jerk_limit]`` (unbounded with ``jerk_limit`` None; the upper
+        bound is ``jerk_limit_up`` with ``jlimup<x>``).  Inside a recovery (failsafe_recovery) the upper bound is
+        the envelope's per step: ``plan`` for a whole ``(modes, horizon)`` plan, ``step`` for one step's value."""
         jerk = np.asarray(jerk, dtype=float)
         jerk_limit = self._jerk_limit_value()
         if jerk_limit is None:
             return jerk
-        upper = jerk_limit
+        upper = self._jerk_up_value()
         if self._recovery_bounds is not None and (plan or step is not None):
             j_hi = self._recovery_bounds[1]
             upper = j_hi[None, :] if plan else float(j_hi[step])
@@ -2563,6 +2600,7 @@ class NairACCSMPC:
             self.config.solver_name,
             float(self.config.optimizer_ftol),
             None if self.config.gurobi_time_limit is None else float(self.config.gurobi_time_limit),
+            None if self.config.jerk_limit_up is None else float(self.config.jerk_limit_up),
         )
 
     def _solve_open_loop_fixed_qp_cached(self, x0, prediction, reference, risks, policy0, layout):
@@ -2852,6 +2890,9 @@ class NairACCSMPC:
             None if self.config.cutin_cvar_risk is None
             else (float(self.config.cutin_cvar_risk), float(self.config.cutin_cvar_bound)),
             self._cvar_rows(),
+            None if self.config.jerk_limit_up is None else float(self.config.jerk_limit_up),
+            None if self.config.failsafe_decel is None else float(self.config.failsafe_decel),
+            None if self.config.failsafe_jerk is None else float(self.config.failsafe_jerk),
             # last: tests/test_termcost.py and test_l1slack.py read it as key[-1]
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
@@ -2921,7 +2962,8 @@ class NairACCSMPC:
             # failsafe_recovery: the envelope's bounds inside a recovery, the nominal ones outside
             jerk_limit = self._jerk_limit_value()
             if self._recovery_bounds is None:
-                a_lo, j_hi = np.full(horizon, self.config.a_min), np.full(horizon, np.inf if jerk_limit is None else jerk_limit)
+                a_lo = np.full(horizon, self.config.a_min)
+                j_hi = np.full(horizon, np.inf if jerk_limit is None else self._jerk_up_value())
                 j0_lo = -np.inf if jerk_limit is None else -jerk_limit
             else:
                 a_lo, j_hi, j0_lo = self._recovery_bounds
@@ -3322,11 +3364,12 @@ class NairACCSMPC:
         j_hi_param = opti.parameter(horizon) if recovery and jerk_limit is not None else None
         j0_lo_param = opti.parameter() if recovery and jerk_input and jerk_limit is not None else None
         a_lo = (lambda step: a_lo_param[step]) if recovery else (lambda step: self.config.a_min)
-        j_hi = (lambda step: j_hi_param[step]) if j_hi_param is not None else (lambda step: jerk_limit)
+        jerk_up = self._jerk_up_value()             # jlimup<x>: the rising side's bound (else jerk_limit)
+        j_hi = (lambda step: j_hi_param[step]) if j_hi_param is not None else (lambda step: jerk_up)
         for mode in range(num_modes):
             for step in range(horizon):
                 if jerk_input:
-                    # jinput: the input is the jerk, |j_k| <= jerk_limit
+                    # jinput: the input is the jerk, -jerk_limit <= j_k <= jerk_limit (jlimup<x>: jerk_limit_up)
                     if jerk_limit is not None:
                         j_lo = j0_lo_param if (step == 0 and j0_lo_param is not None) else -jerk_limit
                         opti.subject_to(h_var[mode, step] >= j_lo - prev_u_param[mode, step])
@@ -3651,7 +3694,7 @@ class NairACCSMPC:
             # 0's weighted FAILSAFE_BRANCH_PROBABILITY (no dopt price), which regularises its free inputs
             # without changing the other scenarios' weights.  Without a checked member the lead sits 10^6 m
             # ahead and no row binds.
-            fs_decel, fs_jerk, _ = _failsafe_limits()
+            fs_decel, fs_jerk, _ = _failsafe_limits(self.config)
             fs_u_var = opti.variable(horizon)
             fs_slack_var = opti.variable(horizon)            # the row at step k = 1..N has the slack [k - 1]
             fs_stop_slack_var = opti.variable()
@@ -4778,14 +4821,52 @@ def floor_risk_cells(prediction, config):
     return cells, floor_sigma
 
 
-def _failsafe_limits():
+def _failsafe_limits(config=None):
     """``safebranch``: the safety layer's fail-safe deceleration and jerk and its lead bound
-    (``utils/safety_layer.py``: FAILSAFE_DECEL, FAILSAFE_JERK, LEAD_DECEL), which the branch adopts."""
+    (``utils/safety_layer.py``: FAILSAFE_DECEL, FAILSAFE_JERK, LEAD_DECEL), which the branch adopts.  With
+    ``config``, its ``failsafe_decel`` / ``failsafe_jerk`` (``fsdecel<x>`` / ``fsjerk<x>``) replace the first two
+    where set."""
     try:
         from utils.safety_layer import FAILSAFE_DECEL, FAILSAFE_JERK, LEAD_DECEL
     except ImportError:
         from scripts.carla.utils.safety_layer import FAILSAFE_DECEL, FAILSAFE_JERK, LEAD_DECEL
-    return float(FAILSAFE_DECEL), float(FAILSAFE_JERK), float(LEAD_DECEL)
+    a_em, j_em = FAILSAFE_DECEL, FAILSAFE_JERK
+    if config is not None:
+        a_em = a_em if config.failsafe_decel is None else config.failsafe_decel
+        j_em = j_em if config.failsafe_jerk is None else config.failsafe_jerk
+    return float(a_em), float(j_em), float(LEAD_DECEL)
+
+
+def _jerk_limit_up(config):
+    """The bound on the rising side of the acceleration (``jlimup<x>``: ``jerk_limit_up``, else ``jerk_limit``);
+    ``inf`` without a jerk limit."""
+    if config.jerk_limit is None:
+        return np.inf
+    return float(config.jerk_limit if config.jerk_limit_up is None else config.jerk_limit_up)
+
+
+def limit_accel_command(config, action, previous_accel_cmd, command_dt):
+    """The callers' command limiter (``ACCNairSMPCAgent._limit_accel_command``; the NGSIM replay's
+    ``_limit_accel_command`` holds the same arithmetic): clip to ``[a_min, a_max]``, then the command jerk limit
+    around the previous command, ``-jerk_limit`` on the falling side and ``jerk_limit_up`` (``jlimup<x>``, else
+    ``jerk_limit``) on the rising side.  With ``failsafe_recovery`` (safelayer) a previous command below ``a_min``
+    (the layer's fail-safe) opens the fail-safe's window instead (``failsafe_recovery_command``), so the MPC's
+    recovery ramp passes as planned instead of being clipped to ``a_min`` at once."""
+    cfg = config
+    jerk_limit = cfg.jerk_limit
+    if cfg.failsafe_recovery and float(previous_accel_cmd) < cfg.a_min and jerk_limit is not None:
+        return failsafe_recovery_command(action, previous_accel_cmd, cfg, command_dt)
+    action = float(np.clip(action, cfg.a_min, cfg.a_max))
+    if jerk_limit is None:
+        return action
+    max_delta = float(jerk_limit) * max(float(command_dt), 1.0e-6)
+    max_rise = _jerk_limit_up(cfg) * max(float(command_dt), 1.0e-6)
+    limited = np.clip(
+        action,
+        float(previous_accel_cmd) - max_delta,
+        float(previous_accel_cmd) + max_rise,
+    )
+    return float(np.clip(limited, cfg.a_min, cfg.a_max))
 
 
 def failsafe_recovery_envelope(a_start, config, command_dt):
@@ -4807,20 +4888,23 @@ def failsafe_recovery_envelope(a_start, config, command_dt):
       command_dt`` for k = 0, so ``u_0`` is fixed; ``j0_lo`` is unused (``-jerk_limit``).
 
     From ``a_start >= FAILSAFE_DECEL`` the envelope is feasible for the jerk rows; ``failsafe_recovery_floor``
-    gives the start acceleration below which it cannot keep ``v >= v_min``."""
+    gives the start acceleration below which it cannot keep ``v >= v_min``.  ``fsjerk<x>`` replaces ``j_em``
+    (``_failsafe_limits(config)``); ``jlimup<x>`` replaces the comfort jerk on the rising side (``j_up``), the
+    falling side's ``j0_lo`` keeps ``jerk_limit``."""
     horizon, dt, cdt = int(config.horizon), float(config.dt), float(command_dt)
     a_min, a_start = float(config.a_min), float(a_start)
     j_lim = float(config.jerk_limit) if config.jerk_limit is not None else np.inf
-    j_em = _failsafe_limits()[1]
+    j_up = _jerk_limit_up(config)                # the comfort bound on the rise (jlimup<x>, else j_lim)
+    j_em = _failsafe_limits(config)[1]
     e = lambda t: min(a_min, a_start + j_em * t)
     j_first = (e(cdt) - a_start) / cdt          # the command must reach e(command_dt) ...
-    j_first_hi = max(j_first, j_lim)             # ... and may rise beyond it at the comfort jerk
+    j_first_hi = max(j_first, j_up)              # ... and may rise beyond it at the comfort jerk
     if config.jerk_input:
         a_lo = np.array([e((k + 1) * dt) for k in range(horizon)])
-        j_hi = np.array([j_first_hi if k == 0 else (j_em if e(k * dt) < a_min else j_lim) for k in range(horizon)])
+        j_hi = np.array([j_first_hi if k == 0 else (j_em if e(k * dt) < a_min else j_up) for k in range(horizon)])
         return a_lo, j_hi, float(j_first)
     a_lo = np.array([e(cdt + k * dt) for k in range(horizon)])
-    j_hi = np.array([j_first_hi if k == 0 else (j_em if e(cdt + (k - 1) * dt) < a_min else j_lim)
+    j_hi = np.array([j_first_hi if k == 0 else (j_em if e(cdt + (k - 1) * dt) < a_min else j_up)
                      for k in range(horizon)])
     return a_lo, j_hi, -j_lim
 
@@ -4832,7 +4916,7 @@ def _failsafe_recovery_speed_loss(a_start, config, command_dt):
     horizon, dt, cdt = int(config.horizon), float(config.dt), float(command_dt)
     if config.jerk_limit is None:
         return 0.0
-    j_lim = float(config.jerk_limit)
+    j_lim = _jerk_limit_up(config)      # the release is a rise of the acceleration (jlimup<x>, else jerk_limit)
     if a_start < config.a_min:
         a_lo, j_hi, _ = failsafe_recovery_envelope(a_start, config, command_dt)
     else:
@@ -4863,7 +4947,7 @@ def failsafe_recovery_floor(v, config, command_dt):
     design's limits (the start state then is the issued command), and above ``a_min`` below about 0.9 m/s,
     where the comfort bounds themselves cannot keep v >= 0 (the -sqrt(2 j v) clip of 2026-11-02, exact on
     the grid)."""
-    a_em = _failsafe_limits()[0]
+    a_em = _failsafe_limits(config)[0]
     room = float(v) - float(config.v_min)
     if _failsafe_recovery_speed_loss(a_em, config, command_dt) <= room:
         return a_em
@@ -4884,11 +4968,12 @@ def failsafe_recovery_command(action, previous_accel_cmd, config, command_dt):
     (``ACCNairSMPCAgent._limit_accel_command``, the replay's ``_limit_accel_command``).  The window is the
     envelope's: no lower than the comfort jerk below the previous command and ``FAILSAFE_DECEL``, no higher
     than ``max(min(a_min, prev + j_em dt), prev + j_lim dt)``, the command the MPC's first jerk bounds admit
-    (``failsafe_recovery_envelope``), so the MPC's ramp passes as planned."""
+    (``failsafe_recovery_envelope``), so the MPC's ramp passes as planned.  ``fsdecel<x>`` / ``fsjerk<x>``
+    replace the fail-safe's limits; ``jlimup<x>`` the comfort jerk on the rising side."""
     prev, cdt = float(previous_accel_cmd), max(float(command_dt), 1.0e-6)
-    a_em, j_em, _ = _failsafe_limits()
+    a_em, j_em, _ = _failsafe_limits(config)
     j_lim = float(config.jerk_limit)
-    upper = max(min(float(config.a_min), prev + j_em * cdt), prev + j_lim * cdt)
+    upper = max(min(float(config.a_min), prev + j_em * cdt), prev + _jerk_limit_up(config) * cdt)
     lower = max(a_em, prev - j_lim * cdt)
     return float(np.clip(action, lower, min(upper, float(config.a_max))))
 
@@ -4911,7 +4996,7 @@ def failsafe_branch_lead(branch, config):
     gaps = np.asarray(branch.gaps, dtype=float).reshape(-1)
     speeds = np.maximum(np.asarray(branch.speeds, dtype=float).reshape(-1), 0.0)
     # entrant<b>: each member brakes at its own bound (the checked members at a_p, the entrants at a_c)
-    decel = (np.full(gaps.size, abs(_failsafe_limits()[2])) if branch.decels is None
+    decel = (np.full(gaps.size, abs(_failsafe_limits(config)[2])) if branch.decels is None
              else np.abs(np.asarray(branch.decels, dtype=float).reshape(-1)))
     moving = t[None, :] < (speeds / decel)[:, None]
     displacement = np.where(
@@ -4953,8 +5038,10 @@ def failsafe_terminal_coefficients(config):
     ``v t_r`` plus the area under ``a t - j_em t^2 / 2`` up to its root, ``2 a^3 / (3 j_em^2)`` for ``a > 0``:
     ``D_0 = 2 a_max^3 / (3 j_em^2)`` (1.3 cm at a_max 2, j_em 20) covers it; without it the bound ``c_T v`` is
     below the true distance by up to ``D_0`` as ``v -> 0`` with ``a_N > 0``.  Checked against the layer's
-    ``ego_brake_distance`` on a grid of ``(v, a)`` in ``tests/test_safebranch.py``."""
-    a_em, j_em, _ = _failsafe_limits()
+    ``ego_brake_distance`` on a grid of ``(v, a)`` in ``tests/test_safebranch.py``.  ``fsdecel<x>`` /
+    ``fsjerk<x>`` replace ``a_em`` / ``j_em`` (2.25 s and 5.3 cm at a_em -8, j_em 10); the bound needs
+    ``a_max <= |a_em| / 2`` (``NairACCConfig`` checks it with ``safebranch``)."""
+    a_em, j_em, _ = _failsafe_limits(config)
     a_max, v_max = float(config.a_max), float(config.v_max)
     c_t = (a_max - a_em) / j_em + v_max / (2.0 * abs(a_em))
     d_0 = 2.0 * max(a_max, 0.0) ** 3 / (3.0 * j_em ** 2)

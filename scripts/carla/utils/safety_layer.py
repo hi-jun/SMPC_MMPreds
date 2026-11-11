@@ -43,6 +43,8 @@ the fail-safe, and the measured states are exact.
 **Fail-safe parameters.** Constant jerk -20 m/s^3 from the current acceleration down to -8 m/s^2, then -8. This is
 emergency braking, beyond the nominal comfort limits. a_p = -10.5 m/s^2 (Spec. III.5); a_cut-in = -2 m/s^2 (PC-ACC's).
 Guaranteed bumper gap at equal speeds and zero acceleration: 4.4 / 7.8 / 11.9 m at 10 / 15 / 20 m/s.
+``SafetyLayer(failsafe_decel=, failsafe_jerk=)`` (tokens ``fsdecel<x>`` / ``fsjerk<x>``, 2026-11-11) replace -8 and 20;
+the check and the guarantee are then those of that fail-safe (at -8 m/s^2 and 10 m/s^3: 6.3 / 10.6 / 15.8 m).
 
 **Plant model of the interval.** The command is held (zero-order hold), the speed clipped at 0, the position
 trapezoidal, as in the NGSIM replay's ideal plant. The fail-safe is issued as the profile's value at the end of each
@@ -158,11 +160,19 @@ def entrant_margin(gap, v, a_cmd, v_p, a_c, cfg, dt):
     return min(m_interval, m_failsafe) - abs(cfg.a_min) * dt * dt / 8.0
 
 
-def safety_layer_config(a_max):
+def safety_layer_config(a_max, failsafe_decel=None, failsafe_jerk=None):
     """The layer's ``PCACCConfig``. The fail-safe is a constant-jerk profile: no Fig. 6 ramp, so no profile
     fractions. Gaps are physical bumper gaps (``paper_d_safe``). ``a_max`` is the nominal controller's upper
-    acceleration bound."""
-    return replace(PCACCConfig(), a_min=FAILSAFE_DECEL, jerk_max=FAILSAFE_JERK, a_max=float(a_max),
+    acceleration bound. ``failsafe_decel`` (< 0) and ``failsafe_jerk`` (> 0), tokens ``fsdecel<x>`` /
+    ``fsjerk<x>`` (2026-11-11), replace ``FAILSAFE_DECEL`` and ``FAILSAFE_JERK``; Spec. III.5 (a_p no weaker
+    than the fail-safe) still has to hold."""
+    a_em = FAILSAFE_DECEL if failsafe_decel is None else float(failsafe_decel)
+    j_em = FAILSAFE_JERK if failsafe_jerk is None else float(failsafe_jerk)
+    if not (a_em < 0.0 and j_em > 0.0):
+        raise ValueError("the fail-safe needs a negative deceleration and a positive jerk (%r, %r)" % (a_em, j_em))
+    if LEAD_DECEL > a_em:
+        raise ValueError("Spec. III.5 needs a_p <= the fail-safe's deceleration (%.2f > %.2f)" % (LEAD_DECEL, a_em))
+    return replace(PCACCConfig(), a_min=a_em, jerk_max=j_em, a_max=float(a_max),
                    a_p_min=LEAD_DECEL, a_cutin=CUTIN_DECEL, jerk_profile_fractions=(), paper_d_safe=True)
 
 
@@ -210,10 +220,14 @@ class SafetyLayer:
     a_p replaced by a_c for the entrant: no collision with a close entrant that was avoidable under a_c when it
     entered, as long as it brakes no harder than a_c while it is an entrant (and no harder than a_p once its gap
     has reached the safe distance and it is a checked member).  ``None`` is the layer of 2026-11-02 (entrants
-    get the ICS test only)."""
+    get the ICS test only).
 
-    def __init__(self, a_max, entrant_decel=None):
-        self.cfg = safety_layer_config(a_max)
+    ``failsafe_decel`` / ``failsafe_jerk`` (tokens ``fsdecel<x>`` / ``fsjerk<x>``, 2026-11-11): the fail-safe's
+    deceleration and constant jerk in place of ``FAILSAFE_DECEL`` / ``FAILSAFE_JERK`` (``safety_layer_config``);
+    the MPC must get the same values (``NairACCConfig.failsafe_decel`` / ``failsafe_jerk``)."""
+
+    def __init__(self, a_max, entrant_decel=None, failsafe_decel=None, failsafe_jerk=None):
+        self.cfg = safety_layer_config(a_max, failsafe_decel, failsafe_jerk)
         self.entrant_decel = None if entrant_decel is None else float(entrant_decel)
         if self.entrant_decel is not None and self.entrant_decel >= 0.0:
             raise ValueError("entrant_decel must be negative (a braking bound)")
