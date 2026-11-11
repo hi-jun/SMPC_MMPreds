@@ -27,7 +27,8 @@ standoff d0 + tau v = 3 + 1.3 v on that gap, a in [-3, 2] m/s^2, |j| <= 5
 m/s^3; the lead's a_p_min = -10.5 of Table I stays.  ``paperdsafe`` restores
 the paper's braking-based d_safe and ``amin10_amax3_jlim10`` Table I's
 limits; ``amin<x>``, ``amax<x>``, ``jlim<x>``, ``apmin<x>``, ``acutin<x>``,
-``tc<x>`` in the policy string override the numbers.
+``tc<x>`` in the policy string override the numbers.  ``reachfix`` works
+here; ``physcheck`` is refused (NGSIM replay only, ``utils/pcacc.py``).
 The issued command is clipped to the acceleration bounds and, except on the
 acceleration-bounded path, to the jerk bound.  The ego's acceleration state of
 the paper's model is the last issued command (the ideal actuator realises it).
@@ -84,6 +85,9 @@ class PCACCAgent(object):
         self.nominal_speed = float(nominal_speed_mps)
         self.policy_string = str(smpc_config)
         self.config = PCACCConfig.from_policy_string(self.policy_string)
+        if self.config.physical_check:
+            # ``_limit_accel_command`` clips at the comfort a_min; the replay uses PCACCController.command_bounds
+            raise ValueError("physcheck: NGSIM replay only (this agent's command limiter clips the fail-safe at a_min)")
         self.controller = PCACCController(self.config)
         self.tracker = LaneMembershipTracker(self.config)
         self.predictor_type = "none"

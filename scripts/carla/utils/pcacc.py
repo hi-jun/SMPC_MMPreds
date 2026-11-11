@@ -46,10 +46,59 @@ a in [-3, 2] m/s^2 and |j| <= 5 m/s^3 (Table I's through
 ``amin10_amax3_jlim10``); a_p_min, a_cut-in and t_c are unchanged.
 ``paperdsafe`` restores the paper's d_safe everywhere, on the physical bumper
 gap.
+
+Two fixes of the port, off by default (2026-11-11, maintainer; whole-token
+match; ``results/ngsim_lambda_cal_20261019/replay_out/pcacc_fix_20261111/``):
+
+* ``physcheck``: the emergency side becomes the paper's, the nominal side stays
+  the port's.  Condition (7) and constraint (3) use Prop. IV.5's distance (the
+  ego's fail-safe against the lead braking at a_p_min = -10.5 m/s^2), and the
+  fail-safe has Table I's emergency limits: a_min = -10 m/s^2 and the Fig. 6
+  profile scaled by |j_min| = 10 m/s^3 (``emergency_config``).  The emergency
+  profile runs on the same limits, so the issued command may now go down to
+  -10 m/s^2 (the fail-safe of this fork's own safety layer goes to -8,
+  ``utils/safety_layer.py``).  The nominal QP still tracks the fork's
+  standoff d0 + tau v (its reference) within the fork's comfort limits
+  a in [-3, 2], |j| <= 5.
+  - (3) moves with (7) because the paper defines both by one d_safe (that of
+    the current state, held over the horizon, as ``paperdsafe`` does).  Kept
+    on d0 + tau v, (3) would make the QP infeasible at the same centimetre
+    shortfalls, and an infeasible nominal engages the fail-safe.
+  - The cut-in definition (Def. II.3), the recapturing QP and the ICS test
+    stay the port's, on the comfort limits and d0 + tau v.
+  - Recovery: once the fail-safe has taken the acceleration below a_min, the
+    comfort side may bring it back only at its jerk bound.  The nominal QP's
+    acceleration floor at step k is min(a_min, a_0 + j_max k dt); the same
+    floor applies to every command computed from a jerk
+    (``_command_from_jerk``) and to the issued command (``command_bounds``).
+    This is the paper's new safe trajectory branching off the fail-safe.
+    Without it the QP stays infeasible below a_min - j_max dt, and the
+    fail-safe runs to standstill.
+  - Not a large buffer.  At equal speeds Prop. IV.5's distance lies only
+    0.7-3.0 m inside d0 + tau v at 5-20 m/s (6.5 / 13.6 / 20.9 / 28.3 m against
+    9.5 / 16.0 / 22.5 / 29.0 m).  It lies outside d0 + tau v when the ego
+    closes on a slower lead (lead 3 m/s slower: 16.1 / 24.8 / 33.6 m at
+    10 / 15 / 20 m/s) and at equal speeds above 23.6 m/s.
+  - NGSIM replay only: the CARLA agent's command limiter clips at a_min, so
+    the agent refuses the token.
+* ``reachfix``: the relevance reach of Sec. III-C rule 2 does not shrink while
+  the ego brakes.  The one-step advance starts from max(a, 0) instead of the
+  current acceleration (``relevant_vehicles``).  Computed from the braking
+  acceleration, the reach left a lead at d0 + tau v out while the ego braked
+  (at -3 m/s^2 below 9.1 m/s): cruise, then the lead came back (fail-safe),
+  and so on.
+  - The stopping distance in the reach stays the comfort profile's (``cfg``),
+    also with ``physcheck``.  That profile stops later than Table I's
+    fail-safe from any state, so this reach contains the paper's rule-2 reach
+    with the fail-safe that ``physcheck`` runs: no vehicle that its check (7)
+    could flag within one step is dropped.
+  - A lead at d0 + tau v then stays relevant down to 3.7 m/s (6.3 m/s with
+    Table I's stopping distance); below that it is out of the reach even at
+    a >= 0.
 """
 import math
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import casadi as ca
@@ -67,6 +116,10 @@ PATH_EMERGENCY = "emergency"    # safety-keeping fail-safe jerk profile
 PATH_RECAPTURE = "recapture"    # safety-recapturing nominal MPC (Prop. V.1)
 PATH_BOUNDED = "bounded"        # acceleration-bounded recapture (no jerk bounds)
 PATH_ICS = "ics"                # inevitable collision state: full braking
+
+# ``physcheck``: Table I's emergency limits, the fail-safe's a_min and the |j_min| that scales the Fig. 6 profile.
+TABLE_I_A_MIN = -10.0
+TABLE_I_JERK_MAX = 10.0
 
 _POLICY_TOKENS = {
     # token -> (config field, sign).  ``amin3`` is a_min = -3, ``jlim5`` j = +/-5.
@@ -111,6 +164,8 @@ class PCACCConfig:
     time_headway: float = 1.3     # tau
     vehicle_length: float = 4.5   # L
     paper_d_safe: bool = False    # ``paperdsafe``: Def. II.1 / Prop. IV.5 instead
+    physical_check: bool = False  # ``physcheck``: (3), (7) and the fail-safe the paper's (module docstring)
+    reach_nonneg_accel: bool = False  # ``reachfix``: rule 2's one-step advance from max(a, 0)
 
     @property
     def jerk_min(self):
@@ -124,15 +179,23 @@ class PCACCConfig:
     def from_policy_string(cls, policy):
         """``acc_pcacc`` plus optional ``amin<x>`` ``amax<x>`` ``jlim<x>`` ``apmin<x>``
         ``acutin<x>`` ``tc<x>`` tokens (magnitudes; the sign is the field's;
-        ``amin10_amax3_jlim10`` is Table I) and ``paperdsafe`` (the paper's d_safe)."""
+        ``amin10_amax3_jlim10`` is Table I), ``paperdsafe`` (the paper's d_safe),
+        ``physcheck`` and ``reachfix`` (module docstring)."""
         cfg = cls()
         for token, (name, sign) in _POLICY_TOKENS.items():
             m = re.search(r"(?:^|_)" + token + r"([0-9]*\.?[0-9]+)(?:_|$)", str(policy))
             if m:
                 setattr(cfg, name, sign * float(m.group(1)))
         cfg.paper_d_safe = re.search(r"(?:^|_)paperdsafe(?:_|$)", str(policy)) is not None
+        cfg.physical_check = re.search(r"(?:^|_)physcheck(?:_|$)", str(policy)) is not None
+        cfg.reach_nonneg_accel = re.search(r"(?:^|_)reachfix(?:_|$)", str(policy)) is not None
         if cfg.a_p_min > cfg.a_min:
             raise ValueError("Spec. III.5 needs a_p_min <= a_min (%.2f > %.2f)" % (cfg.a_p_min, cfg.a_min))
+        if cfg.physical_check and cfg.paper_d_safe:
+            raise ValueError("physcheck keeps the fork's standoff as the nominal reference; paperdsafe replaces it")
+        if cfg.physical_check and cfg.a_p_min > TABLE_I_A_MIN:
+            raise ValueError("Spec. III.5 needs a_p_min <= the fail-safe's a_min (%.2f > %.2f)"
+                             % (cfg.a_p_min, TABLE_I_A_MIN))
         return cfg
 
     def as_dict(self):
@@ -229,6 +292,15 @@ def standoff(v, cfg):
     ``L + d0 + tau v`` centre to centre).  The aggregator scores delta against
     the same geometry, so delta = 0 means the controller holds exactly it."""
     return cfg.d0 + cfg.time_headway * float(v)
+
+
+def emergency_config(cfg):
+    """The fail-safe's config: ``cfg`` itself, or with ``physcheck`` Table I's emergency
+    limits (a_min -10 m/s^2, the Fig. 6 profile scaled by |j_min| = 10 m/s^3).  The
+    comfort side (nominal QP, cruise, recapture, ICS test, relevance) keeps ``cfg``."""
+    if not cfg.physical_check:
+        return cfg
+    return replace(cfg, a_min=TABLE_I_A_MIN, jerk_max=TABLE_I_JERK_MAX)
 
 
 def emergency_accel(t_since, a_engage, cfg):
@@ -404,7 +476,7 @@ class _BatchQP:
         lba[idx_ds] = np.asarray(ds_min, dtype=float) - free[idx_ds]
         lba[idx_dv] = np.asarray(dv_lo, dtype=float) - free[idx_dv]
         uba[idx_dv] = np.asarray(dv_hi, dtype=float) - free[idx_dv]
-        lba[idx_a] = float(a_lo) - free[idx_a]
+        lba[idx_a] = np.asarray(a_lo, dtype=float) - free[idx_a]     # a scalar, or per step (physcheck's recovery)
         uba[idx_a] = float(a_hi) - free[idx_a]
         A_c = np.zeros((self.rows, N))
         A_c[:3 * N] = self.Su
@@ -468,8 +540,11 @@ class Decision:
 def relevant_vehicles(vehicles, v, a, cfg, dt_cmd):
     """Sec. III-C: drop a vehicle when a nearer one is at most as fast (1) and
     when it is beyond the ego's one-step reach plus emergency stopping distance (2).
-    ``vehicles`` are the safety-keeping candidates sorted by gap."""
-    s1, v1, a1 = _advance(float(v), float(a), cfg.jerk_max, float(dt_cmd))
+    ``vehicles`` are the safety-keeping candidates sorted by gap.  ``reachfix``:
+    the one-step advance starts from max(a, 0), so the reach does not shrink while
+    the ego brakes; the stopping distance is ``cfg``'s either way (module docstring)."""
+    a_adv = max(float(a), 0.0) if cfg.reach_nonneg_accel else float(a)
+    s1, v1, a1 = _advance(float(v), a_adv, cfg.jerk_max, float(dt_cmd))
     reach = max(0.0, s1) + ego_brake_distance(max(0.0, v1), min(cfg.a_max, a1), cfg)
     out = []
     v_nearer_min = np.inf
@@ -490,6 +565,7 @@ class PCACCController:
 
     def __init__(self, cfg):
         self.cfg = cfg
+        self.em_cfg = emergency_config(cfg)     # the fail-safe's limits (``physcheck``: Table I's)
         self.N_keep = max(1, int(round(cfg.horizon_keep_s / cfg.dt)))       # h_k / dt
         self.N_recap = max(1, int(math.ceil(cfg.t_clear_s / cfg.dt - 1.0e-9)))  # t_c / dt
         self._qp_keep = _BatchQP(self.N_keep, cfg.dt, cfg.q_keep, cfg.r_keep, cfg.jerk_max, "keep")
@@ -500,7 +576,29 @@ class PCACCController:
         self._emergency = {}        # vid -> (t_engaged, a_engaged)
 
     def _command_from_jerk(self, a, u0, dt_cmd):
-        return min(self.cfg.a_max, max(self.cfg.a_min, float(a) + float(u0) * float(dt_cmd)))
+        lo = self.cfg.a_min
+        if self.cfg.physical_check:
+            # below a_min after the fail-safe: back to a_min at the comfort jerk bound, no faster
+            lo = min(lo, float(a) + self.cfg.jerk_max * float(dt_cmd))
+        return min(self.cfg.a_max, max(lo, float(a) + float(u0) * float(dt_cmd)))
+
+    def command_bounds(self, path, prev_cmd, dt_cmd):
+        """``(lo, hi, jerk)``: the bounds the issued command is clipped to, after
+        ``prev_cmd``, with ``jerk`` None for no jerk bound.  The port: [a_min, a_max]
+        and the jerk bound, except on the acceleration-bounded path (no jerk bound).
+        ``physcheck``: the fail-safe gets Table I's limits [-10, a_max] and
+        |j| <= 10; the Fig. 6 profile never exceeds that jerk, so it passes
+        unchanged.  The other jerk-limited paths may stay below a_min only while
+        the comfort jerk cannot bring the command back:
+        lo = min(a_min, prev_cmd + j_max dt)."""
+        cfg = self.cfg
+        if path == PATH_BOUNDED:
+            return cfg.a_min, cfg.a_max, None
+        if not cfg.physical_check:
+            return cfg.a_min, cfg.a_max, cfg.jerk_max
+        if path == PATH_EMERGENCY:
+            return self.em_cfg.a_min, cfg.a_max, self.em_cfg.jerk_max
+        return min(cfg.a_min, float(prev_cmd) + cfg.jerk_max * float(dt_cmd)), cfg.a_max, cfg.jerk_max
 
     def _d_safe(self, v, a, v_p, dt_cmd):
         """Safe distance at the current state: this fork's standoff of the ego's
@@ -511,12 +609,12 @@ class PCACCController:
 
     def _next_state_unsafe(self, gap, v, a, v_p, u0, dt_cmd):
         """Condition (7) fails under the planned jerk ``u0``: one command interval
-        on, the gap is below the safe distance of the state reached (the paper:
-        its fail-safe no longer stops behind the fully braking lead; the fork:
-        the standoff of the next speed, the lead at constant speed)."""
+        on, the gap is below the safe distance of the state reached (the paper and
+        ``physcheck``: its fail-safe no longer stops behind the fully braking lead;
+        the fork: the standoff of the next speed, the lead at constant speed)."""
         cfg = self.cfg
-        if cfg.paper_d_safe:
-            return gap < safe_distance(v, a, v_p, cfg, dt_cmd, u0=u0)
+        if cfg.paper_d_safe or cfg.physical_check:
+            return gap < safe_distance(v, a, v_p, self.em_cfg, dt_cmd, u0=u0)
         s1, v1, _ = _advance(float(v), float(a), float(u0), float(dt_cmd))
         return gap + float(v_p) * float(dt_cmd) - s1 < standoff(max(0.0, v1), cfg)
 
@@ -525,9 +623,16 @@ class PCACCController:
         cfg = self.cfg
         N = self.N_keep
         d_ref = self._d_safe(v, a, veh.speed, dt_cmd)
+        a_lo = cfg.a_min
         if cfg.paper_d_safe:
             # (3) with d_safe of the zero-jerk propagation: one constant
             ds_min, ds_dv_coef = np.full(N, d_ref), 0.0
+        elif cfg.physical_check:
+            # (3) on Prop. IV.5's d_safe of the current state with Table I's fail-safe,
+            # one constant as with paperdsafe; the reference d_ref stays the standoff
+            ds_min, ds_dv_coef = np.full(N, safe_distance(v, a, veh.speed, self.em_cfg, dt_cmd)), 0.0
+            # below a_min after the fail-safe: the plan returns to a_min at the jerk bound
+            a_lo = np.minimum(cfg.a_min, float(a) + cfg.jerk_max * cfg.dt * np.arange(1, N + 1))
         else:
             # (3) per step, linear in the ego's speed v_k = v_p - dv_k:
             # ds_k >= d0 + tau v_k  <=>  ds_k + tau dv_k >= d0 + tau v_p
@@ -536,7 +641,7 @@ class PCACCController:
             [veh.gap, veh.speed - v, a], d_ref,
             ds_min=ds_min, ds_dv_coef=ds_dv_coef,
             dv_lo=np.full(N, veh.speed - cfg.v_max), dv_hi=np.full(N, veh.speed - cfg.v_min),
-            a_lo=cfg.a_min, a_hi=cfg.a_max)
+            a_lo=a_lo, a_hi=cfg.a_max)
         unsafe = True
         a_nom = None
         if feasible:
@@ -549,7 +654,7 @@ class PCACCController:
         if veh.vid not in self._emergency:
             self._emergency[veh.vid] = (float(t), float(a))
         t_e, a_e = self._emergency[veh.vid]
-        a_cmd = emergency_accel(float(t) - t_e + dt_cmd, a_e, cfg)
+        a_cmd = emergency_accel(float(t) - t_e + dt_cmd, a_e, self.em_cfg)
         return VehicleDecision(PATH_EMERGENCY, a_cmd, d_ref, veh.gap, veh.speed, False,
                                {"nominal_feasible": float(feasible), "t_engaged": t_e,
                                 "a_nominal": np.nan if a_nom is None else a_nom})

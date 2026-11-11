@@ -10,17 +10,21 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts", "carla"))
 
 from utils.pcacc import (  # noqa: E402
+    PATH_BOUNDED,
     PATH_CRUISE,
     PATH_EMERGENCY,
     PATH_ICS,
     PATH_NOMINAL,
     PATH_RECAPTURE,
+    TABLE_I_A_MIN,
+    TABLE_I_JERK_MAX,
     LaneMembershipTracker,
     PCACCConfig,
     PCACCController,
     VehicleObs,
     ego_brake_distance,
     emergency_accel,
+    emergency_config,
     is_inevitable_collision,
     lead_brake_distance,
     relevant_vehicles,
@@ -307,6 +311,225 @@ class CutInRuleTests(unittest.TestCase):
         self.assertTrue(tracker.update(1, 0.5, False, True, -1.0, -0.1).member)       # 0.5 s after leaving
         self.assertTrue(tracker.update(1, cfg.delta_leave_s, False, True, -1.0, -0.1).member)
         self.assertFalse(tracker.update(1, cfg.delta_leave_s + DT_CMD, False, True, -1.0, -0.1).member)
+
+
+TICK = 0.1     # the NGSIM replay's command interval
+
+
+def _issue(action, prev, dt, lo, hi, jerk):
+    """The NGSIM replay's command limiter (``baselines._limit``) on ``command_bounds``."""
+    action = float(np.clip(action, lo, hi))
+    if jerk is None:
+        return action
+    limited = np.clip(action, prev - jerk * dt, prev + jerk * dt)
+    return float(np.clip(limited, lo, hi))
+
+
+def _closed_loop(policy, v0, gap0, lead_accel, T, v_set=20.0, dt=TICK):
+    """One ego-lane lead (member from the start), the ideal double integrator, the
+    replay's limiter.  Returns per tick (t, v, gap, path, issued command)."""
+    ctrl = PCACCController(PCACCConfig.from_policy_string(policy))
+    s_e, v, a, s_l, v_l = 0.0, v0, 0.0, gap0, v0
+    rows = []
+    for k in range(int(round(T / dt))):
+        t = k * dt
+        dec = ctrl.step(t, v, a, v_set, [VehicleObs(1, s_l - s_e, v_l, True)], dt)
+        cmd = _issue(dec.accel, a, dt, *ctrl.command_bounds(dec.path, a, dt))
+        rows.append((t, v, s_l - s_e, dec.path, cmd))
+        v_next = max(0.0, v + cmd * dt)
+        s_e += 0.5 * (v + v_next) * dt
+        v, a = v_next, cmd
+        vl_next = max(0.0, v_l + lead_accel(t) * dt)
+        s_l += 0.5 * (v_l + vl_next) * dt
+        v_l = vl_next
+    return rows
+
+
+class PhysicalCheckTests(unittest.TestCase):
+    """``physcheck``: (3), (7) and the fail-safe the paper's (Table I's emergency
+    limits); the reference d0 + tau v and the comfort limits the port's."""
+
+    def setUp(self):
+        self.cfg = PCACCConfig()
+        self.phys = PCACCConfig.from_policy_string("acc_pcacc_physcheck")
+        self.em = emergency_config(self.phys)
+
+    def test_tokens(self):
+        for policy in ("acc_pcacc", "acc_pcacc_paperdsafe_amin10_amax3_jlim10", "acc_pcacc_physcheckx",
+                       "acc_pcacc_reachfixed"):
+            cfg = PCACCConfig.from_policy_string(policy)
+            self.assertFalse(cfg.physical_check or cfg.reach_nonneg_accel, policy)
+            self.assertIs(emergency_config(cfg), cfg)
+        both = PCACCConfig.from_policy_string("acc_pcacc_physcheck_reachfix")
+        self.assertTrue(both.physical_check and both.reach_nonneg_accel)
+        self.assertTrue(PCACCConfig.from_policy_string("acc_pcacc_reachfix").reach_nonneg_accel)
+        # the comfort side keeps the fork's limits; the fail-safe gets Table I's
+        self.assertEqual((self.phys.a_min, self.phys.a_max, self.phys.jerk_max), (-3.0, 2.0, 5.0))
+        self.assertEqual((self.em.a_min, self.em.a_max, self.em.jerk_max), (TABLE_I_A_MIN, 2.0, TABLE_I_JERK_MAX))
+        self.assertEqual((TABLE_I_A_MIN, TABLE_I_JERK_MAX), (-10.0, 10.0))
+        with self.assertRaises(ValueError):
+            PCACCConfig.from_policy_string("acc_pcacc_physcheck_paperdsafe")
+        with self.assertRaises(ValueError):
+            PCACCConfig.from_policy_string("acc_pcacc_physcheck_apmin9")   # lead braking weaker than the fail-safe
+
+    def test_condition_seven_and_constraint_three_are_physical(self):
+        ctrl = PCACCController(self.phys)
+        d = safe_distance(15.0, 0.0, 13.0, self.em, TICK, u0=-1.0)
+        self.assertFalse(ctrl._next_state_unsafe(d + 0.01, 15.0, 0.0, 13.0, -1.0, TICK))
+        self.assertTrue(ctrl._next_state_unsafe(d - 0.01, 15.0, 0.0, 13.0, -1.0, TICK))
+        # 1 m inside d0 + tau v at equal speed: unsafe for the port's check, safe for the physical one
+        gap = standoff(15.0, self.cfg) - 1.0
+        self.assertTrue(PCACCController(self.cfg)._next_state_unsafe(gap, 15.0, 0.0, 15.0, 0.0, TICK))
+        self.assertFalse(ctrl._next_state_unsafe(gap, 15.0, 0.0, 15.0, 0.0, TICK))
+        dec = ctrl.step(0.0, 15.0, 0.0, 20.0, [VehicleObs(1, gap, 15.0, True)], TICK)
+        self.assertEqual(dec.path, PATH_NOMINAL)
+        self.assertAlmostEqual(dec.per_vehicle[1].d_safe, standoff(15.0, self.cfg), places=9)   # the reference
+        self.assertLess(dec.accel, 0.0)                    # opening the gap toward d0 + tau v
+        # (3): no plan below Prop. IV.5's distance of the current state
+        qp, N = ctrl._qp_keep, ctrl.N_keep
+        d_now = safe_distance(15.0, 0.0, 15.0, self.em, TICK)
+        _, _, X = qp.solve([gap, 0.0, 0.0], standoff(15.0, self.cfg), ds_min=np.full(N, d_now),
+                           dv_lo=np.full(N, 15.0 - self.phys.v_max), dv_hi=np.full(N, 15.0),
+                           a_lo=self.phys.a_min, a_hi=self.phys.a_max)
+        self.assertTrue(np.all(X[0::3] >= d_now - 1.0e-6))
+        # inside the physical distance: the fail-safe on Table I's profile
+        dec = ctrl.step(0.1, 15.0, 0.0, 20.0, [VehicleObs(2, d_now - 1.0, 15.0, True)], TICK)
+        self.assertEqual(dec.path, PATH_EMERGENCY)
+        self.assertAlmostEqual(dec.accel, emergency_accel(TICK, 0.0, self.em), places=12)
+
+    def test_follows_the_standoff_without_the_fail_safe(self):
+        # A lead slowing at -2 m/s^2 for 3 s from 15 m/s: the port engages its fail-safe (its
+        # check (7) is the tracked standoff); physcheck brakes on the nominal path only and settles
+        # on d0 + tau v of the new speed.
+        lead = lambda t: -2.0 if 2.0 <= t < 5.0 else 0.0
+        port = _closed_loop("acc_pcacc", 15.0, standoff(15.0, self.cfg), lead, 25.0)
+        phys = _closed_loop("acc_pcacc_physcheck", 15.0, standoff(15.0, self.cfg), lead, 25.0)
+        self.assertGreater(sum(r[3] == PATH_EMERGENCY for r in port), 0)
+        self.assertEqual(sum(r[3] == PATH_EMERGENCY for r in phys), 0)
+        self.assertGreater(min(r[4] for r in phys), min(r[4] for r in port))
+        t, v, gap = phys[-1][:3]
+        self.assertAlmostEqual(gap, standoff(v, self.cfg), delta=0.05)
+
+    def test_fail_safe_reaches_table_i_and_hands_back(self):
+        # A lead braking at -7 m/s^2 for 1.5 s from 15 m/s at d0 + tau v.  The port's fail-safe
+        # stops at -3 and nearly hits it; physcheck's runs down Table I's profile (its own jerk
+        # passes the limiter unchanged), then the nominal path takes over below a_min and
+        # releases at the comfort jerk bound instead of braking to standstill.
+        lead = lambda t: -7.0 if 1.0 <= t < 2.5 else 0.0
+        port = _closed_loop("acc_pcacc", 15.0, standoff(15.0, self.cfg), lead, 12.0)
+        phys = _closed_loop("acc_pcacc_physcheck", 15.0, standoff(15.0, self.cfg), lead, 12.0)
+        self.assertGreaterEqual(min(r[4] for r in port), self.cfg.a_min)
+        self.assertLess(min(r[2] for r in port), 1.0)
+        cmds = np.array([r[4] for r in phys])
+        paths = [r[3] for r in phys]
+        self.assertLess(cmds.min(), -6.0)
+        self.assertGreaterEqual(cmds.min(), TABLE_I_A_MIN)
+        self.assertGreater(min(r[2] for r in phys), 5.0)
+        em = [i for i, p in enumerate(paths) if p == PATH_EMERGENCY]
+        self.assertTrue(em)
+        steps = np.diff(cmds[em[0]:em[-1] + 1])
+        self.assertTrue(np.all(steps <= 1.0e-12) and np.all(steps >= -TABLE_I_JERK_MAX * TICK - 1.0e-12))
+        # after the fail-safe: up at exactly the comfort jerk bound until a_min, no stop
+        k = em[-1] + 1
+        self.assertNotEqual(paths[k], PATH_EMERGENCY)
+        j = k
+        while cmds[j] < self.phys.a_min - 1.0e-9:
+            self.assertAlmostEqual(cmds[j] - cmds[j - 1], self.phys.jerk_max * TICK, places=9)
+            j += 1
+        self.assertGreater(phys[-1][1], 4.0)
+
+    def test_nominal_qp_recovers_from_below_a_min(self):
+        ctrl = PCACCController(self.phys)
+        v, a = 10.0, -8.0
+        gap = standoff(v, self.cfg) - 2.0      # inside the port's reach at a = -8, outside Prop. IV.5's distance
+        self.assertGreater(gap, safe_distance(v, a, 10.0, self.em, TICK, u0=self.phys.jerk_max))
+        dec = ctrl.step(0.0, v, a, 20.0, [VehicleObs(1, gap, 10.0, True)], TICK)
+        self.assertEqual(dec.path, PATH_NOMINAL)
+        self.assertTrue(dec.feasible)
+        self.assertAlmostEqual(dec.accel, a + self.phys.jerk_max * TICK, places=6)
+        self.assertEqual(ctrl.command_bounds(PATH_NOMINAL, a, TICK)[0], a + self.phys.jerk_max * TICK)
+        # the port's QP cannot start there (acceleration bound -3 unreachable at jerk 5)
+        port = PCACCController(self.cfg)
+        dec = port.step(0.0, v, a, 20.0, [VehicleObs(1, gap, 10.0, True)], TICK)
+        self.assertEqual(dec.path, PATH_EMERGENCY)
+        self.assertFalse(dec.per_vehicle[1].extra["nominal_feasible"])
+
+    def test_command_bounds(self):
+        port, phys = PCACCController(self.cfg), PCACCController(self.phys)
+        for path in (PATH_CRUISE, PATH_NOMINAL, PATH_EMERGENCY, PATH_RECAPTURE, PATH_ICS):
+            self.assertEqual(port.command_bounds(path, -1.0, TICK), (-3.0, 2.0, 5.0))
+            self.assertEqual(port.command_bounds(path, -3.0, TICK), (-3.0, 2.0, 5.0))
+            if path != PATH_EMERGENCY:
+                self.assertEqual(phys.command_bounds(path, -1.0, TICK), (-3.0, 2.0, 5.0))
+                self.assertAlmostEqual(phys.command_bounds(path, -6.0, TICK)[0], -5.5, places=12)
+        self.assertEqual(port.command_bounds(PATH_BOUNDED, -1.0, TICK), (-3.0, 2.0, None))
+        self.assertEqual(phys.command_bounds(PATH_BOUNDED, -6.0, TICK), (-3.0, 2.0, None))
+        self.assertEqual(phys.command_bounds(PATH_EMERGENCY, -1.0, TICK), (-10.0, 2.0, 10.0))
+
+    def test_cut_in_recapture_and_ics_stay_the_ports(self):
+        # Entering between Prop. IV.5's distance and d0 + tau v is a cut-in (Def. II.3 on the standoff).
+        v = 12.0
+        d_phys, d_fork = safe_distance(v, 0.0, v, self.em, TICK), standoff(v, self.cfg)
+        self.assertLess(d_phys, d_fork)
+        gap = 0.5 * (d_phys + d_fork)
+        outs = []
+        for cfg in (self.cfg, self.phys):
+            ctrl = PCACCController(cfg)
+            ctrl.step(0.0, v, 0.0, 20.0, [VehicleObs(8, gap, v, False)], TICK)
+            dec = ctrl.step(TICK, v, 0.0, 20.0, [VehicleObs(8, gap, v, True)], TICK)
+            self.assertEqual(dec.path, PATH_RECAPTURE)
+            self.assertAlmostEqual(dec.per_vehicle[8].d_safe, d_fork, places=9)
+            outs.append(dec.accel)
+        self.assertEqual(outs[0], outs[1])
+        self.assertEqual(is_inevitable_collision(2.0, 17.0, 0.0, 5.0, self.cfg),
+                         is_inevitable_collision(2.0, 17.0, 0.0, 5.0, self.phys))
+
+
+class ReachFixTests(unittest.TestCase):
+    """``reachfix``: rule 2's one-step advance from max(a, 0)."""
+
+    def setUp(self):
+        self.cfg = PCACCConfig()
+        self.fix = PCACCConfig.from_policy_string("acc_pcacc_reachfix")
+
+    def test_reach_does_not_shrink_while_braking(self):
+        v = 8.0
+        lead = [VehicleObs(1, standoff(v, self.cfg), v, True)]
+        kept = lambda cfg, a: [veh.vid for veh in relevant_vehicles(lead, v, a, cfg, TICK)]
+        self.assertEqual(kept(self.cfg, -3.0), [])        # the port drops the lead at d0 + tau v while braking
+        self.assertEqual(kept(self.cfg, 0.0), [1])
+        for a in (-3.0, -1.0, 0.0):
+            self.assertEqual(kept(self.fix, a), [1])
+        # the reach at a < 0 is the port's at a = 0; at a > 0 the port's
+        for a, a_port in ((-3.0, 0.0), (-0.5, 0.0), (0.0, 0.0), (1.0, 1.0)):
+            for gap in np.arange(0.5, 60.0, 0.5):
+                far = [VehicleObs(1, float(gap), v, True)]
+                self.assertEqual([x.vid for x in relevant_vehicles(far, v, a, self.fix, TICK)],
+                                 [x.vid for x in relevant_vehicles(far, v, a_port, self.cfg, TICK)])
+
+    def test_stopping_distance_stays_the_comfort_profiles_with_physcheck(self):
+        both = PCACCConfig.from_policy_string("acc_pcacc_physcheck_reachfix")
+        for v in (3.0, 6.0, 12.0):
+            for gap in np.arange(0.5, 40.0, 0.25):
+                veh = [VehicleObs(1, float(gap), v, True)]
+                self.assertEqual(len(relevant_vehicles(veh, v, -2.0, both, TICK)),
+                                 len(relevant_vehicles(veh, v, -2.0, self.fix, TICK)))
+        # ... which contains the reach with Table I's stopping distance
+        em = emergency_config(both)
+        for v in (3.0, 6.0, 12.0, 20.0):
+            self.assertGreater(ego_brake_distance(v, 0.5, self.cfg), ego_brake_distance(v, 0.5, em))
+
+    def test_no_cruise_fail_safe_flicker_in_stop_and_go(self):
+        # A lead at 6 m/s slowing and speeding up by 2 m/s: the port's reach drops the lead while
+        # the ego brakes, which alternates cruise and its fail-safe; reachfix keeps it.
+        lead = lambda t: -1.0 if 2.0 <= t < 4.0 else (1.0 if 8.0 <= t < 10.0 else 0.0)
+        port = _closed_loop("acc_pcacc", 6.0, 10.0, lead, 30.0)
+        fix = _closed_loop("acc_pcacc_reachfix", 6.0, 10.0, lead, 30.0)
+        flips = lambda rows: sum(rows[i][3] != rows[i - 1][3] for i in range(1, len(rows)))
+        self.assertGreater(flips(port), 10)
+        self.assertGreater(sum(r[3] == PATH_CRUISE for r in port), 0)
+        self.assertLessEqual(flips(fix), 2)
+        self.assertEqual(sum(r[3] == PATH_CRUISE for r in fix), 0)
 
 
 if __name__ == "__main__":
