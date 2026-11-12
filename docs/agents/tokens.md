@@ -2,6 +2,8 @@
 
 Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). One subsection per row of the token table of AGENTS.md §4, then one per external baseline. The one-line summary of every token is AGENTS.md §4.
 
+(updated 2026-11-12: stale statements have since been marked in place with dated "updated", "withdrawn", "clarified" and "pointer updated" notes, and the record of `onerow` was added; the reformat checks read this file at commit 38a1b46. Clarified 2026-11-12: in these records "not in the paper" means not in the paper of 2026-09-10, `overleaf/` (its formulation and CARLA tables, AGENTS.md §1), whose tracked `.tex` files name none of the tokens added since; "the paper's NGSIM tables" are the NGSIM replay runs made for the paper from 2026-10-28 on (`open_items.md`, "Final NGSIM paper set and checkpoint"). A token can be in those tables and "not in the paper".)
+
 ## Tokens
 
 ### `const_lead`
@@ -91,6 +93,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
     part of the current design since the night of 2026-11-03, maintainer's decision, §1;
     the replay's default tail ends `_lkrsigma`;
     paper root with the ghost fix `fin_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_safebranch_mergefirst_lkrsigma_ghost_20261103`, tables `replay_out/lkrsigma_20261103/tables_paper_lkrsigma.md`)
+    (updated 2026-11-12: the default tail has grown since and ends `_fsjerk10` since 2026-11-12, with `lkrsigma` still in it, `ngsim_replay_defaults.md`; "not in the paper" means the paper of 2026-09-10, see this file's header, while the paper's NGSIM tables have run with it since the night of 2026-11-03)
 
 ### `lkhold`
 
@@ -107,6 +110,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
     (added 2026-11-03, caa9b64;
     part of the current design since the night of 2026-11-03 with the replay's `NGSIM_LANE_TEST=path`, maintainer's decision, §1;
     the replay's default tail ends `_lkhold`)
+    (updated 2026-11-12: the default tail has grown since and ends `_fsjerk10` since 2026-11-12, with `lkhold` still in it, `ngsim_replay_defaults.md`; "not in the paper" means the paper of 2026-09-10, see this file's header, while the paper's NGSIM tables have run with it since the night of 2026-11-03, `design_history.md`)
 
 ### `pricep2`
 
@@ -197,7 +201,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - `NairACCConfig.pass_miqp_margin`
   - whole-token match (`_parse_pass_miqp`; `passmiqp` alone m = 0)
   - needs `stdan_3int`, `cutin_chance` and `dopt<w>`
-  - ValueError with `relbrake<b>`, `floorrisk<eps>`, `alag<τ>`, `with_k`.
+  - ValueError with `relbrake<b>`, `floorrisk<ε>` (fixed 2026-11-12: it read `floorrisk<eps>`), `alag<τ>`, `with_k`.
 - **Logged:**
   - `NairACCSolution.pass_decisions` (vehicle, label, entry step, entry gap under the cap, slot, pass), `pass_n_pass`,
     `pass_accel_max` (the largest planned acceleration over the passed candidates' capped steps, above 0 only where a_0 > 0 was kept), `pass_solve_s`,
@@ -216,6 +220,8 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - critical δ_max 9.1 → 8.1 %, floor breaches 9 → 7, mild δ_max 5.9 → 5.2, floor breaches 3 → 1, no-cut-in phantom_ep 0.188 → 0.179 (SE 0.008), runs a_min ≤ −2 11 → 12, contacts 0, j_max −0.09 / −0.08
   - but all four removed breaches are runs where the passed TV merged beside the ego and the replay's ghost rule hides it (item 10):
     re-scored with side entries live once clear, critical 11.4 → 10.8 % and 14 → 13 breaches, mild 7.8 → 7.4 % and 8 → 7, no cut-in contacts 1 → 2
+    (clarified 2026-11-12: "contacts 0" is the replay's own scoring; "no cut-in contacts 1 → 2" is the open-loop recount, in which the ego never reacted to the re-scored vehicles: the paper root has 1 such contact and this root 2, the added one ds4_v3159; critical stays 1 → 1, mild 0 → 0; `replay_out/passmiqp_20261104/result.md`)
+    (updated 2026-11-12: since 2026-11-12 the replay keeps lane-change side entries live by default, `NGSIM_SIDE_ENTRY=live`; this root ran under the ghost rule and has not been re-run)
   - one no-cut-in near miss (ds4_v3015, 0.07 m) where the cap made the ego slower
   - MIQP ticks 3.0 % of ticks, TV candidates 731 pass / 10 yield ticks
   - warm MIQP ticks 136 ms against 60 ms (load-inflated), the first-use builds 1.8 s
@@ -242,13 +248,14 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - 10 tests (`tests/test_passnocap.py`).
 - **Result:** NGSIM final set (λ 0, ideal plant, `NGSIM_LANE_TEST=path`, `replay_out/passnocap_20261104/result.md`, root `fin_..._entrant2_passmiqp_passnocap_20261104` + `lo_`, paired against the paper root and the `passmiqp` root):
   - no-cut-in phantom_ep 0.188 → 0.138 (−0.050, SE 0.013), runs ≥ 0.3 71 → 56, runs a_min ≤ −2 11 → 8, v_avg +0.11 m/s
-  - critical δ_max 9.1 → 8.1, floor breaches 9 → 3, mild 5.9 → 6.1 and 3 → 3
+  - critical δ_max 9.1 → 8.1, floor breaches 9 → 3, mild 5.9 → 6.1 and 3 → 3 (verified 2026-11-12: critical δ_max is 8.1 % with `passnocap` as with `passmiqp`, not a copy error, `replay_out/passnocap_20261104/result.md`)
     (3 removed, 3 new: ds2_v1873 0.24 m and ds5_v2583 0.26 m, where the ego was accelerating at +1.5 / +1.1 m/s² toward the TV when it entered and the safety layer's entrant check issued the fail-safe on the entry tick, the first scored-tick action of the layer on the final set;
     ds1_v2879 2.71 m)
   - contacts 0
   - j_max −0.01 / +0.04 / −0.05
   - every removed breach is a passed TV that merged beside the ego and became a ghost (side-entry ghosts with the TV 4 / 16 → 13 / 22, critical / mild)
   - re-scored with side entries live once clear (item 10): critical 14 → 11 breaches, mild 8 → 10 and one re-scored contact, so pre-registered rule 2 fails
+    (updated 2026-11-12: since 2026-11-12 the replay keeps lane-change side entries live by default, `NGSIM_SIDE_ENTRY=live`; this root ran under the ghost rule and has not been re-run)
   - MIQP ticks 5.7 % of ticks, pass / yield 4,859 / 1,548 ticks, the TV 1,218 / 495
   - the plan above a_0 on 60 % of pass ticks (median +0.26, p90 +0.94 m/s²), the executed peak on a TV pass median +0.54 (with the cap +0.25)
   - 18 load time-limit fallback ticks in 14 runs, all plain-QP ticks
@@ -289,6 +296,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - off by default
   - not adopted (decisions pending, §10)
   - not in the paper (added 2026-11-05, 68d3829)
+  - (updated 2026-11-12: run on the tuning set, `replay_out/pcal_tune_20261105/result.md`, and on the final set, `replay_out/pcal_cvar_20261106/result.md`; adopted with `occin0.1` into the NGSIM design on 2026-11-06 and replaced by `bcts` that evening; `design_history.md` 2026-11-06, `bcts` below)
 
 ### `bcts`
 
@@ -551,7 +559,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
 - **Cut-ins:** a vehicle that joins the path, or is first seen in it, inside the safe distance of the current state is a cut-in (Def. II.3) until the gap reaches that distance
   - in an ICS against it (it braking at −2 m/s²) the layer brakes fully.
 - **Every other member** gets condition (7) for the limited MPC command held over the interval: the fail-safe must then stop behind the vehicle braking at −10.5 m/s² from now.
-  - The fail-safe is a constant jerk of −20 m/s³ down to −8 m/s²
+  - The fail-safe is a constant jerk of −20 m/s³ down to −8 m/s² (updated 2026-11-12: the NGSIM replay's default runs it at jerk 10, `fsjerk10`, since 2026-11-12, which makes the guaranteed bumper gaps below 6.3 / 10.6 / 15.7 m; `fsdecel<x>`, `fsjerk<x>`)
   - the requirement adds \|a_em\|·dt²/8 for the plant's stopping tick (1 cm at 0.1 s).
   - If one member fails, the fail-safe is issued until the MPC command passes again (the MPC command instead, if it brakes harder).
 - **Command path:** the fail-safe bypasses the command limiter.
@@ -569,7 +577,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
 - **NGSIM final set** (λ 0, ideal plant, `replay_out/safelayer_20261102/result.md`, roots `fin_jinput_ra0_fullfoot_l1slack1e6_safelayer_20261102` + `lo_…`, code 96bfb98):
   - the layer acted on 2 ticks in 2 of 889 runs, both in the unscored warm-up against a non-TV vehicle the replay's start placed near the ego
   - the lead-only loop is identical.
-  - Every column of the paper table is unchanged to its precision (mild j_max +0.01)
+  - Every column of the paper table is unchanged to its precision (mild j_max +0.01) (clarified 2026-11-12: every paired difference is 0.00 at the table's precision except mild j_max, +0.01 (SE 0.01), one unit of its last digit; `replay_out/safelayer_20261102/result.md`, item 3)
   - 0 fallbacks, 0 contacts, floor breaches 10 / 3 as the design.
   - The margin to the layer's requirement on scored ticks is ≥ 0.01 m (critical / mild) and ≥ 2.99 m (no cut-in).
 - **Membership fix:** The membership rule was fixed after a first final-set run (v1, 1d0a3a2, roots `*_safelayer_v1_20261102`).
@@ -664,6 +672,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
     (added 2026-11-04, 4c95000;
     in the paper's NGSIM tables since 2026-11-04, maintainer's decision, §1: `replay_out/entrant_20261104/tables_paper_entrant2.md`;
     the replay's default tail ends `_entrant2`)
+    (clarified 2026-11-12: "not in the paper" means the paper of 2026-09-10, see this file's header, so it does not contradict "in the paper's NGSIM tables"; updated 2026-11-12: the default tail has grown since and ends `_fsjerk10` since 2026-11-12, with `entrant2` still in it, `ngsim_replay_defaults.md`)
 
 ### `floorrisk<ε>`
 
@@ -688,6 +697,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
 - **Status:**
   - Final set alone not run
   - with `floorhyp` and `pingate` (ε 0.05, 0.1 since NL that evening) part of the NGSIM design since 2026-11-10 (maintainer's decision, §1)
+    (updated 2026-11-12: `pingate` left the NGSIM design on the night of 2026-11-11, NP; `floorrisk0.1` with `floorhyp` stays in it and in the replay's default string; `onerow`, which the maintainer decided on 2026-11-12 will be the final design, refuses `floorrisk<ε>`, `onerow` below)
   - off by default, not in the paper (added 2026-11-02, 0fa1c50, implemented by a Fable subagent)
 
 ### `floorhyp`
@@ -698,11 +708,12 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - then P(hypothesis in the path and gap < L + d0) ≤ ε holds per hypothesis where the floor row holds.
   - A prediction with neither those probabilities nor a cut-in chance cell (the replay's no-target placeholder) needs none; a first smoke raised there and was fixed before the run.
 - **Checks:** `floorrisk` alone unchanged (its tests); 4 tests (`tests/test_floorhyp.py`).
-- **Result:** Final set only with `pingate` (row above, `replay_out/pingate_20261109/result.md`).
+- **Result:** Final set only with `pingate` (`pingate`'s section above, `replay_out/pingate_20261109/result.md`; pointer updated 2026-11-12: it read "row above").
 - **Status:**
   - Whole-token match (`_parse_floor_risk_hypothesis`)
   - off by default
   - part of the NGSIM design since 2026-11-10 with `pingate` and `floorrisk0.05` (maintainer's decision, §1; `floorrisk0.1` since NL that evening)
+    (updated 2026-11-12: `pingate` left the NGSIM design on the night of 2026-11-11, NP; `floorhyp` with `floorrisk0.1` stays in it and in the replay's default string; `onerow`, which the maintainer decided on 2026-11-12 will be the final design, refuses `floorhyp`, `onerow` below)
   - not in the paper (added 2026-11-09, 91a2d0e)
 
 ### `floortop`
@@ -753,7 +764,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
 ### `nopricesigma`
 
 - **What:** With `floorrisk<ε>` only (ValueError otherwise):
-  every priced cell (`standoff_shortfall_mask`: the cut-in chance cells and `lkr`'s priced lane-keeping cells) asks for its standoff D on the mean gap, gap ≥ D with cost 100·P·(d_safe − D)²,
+  every priced cell (`standoff_shortfall_mask`: the cut-in chance cells and `lkr`'s priced lane-keeping cells) asks for its standoff D on the mean gap, gap ≥ D with cost 100·P·(d_safe − D)² (updated 2026-11-12: the factor is `dopt<w>`'s w, 100 when this was written; the NGSIM design uses w 3, `dopt3lkr`, since the night of 2026-11-11),
   in its priced row and in the reference, without a σ term (`NairACCSMPC._cell_tightening`, `NairACCConfig.price_row_no_sigma`)
   - the floor keeps the σ term in its own hard row (`floor_risk_cells`):
     - a cut-in cell's floorrisk floor L + d0 + z·σ,
@@ -794,7 +805,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - with it on the smoke, max |Δa_cmd| 3.9e-4 m/s²
   - 5 tests (`tests/test_leadmerge.py`, one solves a 4-scenario problem and its merged 2-scenario version: same first command, |Δu0| < 1e-4).
 - **Result:** NGSIM final set (λ 0, ideal plant, `replay_out/leadmerge_20261103/result.md`, roots `fin_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_20261103` + `lo_…`, paired against the paper design with `safelayer`, pre-registered rule passed):
-  - every paper-table column unchanged to its precision (mild j_max 1.93 → 1.92)
+  - every paper-table column unchanged to its precision (mild j_max 1.93 → 1.92) (clarified 2026-11-12: every paired difference rounds to 0 at the printed precision; mild j_max's printed mean still moved by one unit of its last digit, paired −0.00 (SE 0.00); `replay_out/leadmerge_20261103/result.md`)
   - contacts, fallbacks, floor breaches (10 / 3) and safety-layer runs (2) unchanged
   - no episode moves δ_max by > 1 %p
   - 9 of 889 episodes have a tick with |Δa_cmd| > 0.01 (at most 0.17 m/s²).
@@ -810,6 +821,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - the replay logs the QP's scenario count as the tick array `n_scen`.
   - Part of the current design since 2026-11-03 (maintainer's decision, §1; the replay's default tail ends `_leadmerge`)
   - not run in CARLA, not in the paper (added 2026-11-03, 12b8c1d)
+  - (updated 2026-11-12: the default tail has grown since and ends `_fsjerk10` since 2026-11-12, with `leadmerge` still in it, `ngsim_replay_defaults.md`; clarified 2026-11-12: "not in the paper" means the paper of 2026-09-10, see this file's header, while the paper's NGSIM tables have run with it since 2026-11-03, row "D-opt, NGSIM paper (2026-11-03)" of `design_history.md`)
 
 ### `mergefirst`
 
@@ -838,6 +850,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
     (added 2026-11-03, cf48239;
     part of the current design since the evening of 2026-11-03, maintainer's decision, §1;
     the replay's default tail ends `_mergefirst`)
+    (updated 2026-11-12: the default tail has grown since and ends `_fsjerk10` since 2026-11-12, with `mergefirst` still in it, `ngsim_replay_defaults.md`; clarified 2026-11-12: "not in the paper" means the paper of 2026-09-10, see this file's header, while the paper's NGSIM tables have run with it since the evening of 2026-11-03, `replay_out/mergefirst_20261103/tables_paper_mergefirst.md`)
 
 ### `branchdec<a>`
 
@@ -874,6 +887,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
     - and `phantom_brake` (runs without an entry: the largest braking command max(0, −a_cmd) over the ticks with no measured in-lane lead within d_safe, in m/s²; `ctx_unnec` is `phantom_brake ≥ 0.3`; None with an entry).
   - Both are None in cut-out groups.
 - **Status:** No λ is calibrated yet: `ctx0.6`, from a predictor-level NGSIM calibration, made D-opt worse in CARLA; a calibration on closed-loop control outcomes (conformal risk control over a CARLA sweep) is running (§10) (added 2026-10-19, not in the paper)
+  - (updated 2026-11-12: that CARLA calibration ran on 2026-10-20, `ctxcal_carla_20261020`, and no λ met both budgets; the NGSIM calibrations followed (Route B); `open_items.md`, "Context trust λ". The paper's NGSIM runs and the replay's default use λ 0, `ctx0`, the λ̂ of the final paper set)
 
 ### `latgate`
 
@@ -961,6 +975,7 @@ Weight on the step-0 command change; jerk weight
 - **Probe:** A 2-episode NGSIM probe (2026-10-22) showed that `rmove1000` (step 0 priced at 4× an in-plan change, 1000 vs r_jerk/dt² = 250) postpones both the braking build-up and its release, so the ego re-accelerates late after a cut-in
   - the bound keeps the mild case's release prompt but builds an aggressive cut-in's −3 m/s² 0.4 s later.
 - **Status:** The maintainer chose it for the 2026-10-22 re-run (§10) (added 2026-10-22, not in the paper)
+  - (updated 2026-11-12: superseded the same day: the NGSIM calibration of `rmove0_jlim1.5` was stopped at 360 of 5,600 jobs, `latgate_cal_jlim_20261022`, and `rmove1000_rjerk40` was adopted instead; `open_items.md`, "Jerk pricing and the re-run". Since 2026-11-12 `jlim2.5` is in the NGSIM design as the falling-side bound of the unified limits, `amin<x>`, `amax<x>`, `jlimup<x>` below)
 
 ### `amin<x>`, `amax<x>`, `jlimup<x>`
 
@@ -978,13 +993,14 @@ Weight on the step-0 command change; jerk weight
   - `ACCNairSMPCAgent._parse_limit_tokens` (whole tokens, magnitudes; also the fail-safe tokens below)
   - the NGSIM replay reads them since the night of 2026-11-11 (`iso_limits_20261111/replay_edits.patch`, applied after the merge):
     - D-opt from its policy string,
-    - ISA-MPC from `NGSIM_ISAMPC_POLICY` (default `acc_isampc`; recorded as `isampc_policy` in run_info.json)
+    - ISA-MPC from `NGSIM_ISAMPC_POLICY` (default `acc_isampc`; recorded as `isampc_policy` in run_info.json) (updated 2026-11-12: the default is `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5` since 2026-11-12, `replay/baselines.py`)
   - without the tokens and the variable the patched replay reproduces the 2026-11-11 roots of
     D-opt (with `NGSIM_DOPT_PREDICTOR=iaimm` too),
     ISA-MPC (slack 5 and 0.055),
     PC-ACC (port, as published, `physcheck_reachfix`)
     bit for bit on the 13 smoke episodes (3 lead-only),
-    and so does every token set to today's numbers (`iso_limits_20261111/check_after_merge.out`).
+    and so does every token set to today's numbers (`iso_limits_20261111/check_after_merge.out`)
+    (clarified 2026-11-12: "today's numbers" are the fork's limits of 2026-11-11: D-opt with `_amin3_amax2_jlim5_jlimup5_fsdecel8_fsjerk20`, ISA-MPC `acc_isampc_amin3_amax2_jlim5_jlimup5`, PC-ACC `acc_pcacc_amin3_amax2_jlim5_jlimup5` and `acc_pcacc_physcheck_reachfix_jlimup5_emamin10_emjlim10`; `iso_limits_20261111/check_after_merge.sh`).
 - **Checks:** Without the tokens every problem is the one of before: the full suite, and every command and plan of the controllers against 23b2866 as float hex (`iso_limits_20261111/check_units_bitident.py`, `bitident_units.log`).
 - **Status:**
   - Off by default in the code
@@ -1039,9 +1055,47 @@ Braking-distance safety bound (experimental)
 - `nominal_safe_distance` is never parsed: the deterministic safety distance is simply what you get when no chance token is present.
 - Every paper policy carries both
 
+### `onerow`
+
+(Record added 2026-11-12 from `replay_out/onerow_20261112/agents_row.md` and `result.md`.)
+
+- **What:** One row on every active lead cell, cut-in hypotheses and lane-keeping leads alike (maintainer, 2026-11-12).
+  - The row is gap ≥ L + d0 + τv_k − short_k − ξ_k with 0 ≤ short_k ≤ τv_k, priced at w·P_j·short² (`dopt<w>`'s weight), so L + d0 is the hard floor through the cap.
+  - The factor on L + d0 is 1 on every cell (`NairACCSMPC._one_row_prediction`), and no row has a σ term (`_cell_tightening` returns 0).
+  - There is no floor row, no separate hard lane-keeping row and no `lkr` logic; every active cell is priced (`NairACCSMPC._priced_cells`). The ℓ1 slack stays.
+  - The reference asks every cell for the plain d_safe at the planned speed, L + d0 + τv̄_k, with no remembered standoff and no σ term (`OldACCReferenceAdapter.generate`).
+- **Code:**
+  - `NairACCConfig.one_row`; whole-token match (`_parse_one_row`).
+  - Needs plain `dopt<w>` (not `lk` / `lkr`), the chance cells (`chancecells` or `cutin_chance<β>`) and `fullfoot`.
+  - ValueError, from the agent and the config, with `floorrisk<ε>`, `floorhyp`, `floortop`, `nopricesigma`, `lksigma` (agent only), `lkonesided<ε>`, `lkrsigma`, `cvar<ε>_<c>`, `passmiqp<m>`, `relbrake<b>` or `safebranch`.
+  - The NGSIM replay reads the token since a one-line edit of `build_controller` (`cfg.one_row = A._parse_one_row(policy)`, `replay_out/onerow_20261112/replay_edit.patch`; `ngsim_replay_defaults.md`, 2026-11-12).
+- **Checks:**
+  - without the token bit-identical (13 smoke + 3 lead-only episodes against `fin_npw3_iso_side_20261112` / `lo_`, every non-timing tick array, on the workstation and on the lab server)
+  - the onerow smoke bit-identical between the two machines
+  - 7 tests (`tests/test_onerow.py`); the full suite passes (494 tests).
+- **Result, w 3:** NGSIM final set (`NGSIM_POLICY_DOPT=_dopt3`, the default tail without `_lksigma`, `_lkrsigma`, `_floorrisk0.1`, `_floorhyp`, `_nopricesigma`, `_lkonesided0.05`, plus `_onerow`; roots `fin_npw3_iso_side_onerow_20261112` + `lo_`; `replay_out/onerow_20261112/result.md`), paired against the current design (P1, live side entries):
+  - the ego follows closer: behind non-TV leads 3.1 / 12.8 / 14.2 % of lead ticks inside d_safe against 0.6 / 0.1 / 0.3 % (critical / mild / no cut-in; median deficit 0.9 / 0.7 / 0.5 m), no-cut-in v_avg +0.18 m/s (SE 0.01)
+  - critical / mild δ_max +6.4 / +6.3 %p (SE 0.7 / 0.8), floor breaches 21 → 26 / 14 → 19, T_rec +0.14 / +0.19 s
+  - j_max −0.04 (SE 0.11) / −0.12 (0.04), runs at the falling jerk bound 50 → 38 / 56 → 51
+  - phantom_ep −0.007 (SE 0.008)
+  - contacts 13 / 12 / 7 → 14 / 11 / 4 (all side entries)
+  - one new safety-layer fail-safe run behind a hard-braking lead (ds1_v2886, no cut-in: the gap fell from d_safe to 4.0 m at −0.6 to −1.2 m/s² before the layer acted, min gap 1.28 m against 5.84 m).
+  - Against the ℓ1-slack-100 arm it brakes harder in every group (critical a_min −0.24, SE 0.04; falling-bound runs 8 → 38).
+- **Result, w 100:** `NGSIM_POLICY_DOPT=_dopt100`, nothing else changed (roots `fin_npw3_iso_side_onerow_w100_20261112` + `lo_`; `result.md` addendum), paired against the current design:
+  - critical / mild j_max +0.66 / +0.35 (SE 0.13 / 0.07), a_min −0.47 / −0.22 (0.05 / 0.03), runs at the falling jerk bound 50 → 86 / 56 → 75,
+    mostly before t_cross while the TV's hypothesis is active (`bound_split.md`: those bound ticks 151 → 397 / 172 → 326; post-entry recovery 135 → 148 / 134 → 100)
+  - δ_max −3.5 / −3.7 %p (SE 1.8 / 0.9), T_rec −1.09 / −0.57 s (0.09 / 0.07; not recovered 17 → 1 / 13 → 1), floor breaches 21 → 26 / 14 → 16
+  - no cut-in about unchanged (phantom_ep −0.001, SE 0.008; v_avg +0.13 m/s, SE 0.01)
+  - behind non-TV leads 1.9 / 6.0 / 6.0 % of lead ticks inside d_safe (median deficit 0.58 / 0.29 / 0.18 m).
+- **Status:**
+  - The maintainer decided on 2026-11-12, after the w 3 roots, that `onerow` will be the final design (the old row structure is not clean); `result.md`'s conclusion "Not adopted; decision pending" was written before that decision, which its addendum records.
+  - Its weight w is being tuned: w 10 and w 30 (w sweep in progress, 2026-11-12; `replay_out/onerow_20261112/run_server_onerow_wsweep_20261112.sh`).
+  - Not the replay's default yet (that is still P1).
+  - Not run in CARLA; off by default; not in the paper (added 2026-11-12, 3d9bcf8).
+
 ## External baselines
 
-Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet).
+Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20, `cutin_verify_20261020` / `cutout_verify_20261020`, and on the NGSIM final set, e.g. `full_v20s0_{isampc,pcacc}_20261028`; `open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint").
 They are separate ego policies, not `acc_nair_smpc` tokens; `run_all_scenarios.py` maps the prefix to the runner's `policy_type`, and the aggregator scores them like SCC runs:
 
 ### PC-ACC (`acc_pcacc`)
@@ -1087,6 +1141,7 @@ They are separate ego policies, not `acc_nair_smpc` tokens; `run_all_scenarios.p
   - `emamin<x>` / `emjlim<x>` split the emergency limits from the comfort ones as `physcheck` does, with these numbers (each defaults to Table I's),
     also with `paperdsafe`, where Def. II.1's safe distance is then the fail-safe's (`_d_safe` on `em_cfg`),
     so `acc_pcacc_paperdsafe_amin3.5_amax2_jlim2.5_emamin8_emjlim10` is the published controller with ISO comfort limits and a −8 / 10 fail-safe
+    (updated 2026-11-12: the replay's PC-ACC-as-published string is `acc_pcacc_paperdsafe_amin3.5_amax2_jlim2.5_jlimup5_emamin8_emjlim10_emics`, with `jlimup5` and `emics`; run_info.json of `fin_pcacc_paper_iso_side_20261112`, `ngsim_replay_defaults.md` 2026-11-12)
   - `emics` runs the ICS test and its full braking on the emergency limits (the port and `physcheck` keep the comfort limits there).
   - The split variants are NGSIM replay only (the agent refuses them, as `physcheck`); every existing string gives the same commands (`iso_limits_20261111/bitident_units.log`)
 
@@ -1117,7 +1172,7 @@ They are separate ego policies, not `acc_nair_smpc` tokens; `run_all_scenarios.p
   - The NGSIM replay passes both because NGSIM's lane markings sit 1.2–2.4 m from the lane-keeper centres and its lanes are 3.2–3.8 m wide
   - with the uniform 12 ft lanes the IAIMM-KF kept a vehicle that had already changed into the ego lane in its old lane for up to 1.3 s, and the planner never bound on it.
   - CARLA passes neither and is bit-identical to before.
-- **`qslack<w>`** (2026-10-22): the standoff slack weight w in place of Zhou's 0.055 (`ISAMPCAgent._parse_q_slack`, logged in `weights`); the NGSIM lab table uses 5, so the CARLA comparison runs `acc_isampc_qslack5`.
+- **`qslack<w>`** (2026-10-22): the standoff slack weight w in place of Zhou's 0.055 (`ISAMPCAgent._parse_q_slack`, logged in `weights`); the NGSIM lab table uses 5, so the CARLA comparison runs `acc_isampc_qslack5` (updated 2026-11-12: since 2026-11-12 the replay's default leaves the weight unset, i.e. Zhou's 0.055 (`ISAMPC_Q_SLACK` unset, `replay/baselines.py`; `ngsim_replay_defaults.md` 2026-11-12); 5 was the setting of that lab table and of the 2026-11-11 comparisons, `design_history.md` 2026-11-11).
 - **Limits** (2026-11-11):
   - its planner takes the parent's `controller_config`, so `amin<x>`, `amax<x>`, `jlim<x>` and `jlimup<x>` set them in CARLA
   - the replay builds it from the fork's config (a ∈ [−3, 2], |j| ≤ 5) unless `NGSIM_ISAMPC_POLICY` names a string with them (since the night of 2026-11-11, `iso_limits_20261111/replay_edits.patch`)

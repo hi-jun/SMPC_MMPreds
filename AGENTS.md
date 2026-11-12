@@ -1,7 +1,7 @@
 # AGENTS.md — guide for AI assistants working on this repository
 
 Audience: AI coding assistants (Claude, GPT, …) and new contributors who read this repository on GitHub.
-It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Where this file and the code disagree, the code is right. Long records live in `docs/agents/` (§2), moved there unchanged on 2026-11-12.
+It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Where this file and the code disagree, the code is right. Long records live in `docs/agents/` (§2), moved there unchanged on 2026-11-12 (updated 2026-11-12: moved verbatim, then reformatted for readability the same day with the words unchanged, and since then marked in place where stale, with dated "updated", "withdrawn", "clarified" and "pointer updated" notes; checks in §2).
 
 **The maintainer works in Korean. Answer in Korean unless asked otherwise.**
 
@@ -71,15 +71,15 @@ What the token groups do (details §4, full records `docs/agents/tokens.md`):
 
 **Pending decisions** (the maintainer's):
 - `l1slack100` in place of `l1slack1e6`: run on the final set on 2026-11-12 (`replay_out/l1w_20261112/result.md`).
-- `onerow`: being implemented, 2026-11-12, see `replay_out/onerow_20261112/`.
+- `onerow` (updated 2026-11-12): one priced row on every active lead cell, no σ term, no floor row, no hard lane-keeping row (3d9bcf8). The maintainer decided on 2026-11-12 that it will be the final design; its weight w is being tuned (w 3 and w 100 run; w sweep in progress, 2026-11-12). Not the replay's default yet. Record: `docs/agents/tokens.md` (`onerow`), `replay_out/onerow_20261112/result.md`.
 - `passmiqp<m>` / `passnocap`: not adopted, decision pending (`replay_out/passmiqp_20261104/result.md`, `replay_out/passnocap_20261104/result.md`, `replay_out/passmiqp_20261104/discussion_20261104.md`).
-- `occin` ε: 10 % in the design since NL (2026-11-10 evening); the ε comparisons are `replay_out/bcts_20261106/result.md` (0.02 / 0.05 / 0.1) and `replay_out/pcal_o5_20261106/result.md` (O10 vs O5).
+- `occin` ε: 10 % in the design since NL (2026-11-10 evening); the ε comparisons are `replay_out/bcts_20261106/result.md` (0.02 / 0.05 / 0.1) and `replay_out/pcal_o5_20261106/result.md` (O10 vs O5) (updated 2026-11-12: decided, not pending: the maintainer fixed ε at 10 % with NL on the evening of 2026-11-10, `docs/agents/design_history.md` 2026-11-10; the two files are the comparisons behind it).
 - `cvar<ε>_<c>`: not adopted, decision pending (`replay_out/cvar_final_20261106/result.md`, `replay_out/cvar_wide_20261107/result.md`).
 - `termcost<c>`: every c > 0 failed the pre-registered rule; not adopted, decision pending (`replay_out/termcost_20261102/result.md`).
 - `entrypass9` in place of `entrypass0` (the CARLA string; entrypass left the NGSIM design on 2026-11-11): decision pending (`replay_out/entrypass9_20261101/result.md`).
 - The ds3_v1780 cut-in contact of the calibrated designs (it stays in NL): the maintainer's review before the paper's tables switch (`replay_out/pcal_cvar_20261106/result.md`, `replay_out/nps_lk_20261110/result.md`).
 - CARLA: whether `jinput`, `safelayer` and `entrant2` (and the NGSIM design as a whole) enter the CARLA design.
-- Smaller open choices (R1, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing): §10.
+- Smaller open choices (R1, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing): §10 (updated 2026-11-12: `floorrisk0.3` is moot, `floorrisk<ε>` with `floorhyp` has been in the NGSIM design since 2026-11-10, at ε 0.1 since NL).
 
 The record of every design decision since 2026-10-17 (D-opt's definition, each adoption with its measured effect, every older design string): `docs/agents/design_history.md`.
 
@@ -110,9 +110,9 @@ The record of every design decision since 2026-10-17 (D-opt's definition, each a
 | `predictor/stdan_vel/` | A 9-mode STDAN with velocity output |
 | `predictor/uq/` | Conformal novelty detector and a 5-member deep ensemble for the `stdan_vel` checkpoint, ported from the maintainer's thesis repository (added 2026-10-13). Not wired into the controller, and not valid for `stdan_3int`. Read `predictor/uq/AGENTS.md` first |
 | `overleaf/` | Paper tables, the final formulation, and the figure and table generators (`overleaf/figs/scripts/`) |
-| `tests/` | 39 unit-test modules (487 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration, context trust `ctx`, PC-ACC, ISA-MPC, acceleration lag `alag`, jerk input `jinput`, `relbrake`, `l1slack`, `termcost`, `safelayer`, `floorrisk`, `leadmerge`, `safebranch`, `mergefirst`, the fallback sign, `lkrsigma`, `lkhold`, the fail-safe exit (`failsafe_recovery`), close entrants (`entrant<b>`), the pass / yield MIQP (`passmiqp<m>`), the pass / yield MIQP without the cap (`passnocap`), the occupancy activation (`occin<eps>`), the CVaR bound (`cvar<eps>_<c>`), the probability calibration (`pcal`), its replacement BCTS (`bcts`), the lane-keeping entry (`nolkentry`), the switch-on by P_in alone (`pingate`), the floor quantile of the hypothesis probability (`floorhyp`), D's σ term at the floor's quantile (`floortop`), the lane-keeping σ term one-sided (`lkonesided<ε>`), the priced row without σ (`nopricesigma`), the chance switch's new name (`chancecells`), the unified limits (`amin<x>` `amax<x>` `jlimup<x>` `fsdecel<x>` `fsjerk<x>`, ISA-MPC's and PC-ACC's, `test_iso_limits.py`) |
+| `tests/` | 39 unit-test modules (487 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration, context trust `ctx`, PC-ACC, ISA-MPC, acceleration lag `alag`, jerk input `jinput`, `relbrake`, `l1slack`, `termcost`, `safelayer`, `floorrisk`, `leadmerge`, `safebranch`, `mergefirst`, the fallback sign, `lkrsigma`, `lkhold`, the fail-safe exit (`failsafe_recovery`), close entrants (`entrant<b>`), the pass / yield MIQP (`passmiqp<m>`), the pass / yield MIQP without the cap (`passnocap`), the occupancy activation (`occin<eps>`), the CVaR bound (`cvar<eps>_<c>`), the probability calibration (`pcal`), its replacement BCTS (`bcts`), the lane-keeping entry (`nolkentry`), the switch-on by P_in alone (`pingate`), the floor quantile of the hypothesis probability (`floorhyp`), D's σ term at the floor's quantile (`floortop`), the lane-keeping σ term one-sided (`lkonesided<ε>`), the priced row without σ (`nopricesigma`), the chance switch's new name (`chancecells`), the unified limits (`amin<x>` `amax<x>` `jlimup<x>` `fsdecel<x>` `fsjerk<x>`, ISA-MPC's and PC-ACC's, `test_iso_limits.py`) (updated 2026-11-12: 40 modules and 494 tests since `tests/test_onerow.py`, the one-row design `onerow`, 3d9bcf8; the full suite ran 494 tests OK, `replay_out/onerow_20261112/full_test_suite.out`) |
 | `results/` | Sweep outputs. `results/*/` is gitignored, so sweep data and launch scripts exist only on the maintainer's machine |
-| `docs/agents/` | Full records moved out of this file on 2026-11-12, unchanged: `tokens.md` (every §4 token row and the baselines' notes), `design_history.md` (the design decisions since 2026-10-17, every row of the current-design table), `open_items.md` (§10), `ngsim_replay_defaults.md` (the replay's default history and how to reproduce older roots), `controller.md` (§3's fail-safe exit), `check_split.py` (checks that every line of the old file was kept) |
+| `docs/agents/` | Full records moved out of this file on 2026-11-12, unchanged: `tokens.md` (every §4 token row and the baselines' notes), `design_history.md` (the design decisions since 2026-10-17, every row of the current-design table), `open_items.md` (§10), `ngsim_replay_defaults.md` (the replay's default history and how to reproduce older roots), `controller.md` (§3's fail-safe exit), `check_split.py` (checks that every line of the old file was kept) (updated 2026-11-12: moved verbatim, then reformatted for readability the same day with the words unchanged, and since then marked in place where stale; `_reformat/check_*.py` check that the readability pass kept every sentence, reading the files at commit 38a1b46) |
 
 ## 3. The controller in one page
 
@@ -228,7 +228,7 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `brake_distance`, `brake_hard_band` | Braking-distance safety bound | experimental |
 | `cutin_ramp<β>`, `cutin_tlc<s>`, `gap_recover<s>`, `intent_lpf<s>`, `track_smooth<n>` | Other options | off by default, not in the paper |
 | `fixed_risk`, `nominal_safe_distance` | Labels only | labels only |
-| `onerow` | Being implemented, 2026-11-12, see `replay_out/onerow_20261112/` | being implemented |
+| `onerow` | One priced row gap ≥ L + d0 + τv − short (0 ≤ short ≤ τv, w·P_j·short²) on every active lead cell; no σ term, no floor row, no hard lane-keeping row (updated 2026-11-12) | to be the final design (maintainer, 2026-11-12); w being tuned; not the replay default yet |
 
 Matching is by substring. The predictor is chosen in the order `const_lead` > `iaimm` > `lstm_vel` > `lstm` > `stdan_vel` > `stdan_3int` > synthetic, and any `_ol` in the string selects the open-loop variant.
 
@@ -262,7 +262,7 @@ Every new CARLA run uses the row "D-opt, current (2026-11-03 night, with `lkhold
 
 Compare it with the paper's controllers only on runs made with the same code (§8.11). The same-code roots `cutin_postfix_cmp_20261016` and `cutout_postfix_cmp_20261016` hold it next to Proposed, Multimodal SCC and the other D-opt variants.
 
-Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet). They are separate ego policies, not `acc_nair_smpc` tokens; `run_all_scenarios.py` maps the prefix to the runner's `policy_type`, and the aggregator scores them like SCC runs:
+Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20 and on the NGSIM final set; `docs/agents/open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint"). They are separate ego policies, not `acc_nair_smpc` tokens; `run_all_scenarios.py` maps the prefix to the runner's `policy_type`, and the aggregator scores them like SCC runs:
 
 | Label | Policy string | Notes |
 |---|---|---|
@@ -466,7 +466,7 @@ Full text: `docs/agents/open_items.md`; the NGSIM replay's default history: `doc
   - Implemented around it: `safelayer`, `entrant2`, the fail-safe exit (`safebranch` was dropped on 2026-11-11).
   - Open:
     - `passmiqp` / `passnocap` and how p and σ enter the pass condition
-    - R1 (a hard first-step stopping row), `entrypass9`, `termcost`, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing.
+    - R1 (a hard first-step stopping row), `entrypass9`, `termcost`, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing (updated 2026-11-12: `entrypass9` matters only for the CARLA string, entrypass having left the NGSIM design on 2026-11-11; `floorrisk0.3` is moot, `floorrisk<ε>` with `floorhyp` being in the NGSIM design since 2026-11-10).
 - **Entry timing of cut-in hypotheses.** Open loop, the TV leads a cell at its real entry step on only 31–59 % of pre-entry ticks; not fixed (`replay_out/entry_coverage_20261104/result.md`).
 - **Calibrated lane-change probabilities.** `pcal` (2026-11-05) was superseded by `bcts` (2026-11-06 evening); open: the maintainer's review of the ds3_v1780 contact before the paper's tables switch.
 - **Side entries (ghosts).** Since 2026-11-12 a lane change into the ego lane beside the ego stays live (`NGSIM_SIDE_ENTRY=live`); `ghost` gives the old rule (`replay_out/side_live_20261112/`).
@@ -475,17 +475,17 @@ Full text: `docs/agents/open_items.md`; the NGSIM replay's default history: `doc
 - **NGSIM replay plant lag.** `NGSIM_EGO_LAG_TAU` (default 0, the ideal ego); `alag` runs' standstill fallback on the ideal plant is not fixed, by the maintainer's decision.
 - **NGSIM replay defaults.** Every default change since 2026-10-27 and how to reproduce older roots: `docs/agents/ngsim_replay_defaults.md`.
 - **Final NGSIM paper set.** 889 episodes (489 cut-ins, 400 no-cut-ins), checkpoint `checkpoints_out30_no_tcross`, λ̂ = 0; open: the budget 0.5274 cannot be re-derived on the restricted λ-calibration population.
-- **Context trust λ.** No λ adopted; no λ met both budgets on any data set; `phantom_cf` was withdrawn in favour of `phantom_ep`.
+- **Context trust λ.** No λ adopted; no λ met both budgets on any data set; `phantom_cf` was withdrawn in favour of `phantom_ep` (clarified 2026-11-12: the paper's NGSIM runs and the replay's default run λ 0, `ctx0`, the plain policy; λ̂ = 0 on the final paper set).
 - **Jerk pricing.** `rmove1000_rjerk40` adopted on 2026-10-22, chosen after reading test episodes (the test set is not strictly untouched).
-- **CARLA verification sweep (2026-10-20).** Still open for ISA-MPC: ε (0.8 vs 0.1) and an 8 s horizon check.
+- **CARLA verification sweep (2026-10-20).** Still open for ISA-MPC: ε (0.8 vs 0.1) and an 8 s horizon check (updated 2026-11-12: ε is settled for NGSIM at Zhou's published 0.8, ISA-MPC as published in the main table, maintainer 2026-11-05/06; still open for CARLA).
 - **Code issues.**
   - The step-0 jerk cost uses `config.dt` instead of `command_dt` (16× too cheap)
   - unfiltered x₀
   - `slack_steps` misses slack use in chance policies
-  - σ-term cap undecided (`sigmacap<c>`)
+  - σ-term cap undecided (`sigmacap<c>`) (updated 2026-11-12: moot for the NGSIM design, which uses none of β_ref's effects since NL; still applies to the CARLA string's `cutin_chance0.6`)
   - the TV re-trigger ignores its gap to the ego
   - paper tex vs code (§3)
   - the caption of `overleaf/table_cutin_final.tex`
   - IAIMM-KF tuned in-sample
   - `branchdec` with k_b = 1 untested.
-  - The fallback sign was fixed on 2026-11-03.
+  - The fallback sign was fixed on 2026-11-03 (updated 2026-11-12: closed, listed as a record only).

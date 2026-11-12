@@ -2,7 +2,11 @@
 """Check the readability pass on part 2 of docs/agents/tokens.md against the old text.
 
 Part 2 is the text of docs/agents/tokens.md at git revision OLD_REV (default 4c3c108) from the heading
-line "### `safebranch`" to the end of the file; the new text is docs/agents/_reformat/tokens_part2.md.
+line "### `safebranch`" to the end of the file; the new text is the same part of docs/agents/tokens.md at git
+revision NEW_REV (default 38a1b46, the commit of the readability pass; the reformatted part 2 was first written as
+docs/agents/_reformat/tokens_part2.md and merged into tokens.md the same day), read with `git show`, not from the
+working tree: pinned on 2026-11-12 so that later content fixes, marked in the file with dated notes, are not read
+as reformat changes and the check stays a record of the pass.
 
 Main check (the one asked for):
   1. split the old part 2 into fragments at ". ", "; ", line breaks and table-cell boundaries (" | ";
@@ -17,7 +21,7 @@ dropped, "Label" and "Policy string" become labels, and a token cell must repeat
 Extra checks: fragments of 1-3 words; the headings in order; the multisets of numbers, of `code spans`
 and of words, whose only allowed differences are the dropped cells and the added labels.
 
-Usage, from the repository root: python3 docs/agents/_reformat/check_part2.py [OLD_REV]
+Usage, from the repository root: python3 docs/agents/_reformat/check_part2.py [OLD_REV] [NEW_REV]
 Exit 1 on any unexplained difference.
 """
 import collections
@@ -27,8 +31,9 @@ import subprocess
 import sys
 
 OLD_REV = sys.argv[1] if len(sys.argv) > 1 else "4c3c108"
+NEW_REV = sys.argv[2] if len(sys.argv) > 2 else "38a1b46"
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-NEW_PATH = ROOT / "docs" / "agents" / "tokens.md"   # the joined file (parts merged 2026-11-12)
+NEW_PATH = "docs/agents/tokens.md"   # the joined file (parts merged 2026-11-12), read at NEW_REV
 START = "### `safebranch`"
 # Fragments of >= 4 words that are allowed to be missing, with the reason (none at present).
 EXPECTED_MISSING = {}
@@ -92,7 +97,8 @@ def parse_old(text):
 old_full = subprocess.run(["git", "-C", str(ROOT), "show", f"{OLD_REV}:docs/agents/tokens.md"],
                           check=True, capture_output=True, text=True).stdout
 old = old_full[old_full.index("\n" + START + "\n") + 1:]
-_t = NEW_PATH.read_text(encoding="utf-8")
+_t = subprocess.run(["git", "-C", str(ROOT), "show", f"{NEW_REV}:{NEW_PATH}"],
+                    check=True, capture_output=True, text=True).stdout
 new = _t[_t.index("\n" + START + "\n") + 1:]
 new_norm = norm(new)
 failures = 0

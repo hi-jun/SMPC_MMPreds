@@ -11,7 +11,11 @@ became a bullet break). Every fragment of MIN_WORDS words or more must occur in 
 text. Fragments changed on purpose go in EXPECTED_CHANGES with the reason; any other missing
 fragment makes the script exit 1.
 
-Usage, from the repository root: python3 docs/agents/_reformat/check_main.py [OLD_REV]
+The new AGENTS.md is `git show NEW_REV:AGENTS.md` (default 38a1b46, the commit of the readability pass), not
+the working tree: pinned on 2026-11-12 so that later content fixes, marked in the file with dated notes, are not
+read as reformat changes and the check stays a record of the pass.
+
+Usage, from the repository root: python3 docs/agents/_reformat/check_main.py [OLD_REV] [NEW_REV]
 """
 import pathlib
 import re
@@ -19,6 +23,7 @@ import subprocess
 import sys
 
 OLD_REV = sys.argv[1] if len(sys.argv) > 1 else "4c3c108"
+NEW_REV = sys.argv[2] if len(sys.argv) > 2 else "38a1b46"
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 MIN_WORDS = 4
 EXPECTED_CHANGES = {}  # normalised old fragment -> reason
@@ -35,7 +40,8 @@ def normalise(text):
 
 old = subprocess.run(["git", "-C", str(ROOT), "show", f"{OLD_REV}:AGENTS.md"],
                      check=True, capture_output=True, text=True).stdout
-new = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+new = subprocess.run(["git", "-C", str(ROOT), "show", f"{NEW_REV}:AGENTS.md"],
+                     check=True, capture_output=True, text=True).stdout
 new_norm = normalise(new)
 
 fragments = []
@@ -48,7 +54,7 @@ for line in old.split("\n"):
 missing = [frag for frag in fragments if frag not in new_norm]
 unexpected = [frag for frag in missing if frag not in EXPECTED_CHANGES]
 
-for name, text in ((f"old AGENTS.md at {OLD_REV}", old), ("new AGENTS.md", new)):
+for name, text in ((f"old AGENTS.md at {OLD_REV}", old), (f"new AGENTS.md at {NEW_REV}", new)):
     longest = max(len(line) for line in text.split("\n"))
     print(f"{name}: {len(text.encode())} bytes, longest line {longest} chars")
 print(f"fragments of >= {MIN_WORDS} words: {len(fragments)}; found {len(fragments) - len(missing)}, "

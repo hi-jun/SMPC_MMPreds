@@ -1,8 +1,10 @@
 # Open items: full text
 
-Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). The item "NGSIM replay defaults" is in `ngsim_replay_defaults.md`. The short list is AGENTS.md §10.
+Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). The item "NGSIM replay defaults" is in `ngsim_replay_defaults.md`. The short list is AGENTS.md §10. (updated 2026-11-12: stale statements have since been marked in place with dated "updated", "withdrawn" and "clarified" notes; the reformat checks read this file at commit 38a1b46.)
 
 ## 10. Open items (last updated 2026-11-05)
+
+(updated 2026-11-12: entries were added or changed after 2026-11-05, the last on 2026-11-12, e.g. live side entries in "Ghosts that enter beside the ego" and Route B.)
 
 ### Safety and recursive feasibility
 
@@ -12,23 +14,25 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 - **Coverage fails.** The hypothesis set does not cover the real cut-in before the point of no return: 11 of the 13 floor breaches had no active TV hypothesis there.
 - **Nesting fails.** The set does not stay nested between ticks: 41 of the 51 losses of the hard solution are cut-in cells whose prediction moved.
 - **Implemented** (11-02, maintainer's decision): token `safelayer` (§4), PC-ACC's safety layer around the design.
-  - It is Prop. IV.5 with the design as the nominal controller, on vehicles in the ego's path, with a fail-safe of −8 m/s² at jerk 20 and a lead bound of −10.5 m/s².
+  - It is Prop. IV.5 with the design as the nominal controller, on vehicles in the ego's path, with a fail-safe of −8 m/s² at jerk 20 and a lead bound of −10.5 m/s² (updated 2026-11-12: the NGSIM replay's default runs the fail-safe at jerk 10, `fsdecel8_fsjerk10`, since 2026-11-12; `tokens.md`, `fsdecel<x>`, `fsjerk<x>`).
   - On the final set (`replay_out/safelayer_20261102/result.md`) it acted on 2 warm-up ticks in 889 runs and left every paper-table column unchanged.
   - No stress test with injected hard lead braking (maintainer).
   - The paper's NGSIM tables run with it (maintainer, 2026-11-02 evening; `replay_out/safelayer_20261102/tables_paper_safelayer.md`).
 - **Implemented** (11-03, maintainer's request): token `safebranch` (§4), the layer's fail-safe as a branch of the scenario tree, so that the MPC plans the contingency itself and the layer only executes it.
   - On the final set it changes behaviour only where the layer would have acted (one warm-up run), and otherwise through its 1e-3 cost at the third decimal (`replay_out/safebranch_20261103/result.md`).
-  - Adopted as is for the paper's NGSIM tables (maintainer, 2026-11-03).
+  - Adopted as is for the paper's NGSIM tables (maintainer, 2026-11-03) (updated 2026-11-12: dropped from the NGSIM design and the replay's default tail on the night of 2026-11-11, maintainer; `design_history.md` 2026-11-11).
 - **Implemented** (11-04, maintainer's request, final-check items 7 and 12): the fail-safe's exit is the MPC's recovery ramp at the fail-safe's jerk (§3, 0419637), and token `entrant<b>` (§4) covers the layer's close entrants under a braking bound (−2 with `entrant2`).
   - On the paper root the layer never acts and close entrants occur in 3 runs (20 ticks, 1 scored run with 4 scored ticks), so the final set shows the token's cost only on those runs: none (every paper-table cell unchanged, the 3 entries all avoidable at entry, no layer action; `replay_out/entrant_20261104/result.md`).
   - The remaining uncovered cases are entries that are unavoidable under a_c at the entry tick (0 of 3 on the final set) and vehicles not yet in the path;
     - a pre-entry (lateral reachability) rule was not implemented: the 11-02 estimate found a 2 m/s² lateral bound binding on 1.4–2.0 % of ticks and acting at the point of no return in 0 of 13 floor-breach runs, and the earliest-entry prototype cut breaches 13 → 7 at phantom_ep +0.32 m/s² and v_avg −0.75 m/s.
-  - Adopted for the paper's NGSIM tables (maintainer, 2026-11-04; the replay's default tail ends `_entrant2`; tables `replay_out/entrant_20261104/tables_paper_entrant2.md`);
+  - Adopted for the paper's NGSIM tables (maintainer, 2026-11-04; the replay's default tail ends `_entrant2`; tables `replay_out/entrant_20261104/tables_paper_entrant2.md`) (updated 2026-11-12: the default tail has grown since and ends `_fsjerk10` since 2026-11-12, with `entrant2` still in it; `ngsim_replay_defaults.md`);
   - the name "cut-in" in the layer's code and logs (`cutin_vids`, `safety_n_cutin`) kept for the logs' compatibility, documented as close entrants.
 - **Implemented** (11-04 night, maintainer's request, final-check item 8): token `passmiqp<m>` (§4), the pass / yield choice inside the optimization.
   - Result on the final set:
     - critical δ_max 9.1 → 8.1 %, floor breaches 9 → 7, mild δ_max 5.9 → 5.2, floor breaches 3 → 1, no-cut-in phantom_ep 0.188 → 0.179 (SE 0.008), runs a_min ≤ −2 11 → 12, contacts 0, j_max −0.09 / −0.08;
     - but all four removed breaches are runs where the passed TV merged beside the ego and the replay's ghost rule hides it (item 10): re-scored with side entries live once clear, critical 11.4 → 10.8 % and 14 → 13 breaches, mild 7.8 → 7.4 % and 8 → 7, no cut-in contacts 1 → 2;
+      - (clarified 2026-11-12: "contacts 0" above is the replay's own scoring; "no cut-in contacts 1 → 2" is the open-loop recount, in which the ego never reacted to the re-scored vehicles: the paper root has 1 such contact and the `passmiqp` root 2, the added one ds4_v3159; `replay_out/passmiqp_20261104/result.md`)
+      - (updated 2026-11-12: since 2026-11-12 the replay keeps lane-change side entries live by default, `NGSIM_SIDE_ENTRY=live`; the `passmiqp` and `passnocap` roots ran under the ghost rule and have not been re-run)
     - one no-cut-in near miss (ds4_v3015, 0.07 m) where the cap made the ego slower;
     - MIQP ticks 3.0 % of ticks, TV candidates 731 pass / 10 yield ticks;
     - warm MIQP ticks 136 ms against 60 ms (load-inflated), the first-use builds 1.8 s;
@@ -38,7 +42,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 - **Implemented** (11-04, maintainer's request): token `passnocap` (§4), the pass / yield MIQP without the acceleration cap.
   - Result: the no-cut-in phantom braking falls by 27 % (0.188 → 0.138), but
     - the passes are bought with acceleration (median +0.26 m/s² above a_0 on 60 % of pass ticks),
-    - more TVs merge beside the ego (hidden by the ghost rule), and
+    - more TVs merge beside the ego (hidden by the ghost rule; updated 2026-11-12: such side entries are live by default since 2026-11-12, `NGSIM_SIDE_ENTRY=live`, and this root has not been re-run), and
     - where the TV comes in front anyway the ego arrives faster: two entries at 0.24 / 0.26 m caught by `entrant2`'s check (no contact), three new mild floor breaches, the un-ghosted recount worse in the mild group (8 → 10).
   - Decision pending (keep the cap, drop it, or a middle setting not run: a cap above a_0 by a fixed amount, or m > 0 without the cap).
 - **Discussed** (11-04 afternoon, maintainer; no new run; record `replay_out/passmiqp_20261104/discussion_20261104.md`): the cut-in probability does not enter the pass / yield decision.
@@ -50,7 +54,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
     - the first pass came 2.3–2.7 s earlier at p 0.22–0.5, before any lateral motion.
   - Agreed: σ belongs in the pass condition.
   - Pending: the MIQP or the pre-solve rule (c) (exclude if the TV's rear is behind the ego's front at entry under the current-state rollout, entrypass with `pass_cap_displacement` in place of the previous plan), and how p and σ enter the pass condition.
-- **Open:** the final-check findings of 2026-11-03 (`replay_out/lkrsigma_20261103/result.md`):
+- **Open:** the final-check findings of 2026-11-03 (`replay_out/lkrsigma_20261103/result.md`) (updated 2026-11-12: items 4 and 5 were closed later in this bullet, H adopted on the night of 2026-11-03; only the "Still open" list at its end stays open):
   - the ego-lane lead's lane-keeping trajectory leaves the lane at some step on 1.42 % of scored ticks while the lead keeps its lane on 65 % of them (item 4), and
   - `trajcutin`'s away-direction cut-in modes lead in a kept scenario on 0.18 % of ticks with probabilities up to 1.0 (item 5).
   - **Cause of both** (2026-11-03 night, `replay_out/lkrsigma_20261103/result.md`, section "Items 4 and 5: cause"): the replay tests lane membership with two definitions, the logged Lane_ID at step 0 and the midpoint between binned lane centres at steps 1-15 (`ngsim_replay.py` `lane_membership_fn`);
@@ -76,9 +80,9 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - **Adopted (maintainer, 2026-11-03 night): H is the design** (§1), so items 4 and 5 are closed.
   - **Still open:**
     - R1 (a hard first-step stopping row) in addition,
-    - `entrypass9`,
+    - `entrypass9` (updated 2026-11-12: moot for the NGSIM design, which dropped entrypass on the night of 2026-11-11; still a pending choice for the CARLA string, AGENTS.md §1),
     - `termcost`,
-    - `floorrisk0.3` (passes the tuning rule with a 4 % phantom gain),
+    - `floorrisk0.3` (passes the tuning rule with a 4 % phantom gain) (updated 2026-11-12: moot; `floorrisk<ε>` with `floorhyp` entered the NGSIM design on 2026-11-10, at ε 0.1 since NL that evening; `design_history.md` 2026-11-10),
     - the speed weight q_v (tuning 2026-11-02, `replay_out/qvtune_20261102/result.md`: no q_v in 2–16 passed; critical δ_max +2.9 to +9.3 %p, phantom_ep −0.007 to −0.061; q_v × k is the same problem as w / k and r_jerk / k),
     - the entry-drift fixes,
     - the PC-ACC appendix presentation, and
@@ -208,7 +212,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 
 ### Context trust λ: calibration on control outcomes
 
-(first results 2026-10-20). `ctx<λ>` exists (§4); both calibrations below have run, no λ is adopted yet.
+(first results 2026-10-20). `ctx<λ>` exists (§4); both calibrations below have run, no λ is adopted yet. (clarified 2026-11-12: the paper's NGSIM runs and the replay's default use λ 0, `ctx0`, the plain policy, which is the CRC λ̂ of the final paper set, "Final NGSIM paper set and checkpoint" above.)
 
 - **History.** 2026-10-19/20, a predictor-level calibration on NGSIM Val+Test (`results/ngsim_lambda_cal_20261019/`, s0–s7, `out/SUMMARY.md`; 1,233 cut-in / 67,078 no-cut-in episodes) gave λ̂(ε 0.2) = 0.6 under the loss "share of the 2.8 s label window with p_λ ≥ 0.1", and no λ̂ under the magnitude-aware loss "label-window mean of min(p_λ/0.6, 1)" (STDAN alone already loses 0.218).
   - In CARLA (`cutin_verify_20261020`) `ctx0.6` weakened D-opt:
@@ -256,7 +260,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - The exchange is unfavourable at low λ (0 → 0.4: extra +0.71, phantom −0.36) and favourable at high λ (0.6 → 1: phantom −0.54, extra +0.15).
 - **Next.**
   - (a) Verification grid 01–04 at λ = 1 (λ = 0 is D-opt, already in `cutin_verify_20261020`).
-  - (b) A phantom-braking definition that counts only braking caused by cut-in hypotheses, pre-registered and run on fresh NGSIM no-cut-in TVs (see route B).
+  - (b) A phantom-braking definition that counts only braking caused by cut-in hypotheses, pre-registered and run on fresh NGSIM no-cut-in TVs (see route B) (updated 2026-11-12: done on 2026-10-21 in Route B below, first as `phantom_cf`, withdrawn the same day, then as `phantom_ep`).
   - Changing a budget or a loss after these results requires fresh calibration data.
 
 #### Route B
@@ -293,14 +297,14 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 - **Re-run with a corrected definition** (`replay_out/nocut_cf_20261021/`, prereg 22:08, 22:09–23:21):
   - `phantom_cf` = max over the scored ticks (rule-B ticks excluded) of max(0, min(−a_cmd, u_cf − a_cmd)), u_cf being the command of an identically configured second controller at the same state and previous command with every cut-in mode removed (main loop verified identical, max |Δa_cmd| = 0);
   - 400 fresh no-cut-in TVs (the 739 TVs of the first run excluded, seed 20261021, 200/200), X_u = 0.15 unchanged.
-- **Calibration half**: `phantom_cf` 0.106 → 0.011 m/s² from λ = 0 to 1, CRC risk 0.142 already at λ = 0, so **flipped design λ̂ = 0**;
+- **Calibration half**: `phantom_cf` 0.106 → 0.011 m/s² from λ = 0 to 1, CRC risk 0.142 already at λ = 0, so **flipped design λ̂ = 0** (withdrawn 2026-10-21, marked here 2026-11-12: it used the flawed `phantom_cf`; the flipped λ̂ with `phantom_ep` is in "Correction (2026-10-21)" below);
   - report half at λ = 0: mean 0.124 m/s² (envelope 0.140).
-- On NGSIM, λ ∈ [0, 0.3] therefore meets both budgets (the flipped rule picks 0, the previous rule 0.3), whereas in CARLA no λ did.
+- On NGSIM, λ ∈ [0, 0.3] therefore meets both budgets (the flipped rule picks 0, the previous rule 0.3), whereas in CARLA no λ did (withdrawn 2026-10-21, marked here 2026-11-12: it rests on `phantom_cf`, see "Correction (2026-10-21)" below; with `phantom_ep` no λ meets both budgets on any data set).
 - CARLA's no-cut-in cells are built to look like cut-ins (phantom 1.11 m/s² at λ = 0); in the NGSIM no-cut-in episodes STDAN gave v a cut-in probability ≥ 0.5 in 20 % of episodes and ≥ 0.1 in 14 % of ticks (36 % of ticks on the CARLA dump grid).
 - The calibrated λ depends on how often cut-in-looking non-cut-ins occur.
 - **Subset calibrations** (2026-10-21, `replay_out/subset_cal_20261021/`; calibration may reuse already-seen runs, only the reporting data must be unseen — maintainer):
-  - S1 "v blocked by a slower lead" (v faster than its own lead by ≥ 2 m/s within 30 m, cut-in window t_cross −5…−0.5 s) gives previous λ̂ 0.2 (179 cells) and flipped λ̂ 0.4 (158), no common λ;
-  - S2b "no-cut-in in which v's open-loop STDAN cut-in intention was the largest mode" calibrated on 2,166 cells (`replay_out/cal_S2b_large_20261021/`, prereg 02:02) gives **flipped λ̂ = 0.8** (phantom_cf 0.204 → 0.105 m/s² from λ 0 to 0.8);
+  - S1 "v blocked by a slower lead" (v faster than its own lead by ≥ 2 m/s within 30 m, cut-in window t_cross −5…−0.5 s) gives previous λ̂ 0.2 (179 cells) and flipped λ̂ 0.4 (158), no common λ (withdrawn 2026-10-21, marked here 2026-11-12: the flipped λ̂ 0.4 used `phantom_cf`, see "Correction (2026-10-21)" below; with `phantom_ep` it is 1.0);
+  - S2b "no-cut-in in which v's open-loop STDAN cut-in intention was the largest mode" calibrated on 2,166 cells (`replay_out/cal_S2b_large_20261021/`, prereg 02:02) gives **flipped λ̂ = 0.8** (phantom_cf 0.204 → 0.105 m/s² from λ 0 to 0.8) (withdrawn 2026-10-21, marked here 2026-11-12: it and the held-out line below use `phantom_cf`, see "Correction (2026-10-21)" below; with `phantom_ep` S2b has no λ̂);
   - 200 held-out fresh TVs: 0.171 → 0.081 (SE 0.010).
 - CARLA verification grid at `ctx0.8` (2026-10-21, same controller code as the 2026-10-20 sweep, 66/66 valid): unnecessary decelerations 12 → 4 of 14, but
   - normal / aggressive δ_max 2.1 → 18.5 % / 19.1 → 52.0 %,
@@ -358,15 +362,15 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - SCC 02/0012 touched a guardrail with 0.3 % fallback (unchecked).
 - The appendix ablation `acc_isampc_ainput_rmove1000` was smoother still on cut-in (j_max 0.73 / 1.14, a_min −1.21 / −1.76, δ_max 36 / 60 %), so ISA-MPC's smoothness is not due to the snap input;
   - in cut-out group 05 it undershot to 0.3–4.6 m/s, then passed v_max = 20 m/s, fell back and hit a guardrail in 2 of 8 runs.
-- Still open for ISA-MPC: ε (0.8 vs CASE_3/4's 0.1) and an 8 s horizon check (`--ego-horizons 40`).
+- Still open for ISA-MPC: ε (0.8 vs CASE_3/4's 0.1) and an 8 s horizon check (`--ego-horizons 40`) (updated 2026-11-12: ε is settled for NGSIM at Zhou's published 0.8, ISA-MPC as published in the main table, "Calibrated lane-change probabilities" above; still open for CARLA).
 
 ### Code issues
 
-- **`_fallback_policy` sign: fixed 2026-11-03** (cf48239, maintainer). It commanded `a_ref − 0.25·min(0, gap)` and so accelerated toward a lead that was too close; it now brakes (`+`). No run of the final sweeps or the NGSIM final set used the fallback (§8.1).
+- **`_fallback_policy` sign: fixed 2026-11-03** (cf48239, maintainer). It commanded `a_ref − 0.25·min(0, gap)` and so accelerated toward a lead that was too close; it now brakes (`+`). No run of the final sweeps or the NGSIM final set used the fallback (§8.1). (updated 2026-11-12: closed; listed here as a record only.)
 - **Step-0 jerk cost.** All three QP builders price the step-0 command change with `config.dt` (0.2 s) instead of `command_dt` (0.05 s), which makes it 16× too cheap. The hard jerk constraint already uses `command_dt`.
 - **Unfiltered x₀.** The MPC takes the raw measured ego speed as x₀. Most of the tick-to-tick speed noise that was attributed to tyre slip under zero throttle was the command/tick race (§8.11), fixed on 2026-10-15. Whether any slip noise remains has not been re-measured since.
-- **σ-term cap.** The confidence chance constraint uses one capped β = min(p, β_ref) for both the standoff scale and the σ term, so the σ term never exceeds q(0.6)·σ ≈ 0.84σ. `sigmacap<c>` decouples them; `cutin_chance0.6` itself is unchanged so that the paper's sweeps reproduce. Whether the paper policy should switch is undecided.
-- **`slack_steps` misses slack use in chance policies.** It counts `feasible == False`, and in chance modes `feasible` already adds the slack, so a solve that leans on the 5000-weighted slack still counts as feasible. The raw per-step `slack_max` (logged since 2026-10-07) shows it.
+- **σ-term cap.** The confidence chance constraint uses one capped β = min(p, β_ref) for both the standoff scale and the σ term, so the σ term never exceeds q(0.6)·σ ≈ 0.84σ. `sigmacap<c>` decouples them; `cutin_chance0.6` itself is unchanged so that the paper's sweeps reproduce. Whether the paper policy should switch is undecided. (updated 2026-11-12: moot for the NGSIM design, which uses none of β_ref's effects since NL, 2026-11-10: `chancecells`, `nopricesigma`, `floorrisk<ε>`, `lkonesided<ε>`; it still applies to `cutin_chance0.6` and the CARLA string.)
+- **`slack_steps` misses slack use in chance policies.** It counts `feasible == False`, and in chance modes `feasible` already adds the slack, so a solve that leans on the 5000-weighted slack still counts as feasible. The raw per-step `slack_max` (logged since 2026-10-07) shows it. (updated 2026-11-12: the designs use the ℓ1 slack, `l1slack1e6`, since 2026-10-31, under which ξ > 0 means that the hard rows have no solution, and the NGSIM replay logs the slack cells as `slack_cells`; whether `slack_steps` still misses slack use under it is unverified as of 2026-11-12.)
 - **STDAN grid edges.** The CARLA adapter puts its grid edges at ±6.5 cells of 4.6 m (±29.9 m). Training kept neighbours with |dy| < 90 ft (27.43 m), which cuts at the outer cells' centres. Most of the 2.5 m difference comes from this edge convention, not from the cell size.
 - **TV re-trigger.** After the ego-proximity guard holds or aborts a TV lane change, the TV restarts it as soon as the ego is no longer alongside. The restart checks only the TV's gap to its own lead, never its gap to the ego.
 - **Paper tex vs code.** The four differences are listed in §3.

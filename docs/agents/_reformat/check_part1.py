@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Check that docs/agents/_reformat/tokens_part1.md keeps every sentence of part 1 of tokens.md.
+"""Check that the reformatted part 1 of tokens.md keeps every sentence of part 1 of tokens.md.
+
+The new text is docs/agents/tokens.md at NEW_REV (default 38a1b46, the commit of the readability pass; the
+reformatted part 1 was first written as docs/agents/_reformat/tokens_part1.md and merged into tokens.md the same
+day), read with `git show`, not from the working tree: pinned on 2026-11-12 so that later content fixes, marked in
+the file with dated notes, are not read as reformat changes and the check stays a record of the pass.
 
 Part 1 = docs/agents/tokens.md at OLD_REV (default 4c3c108), from the start of the file up to, not
 including, the heading "### `safebranch`".
@@ -14,7 +19,7 @@ Check 2 (stricter): the old text without its table scaffolding (header row, sepa
 cell) and the new text, as word sequences under the same normalisation with a trailing "." or ";"
 dropped from each word, must differ only by inserted bold labels of at most 5 words.
 
-Usage, from the repository root: python3 docs/agents/_reformat/check_part1.py [OLD_REV]
+Usage, from the repository root: python3 docs/agents/_reformat/check_part1.py [OLD_REV] [NEW_REV]
 """
 import difflib
 import pathlib
@@ -23,8 +28,9 @@ import subprocess
 import sys
 
 OLD_REV = sys.argv[1] if len(sys.argv) > 1 else "4c3c108"
+NEW_REV = sys.argv[2] if len(sys.argv) > 2 else "38a1b46"
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-NEW_PATH = ROOT / "docs" / "agents" / "tokens.md"   # the joined file (parts merged 2026-11-12)
+NEW_PATH = "docs/agents/tokens.md"   # the joined file (parts merged 2026-11-12), read at NEW_REV
 CUT = "### `safebranch`"
 ROW = re.compile(r"^\| (.+?) \| (.*) \|$")
 SCAFFOLD = {"| Token | Effect |", "|---|---|"}
@@ -47,7 +53,8 @@ def words(text):
 full = subprocess.run(["git", "-C", str(ROOT), "show", f"{OLD_REV}:docs/agents/tokens.md"],
                       check=True, capture_output=True, text=True).stdout
 old = full[:full.index(CUT)]
-_t = NEW_PATH.read_text(encoding="utf-8")
+_t = subprocess.run(["git", "-C", str(ROOT), "show", f"{NEW_REV}:{NEW_PATH}"],
+                    check=True, capture_output=True, text=True).stdout
 new = _t[:_t.index(CUT)]
 # the preamble sentence added when the halves were joined (metadata, not moved text)
 new = new.replace(" Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets"

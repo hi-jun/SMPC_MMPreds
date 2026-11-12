@@ -19,7 +19,11 @@ Three stricter checks follow, also exit 1 on failure:
     may only insert words; every inserted run is printed, so it can be read as an added heading or
     label (at most 5 words each), and every deleted or replaced run is a failure.
 
-Usage, from the repository root: python3 docs/agents/_reformat/check_history.py [OLD_REV]
+The new text is `git show NEW_REV:<path>` (default 38a1b46, the commit of the readability pass), not the
+working tree: pinned on 2026-11-12 so that later content fixes, marked in the files with dated notes, are not
+read as reformat changes and the check stays a record of the pass.
+
+Usage, from the repository root: python3 docs/agents/_reformat/check_history.py [OLD_REV] [NEW_REV]
 """
 import collections
 import difflib
@@ -29,6 +33,7 @@ import subprocess
 import sys
 
 OLD_REV = sys.argv[1] if len(sys.argv) > 1 else "4c3c108"
+NEW_REV = sys.argv[2] if len(sys.argv) > 2 else "38a1b46"
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 FILES = ["docs/agents/design_history.md", "docs/agents/ngsim_replay_defaults.md",
          "docs/agents/controller.md"]
@@ -55,10 +60,11 @@ failed = False
 for path in FILES:
     old = subprocess.run(["git", "-C", str(ROOT), "show", f"{OLD_REV}:{path}"],
                          check=True, capture_output=True, text=True).stdout
-    new = (ROOT / path).read_text(encoding="utf-8")
+    new = subprocess.run(["git", "-C", str(ROOT), "show", f"{NEW_REV}:{path}"],
+                         check=True, capture_output=True, text=True).stdout
     old_norm, new_norm = normalise(old), normalise(new)
     print(f"== {path}")
-    for name, text in ((f"old ({OLD_REV})", old), ("new", new)):
+    for name, text in ((f"old ({OLD_REV})", old), (f"new ({NEW_REV})", new)):
         longest = max(len(line) for line in text.split("\n"))
         print(f"  {name}: {len(text.encode())} bytes, {len(text.splitlines())} lines, "
               f"longest line {longest} chars")

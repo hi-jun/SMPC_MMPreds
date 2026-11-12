@@ -1,6 +1,6 @@
 # NGSIM replay defaults: history and how to reproduce older roots
 
-Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). It was an item of AGENTS.md §10. The current defaults are in AGENTS.md §1 (Current design).
+Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). It was an item of AGENTS.md §10. The current defaults are in AGENTS.md §1 (Current design). (updated 2026-11-12: stale statements have since been marked in place with dated "updated" and "pointer updated" notes, and the replay edit for `onerow` was added; the reformat checks read this file at commit 38a1b46.)
 
 ## Defaults, by date
 
@@ -13,7 +13,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 - Runs before 2026-10-27 used the logged values unless the variable was set, so do not mix them with new runs in one table.
 - Since 2026-10-27 evening its default policy tail (`NGSIM_POLICY_TAIL`, the tokens after `ctx<λ>`) is `_entrypass0_rmove1000_rjerk40`
   - every run before that which did not set the variable used `_rmove1000`, and `NGSIM_POLICY_TAIL=_rmove1000_rjerk40` gives the design without entrypass.
-- The held-out table is being re-run under the new defaults (`replay_out/launch_final_heldout_v20s0_20261027.sh`, prereg `final_heldout_v20s0_rj40_20261027/prereg.md`).
+- The held-out table is being re-run under the new defaults (`replay_out/launch_final_heldout_v20s0_20261027.sh`, prereg `final_heldout_v20s0_rj40_20261027/prereg.md`) (updated 2026-11-12: done on 2026-10-27, roots `final_heldout_v20s0_*_20261027`, result `replay_out/cal_v20s0_20261027/result.md`).
 
 ### 2026-10-28
 
@@ -89,9 +89,9 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - The default tail ends `_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10`, so D-opt's default string is P1's (`fin_npw3_nob_iso_sm3_vlog_20261111`).
   - `NGSIM_ISAMPC_POLICY` defaults to `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5` (q_slack unset, Zhou's 0.055; `ISAMPC_IAIMM_CFG` stays an env setting)
     - and `NGSIM_PCACC_POLICY` to `acc_pcacc_amin3.5_amax2_jlim2.5_jlimup5` (the port; PC-ACC as published stays the env string `acc_pcacc_paperdsafe_amin3.5_amax2_jlim2.5_jlimup5_emamin8_emjlim10_emics`).
-  - `NGSIM_SIDE_ENTRY` (new) defaults to `live`: a vehicle that changes lanes into the ego lane beside the ego stays live (Route B below)
+  - `NGSIM_SIDE_ENTRY` (new) defaults to `live`: a vehicle that changes lanes into the ego lane beside the ego stays live (Route B, `open_items.md`; pointer updated 2026-11-12: it read "Route B below")
     - a track start or re-appearance beside the ego stays a ghost (a vehicle entering the recording at its upstream edge beside an ego that lags its logged position is an unrecorded follower; a first version that kept them live was stopped on 2026-11-12, `replay_out/side_live_20261112/aborted_trackstart/`)
-    - `ghost` gives Rule A as before.
+    - `ghost` gives Rule A as before (pointer updated 2026-11-12: Rule A is the ghost rule of Route B's "Replay rules", `open_items.md`, and of `ngsim_replay.run_episode`).
     - run_info.json records it as `side_entry`.
     - Diagnostics:
       - tick arrays `side_lead`, `side_lead_body`, `side_ovl`, `side_ovl_body`,
@@ -102,6 +102,10 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
     - with `ghost`, the tail without the ISO tokens, `NGSIM_ISAMPC_POLICY=acc_isampc` and `NGSIM_PCACC_POLICY=acc_pcacc`, P0 (13 + 3) and the 2026-11-11 ISA-MPC 0.055 and PC-ACC port roots (13) are
     - with `live` every smoke episode without a side entry is unchanged (none of the 13 has one).
   - To reproduce a root made before 2026-11-12, set `NGSIM_SIDE_ENTRY=ghost` and its own explicit strings (for the fork's limits the tail without the ISO tokens, `NGSIM_ISAMPC_POLICY=acc_isampc`, `NGSIM_PCACC_POLICY=acc_pcacc`).
+- **Replay edit for `onerow` (2026-11-12; line added 2026-11-12).** One line in `build_controller`, `cfg.one_row = A._parse_one_row(policy)`, so that the replay reads the token as the agent does (`replay_out/onerow_20261112/replay_edit.patch`; backup `replay_backup_pre_onerow/`).
+  - md5 of `ngsim_replay.py` 8a5e75a8 → 03718256 (`md5_replay_pre_onerow.txt`, `md5_replay_post_onerow.txt`); the defaults are unchanged.
+  - Bit-identical for every string without `onerow`: the parser then returns False, `NairACCConfig.one_row`'s default.
+  - Checked on the default string: 13 smoke episodes against `fin_npw3_iso_side_20261112` and 3 lead-only episodes against `lo_fin_npw3_iso_side_20261112`, every non-timing tick array equal (`replay_out/onerow_20261112/ws_gate_20261112.out`).
 
 ### Condition of older roots
 
@@ -116,7 +120,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - `markings` = the lane-marking map built from the Lane_ID transitions (`baselines.LaneMarkings`), with the marking on a vehicle's side moved to its current position where that position and its Lane_ID disagree
   - `body` = the same markings, in the lane when the vehicle's body (Local_X ± half its logged width) overlaps the lane at all (CommonRoad's lanelet assignment by shape), no anchoring
   - `path` = in when the vehicle's body overlaps the ego's body laterally, |x − x_ego| < (w + w_ego)/2, the ego held at its current offset from its lane's marking centre (the safety layer's path test carried to the predicted points), no lane line
-- step 0 is the Lane_ID either way, and the baselines always keep `midpoint` (run_info.json records it; result in §10's open items).
+- step 0 is the Lane_ID either way, and the baselines always keep `midpoint` (run_info.json records it; result in §10's open items; pointer updated 2026-11-12: now `open_items.md`, "Safety and recursive feasibility", final-check items 4 and 5).
 
 ### Rule A warm-up ghosts (2026-11-03)
 
