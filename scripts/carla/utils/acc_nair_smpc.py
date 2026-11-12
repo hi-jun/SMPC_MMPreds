@@ -308,6 +308,14 @@ class NairACCConfig:
     #: speed, ``L + d0 + tau v_bar_k``, without the remembered standoff.  Needs ``dopt<w>`` (not ``lk`` / ``lkr``)
     #: under ``confidence_chance``; not with the floor, sigma and lane-keeping pricing options below and above.
     one_row: bool = False
+    #: ``zconf<b>`` (2026-11-12, maintainer): with ``one_row``, the row's sigma term is back, per active cell ``z sigma``
+    #: with ``z = Phi^-1(min(p, b))``, ``p`` the probability of the cell's own lead mode for its vehicle
+    #: (``MultimodalLeadPrediction.lead_mode_probability``; 1 for a lane-keeping lead under ``nocutout``, so z(0.95) =
+    #: 1.645) and ``sigma`` its ``safety_std`` (``one_row_sigma_term``): ``gap >= L + d0 + tau v - short - xi + z sigma``
+    #: with ``0 <= short <= tau v``, so the floor through the cap is ``L + d0 + z sigma``.  z is negative for p < 0.5 and is
+    #: not clamped.  The reference keeps the plain ``d_safe`` at the planned speed (maintainer).  ``None`` is off
+    #: (onerow's rows without a sigma term).
+    one_row_z_conf: Optional[float] = None
     #: ``safebranch``: the safety layer's fail-safe as one more branch of the
     #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
     #: contingency plan).  The branch shares the first input with every
@@ -559,6 +567,11 @@ class NairACCConfig:
                     or self.relative_brake_decel is not None or self.failsafe_branch):
                 raise ValueError("one_row (onerow) is not implemented with cvar<eps>_<c>, passmiqp<m>, "
                                  "relbrake<b> or safebranch")
+        if self.one_row_z_conf is not None:
+            if not self.one_row:
+                raise ValueError("one_row_z_conf (zconf<b>) needs one_row (onerow)")
+            if not 0.0 < float(self.one_row_z_conf) < 1.0:
+                raise ValueError("one_row_z_conf (zconf<b>) must lie in (0, 1)")
         if self.failsafe_branch:
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
@@ -2593,7 +2606,8 @@ class NairACCSMPC:
             )
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
             if self.config.one_row:
-                return 0.0      # onerow: no row has a sigma term
+                # onerow: no row has a sigma term, or with zconf<b> the cell's z sigma
+                return one_row_sigma_term(prediction, mode, step, self.config)
             if self.config.price_row_no_sigma and standoff_shortfall_mask(
                     prediction, self.config.standoff_shortfall_on_lk)[mode, step]:
                 return 0.0      # nopricesigma: a priced row asks for D on the mean gap; its floor row keeps sigma
@@ -4762,6 +4776,27 @@ def cell_sigma_term(prediction, mode, step, config):
         return float(z * safety_std(prediction.covariances[mode, step], config))
     return confidence_tightening(prediction.covariances[mode, step],
                                  cell_sigma_confidence(prediction, mode, step), config)
+
+
+def one_row_sigma_term(prediction, mode, step, config):
+    """``onerow``'s sigma term of cell (mode, step): 0, or with ``zconf<b>`` (``config.one_row_z_conf``) ``z sigma`` with
+    ``z = Phi^-1(min(p, b))``, ``p`` the probability of the cell's own lead mode for its vehicle
+    (``lead_mode_probability``) and ``sigma`` the cell's ``safety_std``.  An active cell has ``p > 0`` (the 0.1 gate,
+    ``occin<eps>``).  A prediction without those probabilities and without a cut-in chance cell (the synthetic
+    placeholder of a tick with no target, a lead 1000 m ahead) has lane-keeping cells only: ``p = 1``; one with a cut-in
+    chance cell raises."""
+    if config.one_row_z_conf is None:
+        return 0.0
+    if prediction.lead_mode_probability is not None:
+        p = float(prediction.lead_mode_probability[mode, step])
+    elif np.any(np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)):
+        raise ValueError("zconf needs the cells' hypothesis probabilities (lead_mode_probability)")
+    else:
+        p = 1.0
+    beta = min(p, float(config.one_row_z_conf))
+    if not beta > 0.0:
+        raise ValueError("zconf: an active cell with p <= 0 has no quantile")
+    return float(norm.ppf(beta) * safety_std(prediction.covariances[mode, step], config))
 
 
 def standoff_shortfall_mask(prediction, include_lk=False):

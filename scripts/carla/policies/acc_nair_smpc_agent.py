@@ -351,6 +351,10 @@ class ACCNairSMPCAgent(object):
             if conflicts:
                 raise ValueError("onerow has one row per cell without a sigma term or a floor row; not with "
                                  + ", ".join(conflicts))
+        # zconf<b> (2026-11-12): onerow's row with the sigma term z sigma, z = Phi^-1(min(p, b)); the reference keeps d_safe
+        self.controller_config.one_row_z_conf = self._parse_one_row_z_conf(smpc_config)
+        if self.controller_config.one_row_z_conf is not None and not self.controller_config.one_row:
+            raise ValueError("zconf<b> needs onerow")
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
@@ -1942,6 +1946,17 @@ class ACCNairSMPCAgent(object):
         and the reference's plain ``d_safe`` (``NairACCConfig.one_row``), 2026-11-12. Whole-token match.
         """
         return re.search(r"(?:^|_)onerow(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_one_row_z_conf(smpc_config):
+        """Read ``zconf<b>`` from the config string (None = off).
+
+        With ``onerow``: each active cell's row gets back a sigma term ``z sigma``, ``z = Phi^-1(min(p, b))`` with ``p``
+        the probability of the cell's own lead mode (``NairACCConfig.one_row_z_conf``), 2026-11-12. Whole-token match;
+        ``zconf0.95`` reads as 0.95.
+        """
+        match = re.search(r"(?:^|_)zconf([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_safety_layer(smpc_config):
