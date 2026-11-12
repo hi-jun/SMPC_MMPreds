@@ -6,7 +6,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 
 ### 2026-10-17
 
-- **The current design is D-opt, `dopt100lkr_trajcutin`** (the maintainer's decision on 2026-10-17) (updated 2026-11-12: the NGSIM design has used `dopt3lkr` in place of `dopt100lkr` since the night of 2026-11-11, entry 2026-11-11 below; the CARLA design keeps `dopt100lkr`; on 2026-11-12 the maintainer decided that `onerow` will be the final design, entry 2026-11-12 below).
+- **The current design is D-opt, `dopt100lkr_trajcutin`** (the maintainer's decision on 2026-10-17) (updated 2026-11-12: the NGSIM design has used `dopt3lkr` in place of `dopt100lkr` since the night of 2026-11-11, entry 2026-11-11 below; the CARLA design keeps `dopt100lkr`; on 2026-11-12 the maintainer decided that `onerow` will be the final design, entry 2026-11-12 below) (updated 2026-11-12 night: the final NGSIM design, adopted that night, is `onerow` with `dopt10`, `zconf0.95`, `nocap` and `snap160`, without `lkr`; entry 2026-11-12 below).
 
 ### 2026-10-22
 
@@ -147,7 +147,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
     - no-cut-in phantom_ep 0.058 → 0.029 (SE 0.009), runs a_min ≤ −2 7 → 5
     - the TV's hypothesis on 0.62 / 0.45 s later
     - the ds3_v1780 contact stays, −1.30 m, an entry the fail-safe could not avoid at the entry tick).
-  - Its string is the fourth-to-last row of §4's current-design table (pointer updated 2026-11-12: it read "third-to-last" before the P1 row was added), and it was the replay's default from that evening to the night of 2026-11-11 (§10).
+  - Its string is the fifth-to-last row of §4's current-design table (pointer updated 2026-11-12: it read "third-to-last" before the P1 row was added, and "fourth-to-last" until the final design's row was added that night), and it was the replay's default from that evening to the night of 2026-11-11 (§10).
   - Not run in CARLA.
 
 ### 2026-11-11
@@ -160,18 +160,18 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - Against NP (w100): δ_max +10.1 / +5.6 %p, a_min +0.34, j_max −0.66.
   - Against ISA-MPC (slack 5) at the same condition: δ_max +4.0 / +1.5 %p (SE 1.8 / 1.0), a_min +1.10, phantom_ref −0.44.
   - `entrypass0` and `pingate` were removed after `replay_out/noep_nl_20261111/result.md`.
-  - Its string is the third-to-last row of §4's current-design table (pointer updated 2026-11-12: it read "second-to-last" before the P1 row was added), and it was the replay's default until later that night (§10)
+  - Its string is the fourth-to-last row of §4's current-design table (pointer updated 2026-11-12: it read "second-to-last" before the P1 row was added, and "third-to-last" until the final design's row was added that night), and it was the replay's default until later that night (§10)
     - the results above used the logged set speed and the 3 m start margin, which are the replay's default condition since the same night.
   - Not run in CARLA.
 - **Later on the night of 2026-11-11 the NGSIM design dropped `safebranch`** (maintainer): the safety layer stays (`safelayer` + `entrant2`, with `failsafe_recovery`), but its fail-safe is no longer a branch of the scenario tree, so the MPC no longer plans the layer's contingency.
-  - Its string is the second-to-last row of §4's current-design table (pointer updated 2026-11-12: it read "the last row" before the P1 row was added), and the replay's default since then (§10) (updated 2026-11-12: until 2026-11-12, when P1, the last row, became the default; entry 2026-11-12 below)
+  - Its string is the third-to-last row of §4's current-design table (pointer updated 2026-11-12: it read "the last row" before the P1 row was added, and "second-to-last" until the final design's row was added that night), and the replay's default since then (§10) (updated 2026-11-12: until 2026-11-12, when P1, the last row (pointer updated 2026-11-12 night: the second-to-last since the final design's row was added), became the default; entry 2026-11-12 below)
     - its first runs, at today's limits and at the unified limits (§4 `amin<x>` to `fsjerk<x>`), are P0 and P1 of `replay_out/iso_limits_20261111/`.
   - Not run in CARLA.
 
 ### 2026-11-12
 
 - **Since 2026-11-12 the NGSIM replay's defaults are the unified limits and live side entries** (maintainer):
-  - D-opt's default string is P1's, the design above with `_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10` (the last row of §4's current-design table)
+  - D-opt's default string is P1's, the design above with `_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10` (the second-to-last row of §4's current-design table; pointer updated 2026-11-12 night: it read "the last row" until the final design's row was added) (updated 2026-11-12 night: until that night, when the final design became the default, entry below)
   - ISA-MPC and the PC-ACC port run at the same comfort limits
   - and a vehicle that changes lanes into the ego lane beside the ego stays live instead of becoming a ghost (`NGSIM_SIDE_ENTRY`, §10).
 - First runs: `replay_out/side_live_20261112/`.
@@ -182,8 +182,23 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 - Not run in CARLA, whose agent is unchanged.
 - **On 2026-11-12 the maintainer decided that `onerow` (commit 3d9bcf8) will be the final design**, because the old row structure was not clean (entry added 2026-11-12).
   - `onerow`: one priced row on every active lead cell, gap ≥ L + d0 + τv − short − ξ with 0 ≤ short ≤ τv at w·P_j·short²; no σ term, no floor row and no separate hard lane-keeping row (AGENTS.md §4; full record `docs/agents/tokens.md`, `onerow`).
-  - The decision came after the w 3 roots; the weight w is being tuned (w 3 and w 100 in `replay_out/onerow_20261112/result.md`; w sweep in progress, 2026-11-12).
-  - Not the replay's default yet (the default is still P1), and not run in CARLA.
+  - The decision came after the w 3 roots; the weight w is being tuned (w 3 and w 100 in `replay_out/onerow_20261112/result.md`; w sweep in progress, 2026-11-12) (updated 2026-11-12 night: done, w 10 chosen; entry below).
+  - Not the replay's default yet (the default is still P1), and not run in CARLA (updated 2026-11-12 night: the replay's default since that night, in the final design; entry below; still not run in CARLA).
+- **On the night of 2026-11-12 the maintainer adopted the final NGSIM design: `onerow` with w 10 (`dopt10`), `zconf0.95`, `nocap` and `snap160`** ("C + snap160 is the final NGSIM design"; entry added 2026-11-12 night).
+  - Its string is the last row of §4's current-design table, and the replay's default since then (`ngsim_replay_defaults.md`, 2026-11-12; gates `replay_out/onerow_20261112/adopt_snap160.log`).
+  - Against P1 it drops `lksigma`, `lkrsigma`, `floorrisk0.1`, `floorhyp`, `nopricesigma` and `lkonesided0.05`, which `onerow` refuses, runs `dopt10` in place of `dopt3lkr`, and adds `_onerow_zconf0.95_nocap_snap160`.
+  - It decides the w choice (w 10) and arm A against arm C (C, with `snap160`).
+  - The path from `onerow` w 3 and w 100 (`docs/agents/tokens.md`, `onerow`), each step on the NGSIM final set against P1 and the step before; result file `replay_out/onerow_20261112/result.md` (addenda 2–5), full records `docs/agents/tokens.md` (`onerow`, `zconf<β>`, `nocap`, `snap<r>`):
+    1. w sweep, w 10 and w 30 (addendum 2, `tables_onerow_wsweep.md`): w trades recovery and intrusion against pre-entry braking, and no w reached P1's floor-breach counts. The maintainer chose w 10 and kept `nocutout`.
+    2. zσ, `zconf0.95` (7ef3da2; arm A, addendum 3, `tables_onerow_z95.md`): the σ term back in the row, z = Φ⁻¹(min(p, 95 %)). Following inside d_safe behind non-TV leads fell from 2.7 / 10.1 / 10.2 % to 1.1 / 1.4 / 0.8 % of lead ticks; against P1 critical j_max +0.31, T_rec −0.66 s, floor breaches 21 / 14 → 25 / 16.
+    3. `nocap` (506bfcb; arm C, addendum 4, `tables_onerow_nocap.md`): no cap on the shortfall, so no row is hard. Against A the falling-bound runs fell 43 / 47 / 35 → 23 / 19 / 8 (critical / mild / no cut-in) and phantom_ep 0.096 → 0.042; mild floor breaches 16 → 22.
+    4. `snap<r>` (f1bfbc4; addendum 5, `tables_onerow_snap.md`, `snap_diag.md`): a cost on the jerk's changes, r 40 and 160 on C. `snap160` against C: critical j_max −0.35, run-max one-tick snap 5.6 / 18.6 → 2.3 / 7.1 m/s⁴ (critical median / p90); δ_max, T_rec and phantom braking unchanged.
+  - Headline against P1 (`replay_out/onerow_20261112/headline_onerow_snap.md`; paired, SE in brackets):
+    - critical cut-in: T_rec 1.69 → 1.27 s (−0.50, SE 0.08; not recovered 17 → 1), runs at the falling jerk bound 50 → 12; j_max −0.17 (0.14) and δ_max 32.1 → 29.6 % (−2.6 %p, SE 1.9) within 2 SE; floor breaches 21 → 22; one fallback run (ds4_v3035, 1 tick at 0.10 m/s after a fail-safe; P1 none).
+    - mild cut-in: j_max −0.35 (0.05), a_min +0.15 (0.03), T_rec −0.26 s (0.05), runs at the falling jerk bound 56 → 2; δ_max −1.1 %p (1.3); floor breaches 14 → 20.
+    - no cut-in: j_max −0.24 (0.03), phantom_ep 0.095 → 0.043 m/s² (−0.051, SE 0.014), v_avg +0.07 m/s (0.01), contacts 7 → 5.
+    - Contacts are side entries only, none rear-end; among the new ones the TV side entry ds4_v3230 (mild) at −0.33 m, where P1 kept 3.34 m.
+  - Not run in CARLA; the CARLA design string is unchanged.
 
 ### D-opt definition and evidence
 
@@ -235,13 +250,14 @@ The current design (§1), not in the paper:
 | D-opt, NGSIM design (2026-11-11 night, NP w3) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt3lkr_trajcutin_ctx<λ>_latgate_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_safebranch_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05` |
 | D-opt, NGSIM design (2026-11-11 night, NP w3 without `safebranch`) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt3lkr_trajcutin_ctx<λ>_latgate_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05` |
 | D-opt, NGSIM design (2026-11-12, unified limits; P1) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt3lkr_trajcutin_ctx<λ>_latgate_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10` |
+| D-opt, NGSIM final design (2026-11-12 night: `onerow` w 10 + `zconf0.95` + `nocap` + `snap160`) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx<λ>_latgate_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_occin0.1_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_nocap_snap160` |
 
 ### Which row identifies which roots
 
 - The first row identifies the older roots, such as the same-code roots `cutin_postfix_cmp_20261016` and `cutout_postfix_cmp_20261016` (AGENTS.md §4, after the current-design table; pointer updated 2026-11-12: it read "the same-code roots below")
 - the second the runs of 2026-10-27/28 before the adoption of `nocutout` + `lksigma` (e.g. `full_v20s0_ep0_paper_20261028`)
-- every new CARLA run uses the eighteenth and every new NGSIM run the twentieth with `NGSIM_LANE_TEST=path` (updated 2026-11-12: every new NGSIM run uses the last row, P1, the replay's default since 2026-11-12, as the bracket below and AGENTS.md §4 say; the twentieth was the replay's default from 2026-11-04 to the evening of 2026-11-10, `ngsim_replay_defaults.md`)
-  - (the last row, NP with w 3 without `safebranch` at the unified limits, is the NGSIM design and the replay's default since 2026-11-12
+- every new CARLA run uses the eighteenth and every new NGSIM run the twentieth with `NGSIM_LANE_TEST=path` (updated 2026-11-12: every new NGSIM run uses the last row, P1, the replay's default since 2026-11-12, as the bracket below and AGENTS.md §4 say; the twentieth was the replay's default from 2026-11-04 to the evening of 2026-11-10, `ngsim_replay_defaults.md`) (updated 2026-11-12 night: every new NGSIM run uses the last row, now the final design, the replay's default since that night; P1 is the second-to-last row)
+  - (the last row, NP with w 3 without `safebranch` at the unified limits, is the NGSIM design and the replay's default since 2026-11-12 (updated 2026-11-12 night: that row, P1, is now the second-to-last and was both until that night; the last row, the final design, is both since)
   - the row before it, the same at the fork's limits, was both from later on the night of 2026-11-11
   - the row before that, NP with w 3, was both earlier that night
   - the row before that, NL, was the NGSIM design and the replay's default from the evening of 2026-11-10, its root ran it with `cutin_chance0.6`, which `chancecells` renames

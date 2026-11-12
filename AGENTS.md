@@ -28,13 +28,35 @@ It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Whe
 
 ### Current design (2026-11-12)
 
-**NGSIM design: P1, the NGSIM replay's default.** The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_20261112/run_info.json` (λ = 0; the last row of §4's current-design table with `ctx<λ>` = `ctx0`):
+**NGSIM design (since the night of 2026-11-12): the final design, `onerow` with w 10 + `zconf0.95` + `nocap` + `snap160`, the NGSIM replay's default** (maintainer's decision, 2026-11-12 night: "C + snap160 is the final NGSIM design"). The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112/run_info.json` (λ = 0; the last row of §4's current-design table with `ctx<λ>` = `ctx0`):
+
+```
+acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_occin0.1_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_nocap_snap160
+```
+
+Its own token groups (details §4, full records `docs/agents/tokens.md`); the others are P1's, below:
+- `onerow` with `dopt10`: one row on every active lead cell, cut-in hypotheses and lane-keeping leads alike, gap ≥ L + d0 + τv − short, the shortfall priced at 10·P_j·short²; no floor row, no separate hard lane-keeping row, no `lkr`; the reference asks for the plain d_safe.
+- `zconf0.95`: the row's σ term z·σ, z = Φ⁻¹(min(p, 95 %)), p the cell's own hypothesis probability: 1.645σ on the lead's lane keeping, negative for a cut-in hypothesis below 50 %.
+- `nocap`: no upper bound on the shortfall, so no row is hard; the ℓ1 slack stays in the string but was 0 on every solved tick of the final set, and the safety layer (`safelayer`, `entrant2`) is the only hard protection.
+- `snap160`: a cost 3·P_j·160·Σ(j_k − j_{k−1})² on the jerk's changes, j_{−1} being the jerk the plant got on the last tick.
+- Not in it, against P1: `dopt3lkr` (now `dopt10`), `lksigma`, `lkrsigma`, `floorrisk0.1`, `floorhyp`, `nopricesigma`, `lkonesided0.05` (`onerow` refuses them).
+
+Against P1 on the NGSIM final set (paired, SE in brackets; `replay_out/onerow_20261112/tables_onerow_snap.md`, `headline_onerow_snap.md`, `result.md` addendum 5):
+- critical cut-in (209 runs): T_rec 1.69 → 1.27 s (−0.50, SE 0.08; not recovered 17 → 1), runs at the falling jerk bound 50 → 12; j_max 1.31 → 1.14 (−0.17, SE 0.14) and δ_max 32.1 → 29.6 % (−2.6 %p, SE 1.9) within 2 SE; floor breaches 21 → 22; one fallback run (ds4_v3035, 1 tick at 0.10 m/s after a fail-safe; P1 none).
+- mild cut-in (280): j_max 1.23 → 0.88 (−0.35, SE 0.05), a_min +0.15 (0.03), T_rec −0.26 s (0.05), runs at the falling jerk bound 56 → 2; δ_max 18.0 → 16.9 % (within SE); floor breaches 14 → 20.
+- no cut-in (393): j_max −0.24 (0.03), phantom_ep 0.095 → 0.043 m/s² (−0.051, SE 0.014), v_avg +0.07 m/s (0.01), contacts 7 → 5.
+- Contacts are side entries only, none rear-end (critical / mild 13 / 12 → 14 / 12); among the new ones the TV side entry ds4_v3230 (mild) at −0.33 m, where P1 kept 3.34 m.
+- Not run in CARLA.
+
+How the replay was switched and gated, and how to reproduce P1 and the other roots of 2026-11-12: `docs/agents/ngsim_replay_defaults.md` (2026-11-12) and `replay_out/onerow_20261112/adopt_snap160.log`. The path to this design (w sweep, zσ, `nocap`, `snap`): `docs/agents/design_history.md` (2026-11-12).
+
+**Previous NGSIM design: P1** (updated 2026-11-12 night: it read "NGSIM design: P1, the NGSIM replay's default."; P1 was both from 2026-11-12 until that night; `NGSIM_POLICY_DOPT=_dopt3lkr` with its tail as `NGSIM_POLICY_TAIL` reproduces it). The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_20261112/run_info.json` (λ = 0; the second-to-last row of §4's current-design table with `ctx<λ>` = `ctx0`; pointer updated 2026-11-12 night: it read "the last row" until the final design's row was added):
 
 ```
 acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt3lkr_trajcutin_ctx0_latgate_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10
 ```
 
-The replay's default condition (no variable set; `results/ngsim_lambda_cal_20261019/replay/ngsim_replay.py`, `baselines.py`):
+The replay's default condition (no variable set; `results/ngsim_lambda_cal_20261019/replay/ngsim_replay.py`, `baselines.py`) (updated 2026-11-12 night: unchanged by the switch to the final design, and the condition of its runs):
 - set speed = the logged follower's (`NGSIM_V_SET=logged`),
 - start gap d_safe + 3 m (`NGSIM_SPAWN_MARGIN=3`),
 - previous command 0 at the start (`NGSIM_START_CMD`),
@@ -46,15 +68,15 @@ The replay's default condition (no variable set; `results/ngsim_lambda_cal_20261
 
 Older roots and their settings: `docs/agents/ngsim_replay_defaults.md`.
 
-What the token groups do (details §4, full records `docs/agents/tokens.md`):
+What the token groups do (details §4, full records `docs/agents/tokens.md`) (updated 2026-11-12 night: P1's groups; the final design above keeps every group except the three lines marked below):
 - `stdan_3int`, `modes8`: STDAN with three intentions; at most 8 joint modes. `fixed_risk`, `nominal_safe_distance`: labels only.
 - `chancecells`: the cut-in cells are chance cells, the cells the price and the floor below act on (`cutin_chance0.6` renamed).
-- `dopt3lkr`: on a cut-in cell the time gap τv is priced at 3·P_j·shortfall² instead of hard; `lkr` prices a vehicle's lane-keeping cells the same way once it has had a cut-in cell, until it leads and the gap has held the standoff for 0.5 s.
-- `fullfoot`, `floorrisk0.1`, `floorhyp`, `nopricesigma`: the priced row asks for d_safe on the mean gap; the hard floor is L + d0 + z·σ with z = Φ⁻¹(1 − 0.1/p), so p·P(gap < L + d0) ≤ 10 % per hypothesis (no floor where p ≤ 10 %).
+- `dopt3lkr`: on a cut-in cell the time gap τv is priced at 3·P_j·shortfall² instead of hard; `lkr` prices a vehicle's lane-keeping cells the same way once it has had a cut-in cell, until it leads and the gap has held the standoff for 0.5 s. (updated 2026-11-12 night: P1 only; the final design runs plain `dopt10` under `onerow`, every active cell priced.)
+- `fullfoot`, `floorrisk0.1`, `floorhyp`, `nopricesigma`: the priced row asks for d_safe on the mean gap; the hard floor is L + d0 + z·σ with z = Φ⁻¹(1 − 0.1/p), so p·P(gap < L + d0) ≤ 10 % per hypothesis (no floor where p ≤ 10 %). (updated 2026-11-12 night: P1 only, except `fullfoot`, which the final design keeps; it has no floor row.)
 - `bcts`, `occin0.1`: STDAN's intention probabilities calibrated by BCTS; a cut-in cell is active at step k where p·P_in(k) > 10 %.
 - `trajcutin`, `nolkentry`: an adjacent vehicle's lane-keeping and away trajectories never lead, so only its lane change toward the ego lane makes cut-in cells (`trajcutin` then finds no entering lane-keeping trajectory).
 - `ctx0_latgate`: context trust at λ = 0, i.e. STDAN's probability unchanged.
-- `nocutout`, `lksigma`, `lkonesided0.05`, `lkhold`, `lkrsigma`: the ego-lane lead has no cut-out mode; its lane-keeping row is d_safe + 1.645σ (one-sided, 5 %) and stays active through lateral wobbles; `lkr`'s release also asks for that σ term.
+- `nocutout`, `lksigma`, `lkonesided0.05`, `lkhold`, `lkrsigma`: the ego-lane lead has no cut-out mode; its lane-keeping row is d_safe + 1.645σ (one-sided, 5 %) and stays active through lateral wobbles; `lkr`'s release also asks for that σ term. (updated 2026-11-12 night: the final design keeps `nocutout` and `lkhold`; its lead row is `onerow`'s, d_safe + 1.645σ − short from `zconf0.95` at p = 1, priced.)
 - `rmove1000_rjerk40`, `jinput_ra0`: the jerk is the MPC input, priced 40·j² (×3, §3); no cost on the acceleration's size; `rmove` has no role with `jinput`.
 - `l1slack1e6`: the emergency slack is an exact ℓ1 penalty, so ξ > 0 means that the hard rows have no solution.
 - `leadmerge`, `mergefirst`: joint modes with the same lead sequence are one scenario, merged before the `modes8` cap.
@@ -67,11 +89,11 @@ What the token groups do (details §4, full records `docs/agents/tokens.md`):
 - Every token added since then has run on the NGSIM replay only:
   - `entrypass0`, `fullfoot`, `l1slack1e6`, `leadmerge`, `mergefirst`, `lkrsigma`, `lkhold` (each "not run in CARLA" in its record)
   - and `nocutout`, `lksigma` (no CARLA sweep root carries them).
-- The NGSIM design's other tokens are not decided for CARLA (`jinput`, `safelayer`, `entrant2`) or refused by the CARLA agent (`bcts`, `occin`).
+- The NGSIM design's other tokens are not decided for CARLA (`jinput`, `safelayer`, `entrant2`) or refused by the CARLA agent (`bcts`, `occin`). (updated 2026-11-12 night: the final NGSIM design's `onerow`, `zconf0.95`, `nocap` and `snap160` have not run in CARLA either; the agent parses them.)
 
 **Pending decisions** (the maintainer's):
-- `l1slack100` in place of `l1slack1e6`: run on the final set on 2026-11-12 (`replay_out/l1w_20261112/result.md`).
-- `onerow` (updated 2026-11-12): one priced row on every active lead cell, no σ term, no floor row, no hard lane-keeping row (3d9bcf8). The maintainer decided on 2026-11-12 that it will be the final design; its weight w is being tuned (w 3 and w 100 run; w sweep in progress, 2026-11-12). Not the replay's default yet. Record: `docs/agents/tokens.md` (`onerow`), `replay_out/onerow_20261112/result.md`.
+- `l1slack100` in place of `l1slack1e6`: run on the final set on 2026-11-12 (`replay_out/l1w_20261112/result.md`). (updated 2026-11-12 night: run on P1; the final design keeps `l1slack1e6`, and `l1slack100` has not been run with it.)
+- `onerow` (updated 2026-11-12): one priced row on every active lead cell, no σ term, no floor row, no hard lane-keeping row (3d9bcf8). The maintainer decided on 2026-11-12 that it will be the final design; its weight w is being tuned (w 3 and w 100 run; w sweep in progress, 2026-11-12). Not the replay's default yet. Record: `docs/agents/tokens.md` (`onerow`), `replay_out/onerow_20261112/result.md`. (updated 2026-11-12 night: decided, not pending: the final design above, `onerow` with w 10 + `zconf0.95` + `nocap` + `snap160`, the replay's default; it settles the w choice, w 10, and arm A against arm C, C with `snap160`.)
 - `passmiqp<m>` / `passnocap`: not adopted, decision pending (`replay_out/passmiqp_20261104/result.md`, `replay_out/passnocap_20261104/result.md`, `replay_out/passmiqp_20261104/discussion_20261104.md`).
 - `occin` ε: 10 % in the design since NL (2026-11-10 evening); the ε comparisons are `replay_out/bcts_20261106/result.md` (0.02 / 0.05 / 0.1) and `replay_out/pcal_o5_20261106/result.md` (O10 vs O5) (updated 2026-11-12: decided, not pending: the maintainer fixed ε at 10 % with NL on the evening of 2026-11-10, `docs/agents/design_history.md` 2026-11-10; the two files are the comparisons behind it).
 - `cvar<ε>_<c>`: not adopted, decision pending (`replay_out/cvar_final_20261106/result.md`, `replay_out/cvar_wide_20261107/result.md`).
@@ -79,7 +101,7 @@ What the token groups do (details §4, full records `docs/agents/tokens.md`):
 - `entrypass9` in place of `entrypass0` (the CARLA string; entrypass left the NGSIM design on 2026-11-11): decision pending (`replay_out/entrypass9_20261101/result.md`).
 - The ds3_v1780 cut-in contact of the calibrated designs (it stays in NL): the maintainer's review before the paper's tables switch (`replay_out/pcal_cvar_20261106/result.md`, `replay_out/nps_lk_20261110/result.md`).
 - CARLA: whether `jinput`, `safelayer` and `entrant2` (and the NGSIM design as a whole) enter the CARLA design.
-- Smaller open choices (R1, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing): §10 (updated 2026-11-12: `floorrisk0.3` is moot, `floorrisk<ε>` with `floorhyp` has been in the NGSIM design since 2026-11-10, at ε 0.1 since NL).
+- Smaller open choices (R1, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing): §10 (updated 2026-11-12: `floorrisk0.3` is moot, `floorrisk<ε>` with `floorhyp` has been in the NGSIM design since 2026-11-10, at ε 0.1 since NL) (updated 2026-11-12 night: P1 had `floorrisk0.1`; the final design has no floor row).
 
 The record of every design decision since 2026-10-17 (D-opt's definition, each adoption with its measured effect, every older design string): `docs/agents/design_history.md`.
 
@@ -110,7 +132,7 @@ The record of every design decision since 2026-10-17 (D-opt's definition, each a
 | `predictor/stdan_vel/` | A 9-mode STDAN with velocity output |
 | `predictor/uq/` | Conformal novelty detector and a 5-member deep ensemble for the `stdan_vel` checkpoint, ported from the maintainer's thesis repository (added 2026-10-13). Not wired into the controller, and not valid for `stdan_3int`. Read `predictor/uq/AGENTS.md` first |
 | `overleaf/` | Paper tables, the final formulation, and the figure and table generators (`overleaf/figs/scripts/`) |
-| `tests/` | 39 unit-test modules (487 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration, context trust `ctx`, PC-ACC, ISA-MPC, acceleration lag `alag`, jerk input `jinput`, `relbrake`, `l1slack`, `termcost`, `safelayer`, `floorrisk`, `leadmerge`, `safebranch`, `mergefirst`, the fallback sign, `lkrsigma`, `lkhold`, the fail-safe exit (`failsafe_recovery`), close entrants (`entrant<b>`), the pass / yield MIQP (`passmiqp<m>`), the pass / yield MIQP without the cap (`passnocap`), the occupancy activation (`occin<eps>`), the CVaR bound (`cvar<eps>_<c>`), the probability calibration (`pcal`), its replacement BCTS (`bcts`), the lane-keeping entry (`nolkentry`), the switch-on by P_in alone (`pingate`), the floor quantile of the hypothesis probability (`floorhyp`), D's σ term at the floor's quantile (`floortop`), the lane-keeping σ term one-sided (`lkonesided<ε>`), the priced row without σ (`nopricesigma`), the chance switch's new name (`chancecells`), the unified limits (`amin<x>` `amax<x>` `jlimup<x>` `fsdecel<x>` `fsjerk<x>`, ISA-MPC's and PC-ACC's, `test_iso_limits.py`) (updated 2026-11-12: 40 modules and 494 tests since `tests/test_onerow.py`, the one-row design `onerow`, 3d9bcf8; the full suite ran 494 tests OK, `replay_out/onerow_20261112/full_test_suite.out`) |
+| `tests/` | 39 unit-test modules (487 tests): controller port, chance/cut-out extension, cut-out trajectory mapping, fixed-lane agent, ideal actuator, LSTM adapter, STDAN integration, context trust `ctx`, PC-ACC, ISA-MPC, acceleration lag `alag`, jerk input `jinput`, `relbrake`, `l1slack`, `termcost`, `safelayer`, `floorrisk`, `leadmerge`, `safebranch`, `mergefirst`, the fallback sign, `lkrsigma`, `lkhold`, the fail-safe exit (`failsafe_recovery`), close entrants (`entrant<b>`), the pass / yield MIQP (`passmiqp<m>`), the pass / yield MIQP without the cap (`passnocap`), the occupancy activation (`occin<eps>`), the CVaR bound (`cvar<eps>_<c>`), the probability calibration (`pcal`), its replacement BCTS (`bcts`), the lane-keeping entry (`nolkentry`), the switch-on by P_in alone (`pingate`), the floor quantile of the hypothesis probability (`floorhyp`), D's σ term at the floor's quantile (`floortop`), the lane-keeping σ term one-sided (`lkonesided<ε>`), the priced row without σ (`nopricesigma`), the chance switch's new name (`chancecells`), the unified limits (`amin<x>` `amax<x>` `jlimup<x>` `fsdecel<x>` `fsjerk<x>`, ISA-MPC's and PC-ACC's, `test_iso_limits.py`) (updated 2026-11-12: 40 modules and 494 tests since `tests/test_onerow.py`, the one-row design `onerow`, 3d9bcf8; the full suite ran 494 tests OK, `replay_out/onerow_20261112/full_test_suite.out`) (updated 2026-11-12 night: 43 modules and 509 tests since `tests/test_zconf.py`, `tests/test_nocap.py` and `tests/test_snap.py`, the tokens `zconf<β>` 7ef3da2, `nocap` 506bfcb and `snap<r>` f1bfbc4; the full suite ran 509 tests OK, `replay_out/onerow_20261112/full_test_suite_snap.out`) |
 | `results/` | Sweep outputs. `results/*/` is gitignored, so sweep data and launch scripts exist only on the maintainer's machine |
 | `docs/agents/` | Full records moved out of this file on 2026-11-12, unchanged: `tokens.md` (every §4 token row and the baselines' notes), `design_history.md` (the design decisions since 2026-10-17, every row of the current-design table), `open_items.md` (§10), `ngsim_replay_defaults.md` (the replay's default history and how to reproduce older roots), `controller.md` (§3's fail-safe exit), `check_split.py` (checks that every line of the old file was kept) (updated 2026-11-12: moved verbatim, then reformatted for readability the same day with the words unchanged, and since then marked in place where stale; `_reformat/check_*.py` check that the readability pass kept every sentence, reading the files at commit 38a1b46) |
 
@@ -166,7 +188,7 @@ Defaults come from `original_nair_acc_config()` plus the agent's settings:
 
 Sweeps pass `--ego-policy <string>`. The `_parse_*` methods of `ACCNairSMPCAgent` (in `acc_nair_smpc_agent.py`, starting around line 1186) read tokens from it by substring or regex match.
 
-Every token's full record (results, checks, commits) is its subsection, under the same name, in `docs/agents/tokens.md`. Status: **design** = in the NGSIM design (§1); CARLA string = in the CARLA design (§1).
+Every token's full record (results, checks, commits) is its subsection, under the same name, in `docs/agents/tokens.md`. Status: **design** = in the NGSIM design (§1); CARLA string = in the CARLA design (§1). (updated 2026-11-12 night: the NGSIM design is the final design of §1; "P1 only" = in P1, the previous NGSIM design, and not in the final one.)
 
 | Token | What it does | Status |
 |---|---|---|
@@ -180,10 +202,10 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `chancecells` | `cutin_chance0.6` under another name | **design** |
 | `cutin_gate<p>` | Probability below which a cut-in mode stops leading (default 0.1) | option; `occin` replaces it in the design |
 | `sigmacap<c>` | σ term takes min(p_j, c) instead of min(p_j, β_ref) | option |
-| `dopt<w>` | Cut-in cells: α_j scales only L + d0; the time gap τv is priced at w·P_j·shortfall² | **design** (as `dopt3lkr`) |
+| `dopt<w>` | Cut-in cells: α_j scales only L + d0; the time gap τv is priced at w·P_j·shortfall² | **design** (as `dopt10`, with `onerow`) (updated 2026-11-12 night: it read "as `dopt3lkr`", P1's) |
 | `dopt<w>lk` | `dopt<w>` that also prices the ego-lane lead's lane-keeping cells | superseded by `dopt<w>lkr` |
-| `dopt<w>lkr` | Prices lane-keeping cells only of a vehicle that has had a cut-in cell, until it leads and has held the standoff 0.5 s | **design** (`dopt3lkr`); CARLA string (`dopt100lkr`) |
-| `lkrsigma` | `lkr`'s release test also asks for the step-0 σ term | **design**; CARLA string |
+| `dopt<w>lkr` | Prices lane-keeping cells only of a vehicle that has had a cut-in cell, until it leads and has held the standoff 0.5 s | P1 only (`dopt3lkr`); CARLA string (`dopt100lkr`) (updated 2026-11-12 night: **design** until the final design; `onerow` has no `lkr`) |
+| `lkrsigma` | `lkr`'s release test also asks for the step-0 σ term | P1 only; CARLA string (updated 2026-11-12 night: **design** until the final design, which refuses it) |
 | `lkhold` | The lead's lane-keeping mode stays active through lateral wobbles | **design**; CARLA string |
 | `pricep2` | Price w·P_j·p_cell·short² instead of w·P_j·short² | not adopted (dropped 2026-10-27) |
 | `trajcutin` | An adjacent lane-keeping trajectory that enters the ego lane is a cut-in mode of its own | **design** (finds nothing under `nolkentry`); CARLA string |
@@ -197,7 +219,7 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `pingate` | Switch-on by P_in(k) > ε alone; p sets the floor | dropped 2026-11-11 |
 | `cvar<ε>_<c>` | Per-step CVaR bound on the cut-in shortfall in place of the price | not adopted, pending |
 | `nocutout` | No cut-out mode for an ego-lane vehicle | **design**; CARLA string |
-| `lksigma` | σ term on the ego-lane lead's lane-keeping cells | **design**; CARLA string |
+| `lksigma` | σ term on the ego-lane lead's lane-keeping cells | P1 only; CARLA string (updated 2026-11-12 night: **design** until the final design, whose lead row gets 1.645σ from `zconf0.95`) |
 | `fullfoot` | A cut-in cell keeps the whole footprint L + d0 (factor 1, not α_j) | **design**; CARLA string |
 | `relbrake<b>` | Relative-speed (RSS-type) safe distance on every lead cell | not adopted |
 | `l1slack<w>` | Emergency slack costs w·Σξ (exact penalty) instead of 5000·Σξ² | **design** (`l1slack1e6`); CARLA string; `l1slack100` pending |
@@ -205,11 +227,11 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `safelayer` | PC-ACC's safety layer around the command, on measured states | **design** (NGSIM); not decided for CARLA |
 | `safebranch` | The safety layer's fail-safe as a branch of the scenario tree | dropped 2026-11-11 |
 | `entrant<b>` | The safety layer also checks close entrants, assumed braking at −b m/s² | **design** (`entrant2`) |
-| `floorrisk<ε>` | A cut-in floor as the chance constraint P·P(gap < L + d0) ≤ ε | **design** (`floorrisk0.1`) |
-| `floorhyp` | The floor's quantile uses the hypothesis probability p | **design** |
+| `floorrisk<ε>` | A cut-in floor as the chance constraint P·P(gap < L + d0) ≤ ε | P1 only (`floorrisk0.1`) (updated 2026-11-12 night: **design** until the final design, which has no floor row) |
+| `floorhyp` | The floor's quantile uses the hypothesis probability p | P1 only (updated 2026-11-12 night: **design** until the final design, which has no floor row) |
 | `floortop` | The priced row's σ term at the floor's one-sided quantile | not adopted |
-| `lkonesided<ε>` | The lead's lane-keeping σ term one-sided, z = Φ⁻¹(1 − ε/p) | **design** (`lkonesided0.05`) |
-| `nopricesigma` | Priced rows ask for D on the mean gap; σ only in the floors | **design** |
+| `lkonesided<ε>` | The lead's lane-keeping σ term one-sided, z = Φ⁻¹(1 − ε/p) | P1 only (`lkonesided0.05`) (updated 2026-11-12 night: **design** until the final design, whose lead row gets 1.645σ from `zconf0.95`) |
+| `nopricesigma` | Priced rows ask for D on the mean gap; σ only in the floors | P1 only (updated 2026-11-12 night: **design** until the final design, which refuses it) |
 | `leadmerge` | Joint modes with the same lead sequence are one scenario | **design**; CARLA string |
 | `mergefirst` | Merge before the `modes<N>` cap | **design**; CARLA string |
 | `branchdec<a>` | Splits a cut-in from lane keeping at the TV's decision point | option (no metric changed) |
@@ -228,7 +250,10 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `brake_distance`, `brake_hard_band` | Braking-distance safety bound | experimental |
 | `cutin_ramp<β>`, `cutin_tlc<s>`, `gap_recover<s>`, `intent_lpf<s>`, `track_smooth<n>` | Other options | off by default, not in the paper |
 | `fixed_risk`, `nominal_safe_distance` | Labels only | labels only |
-| `onerow` | One priced row gap ≥ L + d0 + τv − short (0 ≤ short ≤ τv, w·P_j·short²) on every active lead cell; no σ term, no floor row, no hard lane-keeping row (updated 2026-11-12) | to be the final design (maintainer, 2026-11-12); w being tuned; not the replay default yet |
+| `onerow` | One priced row gap ≥ L + d0 + τv − short (w·P_j·short², `dopt<w>`'s w) on every active lead cell, cut-in hypotheses and lane-keeping leads alike; no floor row, no separate hard lane-keeping row, no `lkr`; the reference at plain d_safe | **design** (with `dopt10`, since 2026-11-12 night) |
+| `zconf<β>` | With `onerow`: the row's σ term z·σ, z = Φ⁻¹(min(p, β)), p the cell's own hypothesis probability | **design** (`zconf0.95`) |
+| `nocap` | With `onerow`: no upper bound on the shortfall, so no row is hard | **design** |
+| `snap<r>` | With `jinput`: cost 3·P_j·r·Σ(j_k − j_{k−1})² on the jerk's changes, j_{−1} from the issued commands | **design** (`snap160`) |
 
 Matching is by substring. The predictor is chosen in the order `const_lead` > `iaimm` > `lstm_vel` > `lstm` > `stdan_vel` > `stdan_3int` > synthetic, and any `_ol` in the string selects the open-loop variant.
 
@@ -257,8 +282,9 @@ The current design (§1), not in the paper:
 | D-opt, current (2026-11-03 night, with `lkhold`) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin_ctx<λ>_latgate_entrypass0_nocutout_lksigma_rmove1000_rjerk40_fullfoot_l1slack1e6_leadmerge_mergefirst_lkrsigma_lkhold` |
 | D-opt, NGSIM design (2026-11-11 night, NP w3 without `safebranch`) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt3lkr_trajcutin_ctx<λ>_latgate_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05` |
 | D-opt, NGSIM design (2026-11-12, unified limits; P1) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt3lkr_trajcutin_ctx<λ>_latgate_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10` |
+| D-opt, NGSIM final design (2026-11-12 night: `onerow` w 10 + `zconf0.95` + `nocap` + `snap160`) | `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx<λ>_latgate_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_occin0.1_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_nocap_snap160` |
 
-Every new CARLA run uses the row "D-opt, current (2026-11-03 night, with `lkhold`)" and every new NGSIM run the last row (the replay's default, §1). All 25 rows of this table, and the note on which row identifies which older root, are in `docs/agents/design_history.md`.
+Every new CARLA run uses the row "D-opt, current (2026-11-03 night, with `lkhold`)" and every new NGSIM run the last row (the replay's default, §1). All 25 rows of this table (updated 2026-11-12 night: 26 with the final design's row, the last one, which every new NGSIM run uses since that night; P1 is the second-to-last), and the note on which row identifies which older root, are in `docs/agents/design_history.md`.
 
 Compare it with the paper's controllers only on runs made with the same code (§8.11). The same-code roots `cutin_postfix_cmp_20261016` and `cutout_postfix_cmp_20261016` hold it next to Proposed, Multimodal SCC and the other D-opt variants.
 
@@ -462,7 +488,7 @@ Inside it:
 Full text: `docs/agents/open_items.md`; the NGSIM replay's default history: `docs/agents/ngsim_replay_defaults.md`. Decisions waiting for the maintainer: §1, "Pending decisions".
 
 - **Safety and recursive feasibility.**
-  - No formal property: the safety rows are soft and act on predicted hypotheses only, and the hypothesis set neither covers the real cut-in before the point of no return nor stays nested between ticks.
+  - No formal property: the safety rows are soft and act on predicted hypotheses only, and the hypothesis set neither covers the real cut-in before the point of no return nor stays nested between ticks. (updated 2026-11-12 night: in the final design, `onerow` + `nocap`, no row has a hard part at all; the safety layer is the only hard protection.)
   - Implemented around it: `safelayer`, `entrant2`, the fail-safe exit (`safebranch` was dropped on 2026-11-11).
   - Open:
     - `passmiqp` / `passnocap` and how p and σ enter the pass condition
@@ -482,7 +508,7 @@ Full text: `docs/agents/open_items.md`; the NGSIM replay's default history: `doc
   - The step-0 jerk cost uses `config.dt` instead of `command_dt` (16× too cheap)
   - unfiltered x₀
   - `slack_steps` misses slack use in chance policies
-  - σ-term cap undecided (`sigmacap<c>`) (updated 2026-11-12: moot for the NGSIM design, which uses none of β_ref's effects since NL; still applies to the CARLA string's `cutin_chance0.6`)
+  - σ-term cap undecided (`sigmacap<c>`) (updated 2026-11-12: moot for the NGSIM design, which uses none of β_ref's effects since NL; still applies to the CARLA string's `cutin_chance0.6`) (updated 2026-11-12 night: still moot for the final design, whose only σ term is `zconf0.95`'s)
   - the TV re-trigger ignores its gap to the ego
   - paper tex vs code (§3)
   - the caption of `overleaf/table_cutin_final.tex`

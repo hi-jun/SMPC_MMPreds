@@ -2,7 +2,7 @@
 
 Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). One subsection per row of the token table of AGENTS.md §4, then one per external baseline. The one-line summary of every token is AGENTS.md §4.
 
-(updated 2026-11-12: stale statements have since been marked in place with dated "updated", "withdrawn", "clarified" and "pointer updated" notes, and the record of `onerow` was added; the reformat checks read this file at commit 38a1b46. Clarified 2026-11-12: in these records "not in the paper" means not in the paper of 2026-09-10, `overleaf/` (its formulation and CARLA tables, AGENTS.md §1), whose tracked `.tex` files name none of the tokens added since; "the paper's NGSIM tables" are the NGSIM replay runs made for the paper from 2026-10-28 on (`open_items.md`, "Final NGSIM paper set and checkpoint"). A token can be in those tables and "not in the paper".)
+(updated 2026-11-12: stale statements have since been marked in place with dated "updated", "withdrawn", "clarified" and "pointer updated" notes, and the records of `onerow` and, that night, `zconf<β>`, `nocap` and `snap<r>` were added; the reformat checks read this file at commit 38a1b46. Clarified 2026-11-12: in these records "not in the paper" means not in the paper of 2026-09-10, `overleaf/` (its formulation and CARLA tables, AGENTS.md §1), whose tracked `.tex` files name none of the tokens added since; "the paper's NGSIM tables" are the NGSIM replay runs made for the paper from 2026-10-28 on (`open_items.md`, "Final NGSIM paper set and checkpoint"). A token can be in those tables and "not in the paper".)
 
 ## Tokens
 
@@ -94,6 +94,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
     the replay's default tail ends `_lkrsigma`;
     paper root with the ghost fix `fin_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_safebranch_mergefirst_lkrsigma_ghost_20261103`, tables `replay_out/lkrsigma_20261103/tables_paper_lkrsigma.md`)
     (updated 2026-11-12: the default tail has grown since and ends `_fsjerk10` since 2026-11-12, with `lkrsigma` still in it, `ngsim_replay_defaults.md`; "not in the paper" means the paper of 2026-09-10, see this file's header, while the paper's NGSIM tables have run with it since the night of 2026-11-03)
+    (updated 2026-11-12 night: not in the final NGSIM design, the replay's default since that night, which `onerow` builds without `lkr` and refuses `lkrsigma` with; P1, the design before it, and the CARLA string keep it)
 
 ### `lkhold`
 
@@ -432,7 +433,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
 - **Reason** (maintainer, 2026-10-28): a slow lead predicted to speed up causes hard brakes.
   - On slow-lead ticks STDAN's +3 s lane-keeping position is more than 2 m too far on 7 % of ticks, and the t_v_t checkpoint shows the same.
 - With `nocutout` p_lk = 1, so the term is q(0.6)·σ = 0.84σ.
-- **Status:** `stdan_3int` only, off by default in the code, part of the current design since 2026-10-28 (§1; added 2026-10-28, not in the paper)
+- **Status:** `stdan_3int` only, off by default in the code, part of the current design since 2026-10-28 (§1; added 2026-10-28, not in the paper) (updated 2026-11-12 night: not in the final NGSIM design, whose lead row takes its σ term from `zconf0.95`, z = 1.645 at p = 1, and with whose `onerow` the agent refuses `lksigma`; P1 and the CARLA string keep it)
 
 ### `fullfoot`
 
@@ -698,6 +699,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - Final set alone not run
   - with `floorhyp` and `pingate` (ε 0.05, 0.1 since NL that evening) part of the NGSIM design since 2026-11-10 (maintainer's decision, §1)
     (updated 2026-11-12: `pingate` left the NGSIM design on the night of 2026-11-11, NP; `floorrisk0.1` with `floorhyp` stays in it and in the replay's default string; `onerow`, which the maintainer decided on 2026-11-12 will be the final design, refuses `floorrisk<ε>`, `onerow` below)
+    (updated 2026-11-12 night: no longer in the NGSIM design or the replay's default string: the final design, `onerow` with `zconf0.95`, `nocap` and `snap160`, has no floor row; P1 keeps `floorrisk0.1`)
   - off by default, not in the paper (added 2026-11-02, 0fa1c50, implemented by a Fable subagent)
 
 ### `floorhyp`
@@ -714,6 +716,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
   - off by default
   - part of the NGSIM design since 2026-11-10 with `pingate` and `floorrisk0.05` (maintainer's decision, §1; `floorrisk0.1` since NL that evening)
     (updated 2026-11-12: `pingate` left the NGSIM design on the night of 2026-11-11, NP; `floorhyp` with `floorrisk0.1` stays in it and in the replay's default string; `onerow`, which the maintainer decided on 2026-11-12 will be the final design, refuses `floorhyp`, `onerow` below)
+    (updated 2026-11-12 night: no longer in the NGSIM design or the replay's default string: the final design, `onerow` with `zconf0.95`, `nocap` and `snap160`, has no floor row; P1 keeps `floorhyp`)
   - not in the paper (added 2026-11-09, 91a2d0e)
 
 ### `floortop`
@@ -758,7 +761,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
 - **Status:**
   - Whole-token match (`_parse_lane_keep_risk`)
   - off by default
-  - part of the NGSIM design since the evening of 2026-11-10 (NL, maintainer's decision, §1)
+  - part of the NGSIM design since the evening of 2026-11-10 (NL, maintainer's decision, §1) (updated 2026-11-12 night: until that night; not in the final NGSIM design, whose `onerow` refuses it and whose lead row gets 1.645σ from `zconf0.95`; P1 keeps it)
   - not in the paper (added 2026-11-10, fb9e916)
 
 ### `nopricesigma`
@@ -791,7 +794,7 @@ With `cutin_chance` only: the σ term takes min(p_j, c) instead of min(p_j, β_r
 - **Status:**
   - Whole-token match (`_parse_price_row_no_sigma`)
   - off by default
-  - part of the NGSIM design since the evening of 2026-11-10 (NL, maintainer's decision, §1)
+  - part of the NGSIM design since the evening of 2026-11-10 (NL, maintainer's decision, §1) (updated 2026-11-12 night: until that night; not in the final NGSIM design, whose `onerow` refuses it; P1 keeps it)
   - not in the paper (added 2026-11-10, fb9e916)
 
 ### `leadmerge`
@@ -1073,7 +1076,7 @@ Braking-distance safety bound (experimental)
   - without the token bit-identical (13 smoke + 3 lead-only episodes against `fin_npw3_iso_side_20261112` / `lo_`, every non-timing tick array, on the workstation and on the lab server)
   - the onerow smoke bit-identical between the two machines
   - 7 tests (`tests/test_onerow.py`); the full suite passes (494 tests).
-- **Result, w 3:** NGSIM final set (`NGSIM_POLICY_DOPT=_dopt3`, the default tail without `_lksigma`, `_lkrsigma`, `_floorrisk0.1`, `_floorhyp`, `_nopricesigma`, `_lkonesided0.05`, plus `_onerow`; roots `fin_npw3_iso_side_onerow_20261112` + `lo_`; `replay_out/onerow_20261112/result.md`), paired against the current design (P1, live side entries):
+- **Result, w 3:** NGSIM final set (`NGSIM_POLICY_DOPT=_dopt3`, the default tail without `_lksigma`, `_lkrsigma`, `_floorrisk0.1`, `_floorhyp`, `_nopricesigma`, `_lkonesided0.05`, plus `_onerow` (pointer updated 2026-11-12 night: P1's tail, the default when this was written); roots `fin_npw3_iso_side_onerow_20261112` + `lo_`; `replay_out/onerow_20261112/result.md`), paired against the current design (P1, live side entries):
   - the ego follows closer: behind non-TV leads 3.1 / 12.8 / 14.2 % of lead ticks inside d_safe against 0.6 / 0.1 / 0.3 % (critical / mild / no cut-in; median deficit 0.9 / 0.7 / 0.5 m), no-cut-in v_avg +0.18 m/s (SE 0.01)
   - critical / mild δ_max +6.4 / +6.3 %p (SE 0.7 / 0.8), floor breaches 21 → 26 / 14 → 19, T_rec +0.14 / +0.19 s
   - j_max −0.04 (SE 0.11) / −0.12 (0.04), runs at the falling jerk bound 50 → 38 / 56 → 51
@@ -1087,11 +1090,88 @@ Braking-distance safety bound (experimental)
   - δ_max −3.5 / −3.7 %p (SE 1.8 / 0.9), T_rec −1.09 / −0.57 s (0.09 / 0.07; not recovered 17 → 1 / 13 → 1), floor breaches 21 → 26 / 14 → 16
   - no cut-in about unchanged (phantom_ep −0.001, SE 0.008; v_avg +0.13 m/s, SE 0.01)
   - behind non-TV leads 1.9 / 6.0 / 6.0 % of lead ticks inside d_safe (median deficit 0.58 / 0.29 / 0.18 m).
+- **Result, w sweep** (added 2026-11-12 night): `NGSIM_POLICY_DOPT=_dopt10` / `_dopt30`, nothing else changed (roots `fin_npw3_iso_side_onerow_w10_20261112` / `_w30_` + `lo_`; `result.md` addendum 2, `tables_onerow_wsweep.md`, `headline_onerow_wsweep.md`):
+  - with w 3 → 10 → 30 → 100: critical δ_max 38.6 → 34.3 → 30.9 → 28.6 % (P1 32.1), T_rec 1.86 → 1.38 → 1.00 → 0.69 s (1.69), j_max 1.27 → 1.50 → 1.74 → 1.98 (1.31), runs at the falling jerk bound 38 → 41 → 59 → 86 (50), floor breaches 26 / 25 / 25 / 26 (21)
+  - mild δ_max 24.3 → 20.5 → 17.3 → 14.3 % (18.0); no-cut-in phantom_ep 0.088–0.093 (0.095), v_avg +0.13 to +0.18 m/s (paired, w 100 to w 3)
+  - behind non-TV leads in no-cut-in runs 14.2 / 10.2 / 8.0 / 6.0 % of lead ticks inside d_safe (0.3)
+  - against P1, w 10: j_max within SE, δ_max +2.1 / +2.5 %p (SE 1.0 / 0.7), critical T_rec −0.44 s (0.06); w 30: δ_max within SE (−1.3 / −0.7 %p), T_rec −0.81 / −0.37 s (0.08 / 0.07), critical j_max +0.43 (0.12), a_min −0.28 (0.04)
+  - the same five TV entries breach the 3 m floor for every w (ds1_v2629, ds1_v2785, ds3_v1481, ds4_v3230, ds5_v2583), where P1 kept 3.1–4.9 m.
+  - The maintainer then chose w 10, kept `nocutout`, and put the σ term back (`zconf<β>`, below).
 - **Status:**
   - The maintainer decided on 2026-11-12, after the w 3 roots, that `onerow` will be the final design (the old row structure is not clean); `result.md`'s conclusion "Not adopted; decision pending" was written before that decision, which its addendum records.
-  - Its weight w is being tuned: w 10 and w 30 (w sweep in progress, 2026-11-12; `replay_out/onerow_20261112/run_server_onerow_wsweep_20261112.sh`).
-  - Not the replay's default yet (that is still P1).
+  - Its weight w is being tuned: w 10 and w 30 (w sweep in progress, 2026-11-12; `replay_out/onerow_20261112/run_server_onerow_wsweep_20261112.sh`) (updated 2026-11-12 night: done, w 10 chosen; "Result, w sweep" above).
+  - Not the replay's default yet (that is still P1) (updated 2026-11-12 night: the replay's default since the night of 2026-11-12, in the final design below).
+  - In the final NGSIM design since the night of 2026-11-12 (maintainer: "C + snap160 is the final NGSIM design"), as `dopt10` with `zconf0.95`, `nocap` and `snap160` (records below; string AGENTS.md §1; `ngsim_replay_defaults.md`, 2026-11-12).
   - Not run in CARLA; off by default; not in the paper (added 2026-11-12, 3d9bcf8).
+
+### `zconf<β>`
+
+(Record added 2026-11-12 night from `replay_out/onerow_20261112/agents_row.md` and `result.md`, addendum 3; run as `zconf0.95`, β the cap of the confidence level.)
+
+- **What:** With `onerow` only (ValueError otherwise): each active cell's row gets back a σ term (maintainer, 2026-11-12: w 10, keep `nocutout`, the σ term back in the one row).
+  - z = Φ⁻¹(min(p, β)), with p the probability of the cell's own lead mode (`MultimodalLeadPrediction.lead_mode_probability`, BCTS-calibrated in the design) and σ the cell's `safety_std`.
+  - The row becomes gap ≥ L + d0 + τv − short − ξ + zσ; with the cap 0 ≤ short ≤ τv the floor is L + d0 + zσ.
+  - Lane-keeping leads (p = 1 under `nocutout`) get z = 1.645 at β 0.95. A cut-in hypothesis with p < 0.5 gets a negative z, not clamped (p 0.3 → −0.524).
+  - The reference keeps the plain d_safe (`zref`, the same term in the reference, was dropped before any run).
+  - A prediction without cell probabilities and without a cut-in chance cell (the replay's no-target placeholder) uses p = 1; one with a cut-in chance cell and no probabilities raises. A first workstation sanity run raised on 8 ticks of that placeholder before this rule.
+- **Code:**
+  - `NairACCConfig.one_row_z_conf`, `acc_nair_smpc.one_row_sigma_term` (used by `_cell_tightening`), the agent's `_parse_one_row_z_conf` (whole-token match; β in (0, 1)).
+  - The NGSIM replay reads it since a one-line edit of `build_controller` (`cfg.one_row_z_conf = A._parse_one_row_z_conf(policy)`, `replay_out/onerow_20261112/replay_edit_zconf.patch`; `ngsim_replay_defaults.md`, 2026-11-12).
+- **Checks:**
+  - 7 tests (`tests/test_zconf.py`: z for p 1 and 0.3, the lane-keeping row and its floor, the cut-in row with negative z, the reference unchanged, the placeholder, the ValueErrors); the full suite passes (501 tests).
+  - Without the token bit-identical to P1 (13 smoke + 3 lead-only episodes, strict) and tick-level identical to onerow w10 (results.csv logged: a 1-ulp splice round trip, and one root value of ds6_v2044 that is not the maximum of its own tick array), on the workstation and on the lab server.
+  - Arm A's smoke (5 + 3 episodes) bit-identical between the two machines.
+- **Result** (arm A = onerow w10 + `zconf0.95`; roots `fin_npw3_iso_side_onerow_w10_z95_20261112` + `lo_`; `result.md` addendum 3, `tables_onerow_z95.md`, `headline_onerow_z95.md`), against onerow w10:
+  - behind non-TV leads the ticks inside d_safe fall from 2.7 / 10.1 / 10.2 % to 1.1 / 1.4 / 0.8 % (critical / mild / no cut-in)
+  - mild δ_max −4.2 %p (SE 0.4); critical / mild T_rec −0.26 / −0.27 s; critical j_max +0.13 (0.04)
+  - the pre-entry braking load stays onerow w10's (falling-bound ticks before t_cross with the TV hypothesis active 172 / 176 against 173 / 170).
+  - Against P1: critical j_max +0.31 (0.11), a_min −0.17 (0.03), δ_max +0.5 %p (within SE), T_rec −0.66 s (0.06); mild δ_max −1.7 %p (0.6), T_rec −0.36 s (0.05); floor breaches 21 → 25 / 14 → 16; no cut-in phantom_ep +0.001 (0.004), v_avg +0.08 m/s.
+  - Of the five TV entries that every earlier onerow arm breached, A no longer breaches ds1_v2785 and ds5_v2583; the other three are at 2.76–2.87 m.
+- **Status:** in the final NGSIM design since the night of 2026-11-12 (maintainer), as `zconf0.95`; not run in CARLA; off by default; not in the paper (added 2026-11-12, 7ef3da2).
+
+### `nocap`
+
+(Record added 2026-11-12 night from `replay_out/onerow_20261112/agents_row.md` and `result.md`, addendum 4.)
+
+- **What:** With `onerow` only (ValueError otherwise): no upper bound on an active cell's shortfall (maintainer, 2026-11-12: remove the cap short ≤ τv).
+  - The row is gap ≥ L + d0 + τv + zσ − short − ξ with short ≥ 0, priced w·P_j·short²; inactive cells keep short 0. No row is hard any more.
+  - The ℓ1 slack (`l1slack1e6`) stays in the string, but no slack cell (ξ > 1e-4 m) was logged on any solved tick of the `nocap` roots (C, `snap40`, `snap160` and their lead-only roots); the only ones are on ds4_v3035's fallback ticks under `snap<r>`, where no QP solution exists (checked 2026-11-12 from the tick logs).
+- **Code:**
+  - `NairACCConfig.one_row_no_cap`: in the cached QP the cap row becomes (1 − mask)·short ≤ 0.
+  - The agent's `_parse_one_row_no_cap` (whole-token match; `passnocap` does not match).
+  - The NGSIM replay reads it since a one-line edit of `build_controller` (`replay_out/onerow_20261112/replay_edit_nocap.patch`).
+- **Checks:**
+  - 4 tests (`tests/test_nocap.py`: the cap gone with the token and kept without it, inactive cells, the ValueError); the full suite passes (505 tests).
+  - Without the token bit-identical to P1 (13 + 3 episodes, strict) and tick-level identical to arm A (results.csv: 1-ulp differences from the splice round trip), on the workstation and on the lab server; arm C's smoke bit-identical between the machines.
+- **Result** (arm C = A + `nocap`; roots `fin_npw3_iso_side_onerow_w10_z95_nocap_20261112` + `lo_`; `result.md` addendum 4, `tables_onerow_nocap.md`, `headline_onerow_nocap.md`, `belowfloor_nocap.md`):
+  - against A: falling-bound runs 43 → 23 / 47 → 19 / 35 → 8 (critical / mild / no cut-in); a_min +0.15 / +0.15 / +0.07; no-cut-in phantom_ep 0.096 → 0.042 (SE 0.014); T_rec +0.08 / +0.06 s; mild floor breaches 16 → 22
+  - the falling-bound ticks before t_cross with the TV hypothesis active fell from 172 / 176 to 43 / 27 (critical / mild): most of A's braking at the jerk bound came from the hard floor L + d0 + zσ that the cap created
+  - against P1: T_rec −0.57 / −0.29 s, mild j_max −0.22 (0.09), phantom_ep −0.052 (0.014), δ_max within SE, floor breaches 21 → 25 / 14 → 22
+  - the measured step-0 bumper gap fell below 3.27 m (the lowest lane-keeping floor, d0 + 1.645·0.164 m) on 283 / 200 / 173 scored ticks, against 228 / 77 / 50 under A (a lower bound).
+  - Behind a TV at its entry the ego now accepts the shortfall instead of braking; the safety layer is the only hard protection.
+- **Status:** in the final NGSIM design since the night of 2026-11-12 (maintainer); not run in CARLA; off by default; not in the paper (added 2026-11-12, 506bfcb).
+
+### `snap<r>`
+
+(Record added 2026-11-12 night from `replay_out/onerow_20261112/agents_row.md` and `result.md`, addendum 5.)
+
+- **What:** With `jinput` only (ValueError otherwise): a cost on the jerk's changes, 3·P_j·r·Σ_{k=0}^{N−1} (j_k − j_{k−1})² per scenario (the cached QP's ×3 convention; in (m/s³)², not divided by dt).
+  - j_{−1} is the jerk the plant got on the last tick, (a_cmd[t−1] − a_cmd[t−2]) / command_dt, from the issued commands given to `solve`; 0 until there are two.
+  - At r = 40 = r_jerk a jerk step costs as much as holding that jerk for one step. Run as `snap40` and `snap160`.
+  - Why (coordinator, 2026-11-12): in arm C the issued jerk stepped at probability jumps (24 pre-entry falling-bound bursts where the TV's p jumps about 50 → 76 % 0.8 s before t_cross, 16 behind the TV at or after its entry); the run maximum of the one-tick snap was 5.6 / 18.6 m/s⁴ (critical median / p90), against 2.1 / 3.6 for ISA-MPC.
+- **Code:**
+  - `NairACCConfig.snap_weight`, a QP parameter for j_{−1} (`NairACCSMPC._set_command_context` computes it from the last issued commands), the agent's `_parse_snap` (whole-token match).
+  - The NGSIM replay reads it since a one-line edit of `build_controller` (`replay_out/onerow_20261112/replay_edit_snap.patch`).
+- **Checks:**
+  - 4 tests (`tests/test_snap.py`: the objective at the solved plan equals the base terms plus 3·r·Σ(j_k − j_{k−1})², j_{−1} from the issued commands and 0 on the first tick, the first jerk pulled toward j_{−1} as r grows, the parser and the ValueErrors); the full suite passes (509 tests).
+  - Without the token bit-identical to P1 (strict) and tick-level identical to arm C, on 13 + 3 episodes, on the workstation and on the lab server; both smokes bit-identical between the machines.
+- **Result** (roots `fin_npw3_iso_side_onerow_w10_z95_nocap_snap40_20261112` / `_snap160_` + `lo_`; `result.md` addendum 5, `tables_onerow_snap.md`, `headline_onerow_snap.md`, `snap_diag.md`), `snap40` / `snap160`:
+  - against C: critical j_max −0.23 / −0.35 (SE 0.07), a_min +0.03 / +0.07; mild j_max −0.11 (0.04) / −0.13 (0.09, within 2 SE); no cut-in j_max −0.05 / −0.09; `snap160` critical T_rec +0.05 s (0.02), no-cut-in v_avg −0.05; δ_max, T_rec and phantom braking otherwise at C's levels
+  - run maximum of the one-tick snap, critical median / p90: 5.6 / 18.6 (C) → 3.6 / 11.3 / 2.3 / 7.1 m/s⁴ (ISA-MPC 2.1 / 3.6); the critical j_max gap to ISA-MPC +0.53 → +0.31 / +0.18
+  - critical falling-bound bursts (pre-entry / at TV-becomes-lead / behind the TV later / other): 11 / 6 / 4 / 8 (C), 6 / 6 / 5 / 6, 4 / 4 / 2 / 3
+  - floor breaches (critical / mild): 25 / 22 (C) → 23 / 21 / 22 / 20 (P1 21 / 14)
+  - contacts against C: `snap40` 3 new and 2 removed, `snap160` 4 new and 3 removed, all side entries; the TV side entry ds4_v3230 (mild, at t_cross at 1.0 m/s): min gap 0.20 m (C), −0.03 m, −0.33 m (P1 3.34 m).
+- **Status:** `snap160` in the final NGSIM design since the night of 2026-11-12 (maintainer); not run in CARLA; off by default; not in the paper (added 2026-11-12, f1bfbc4).
 
 ## External baselines
 

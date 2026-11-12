@@ -1,6 +1,6 @@
 # NGSIM replay defaults: history and how to reproduce older roots
 
-Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). It was an item of AGENTS.md §10. The current defaults are in AGENTS.md §1 (Current design). (updated 2026-11-12: stale statements have since been marked in place with dated "updated" and "pointer updated" notes, and the replay edit for `onerow` was added; the reformat checks read this file at commit 38a1b46.)
+Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchanged. Reformatted for readability the same day: the words are unchanged and long paragraphs became bullets (checks: `docs/agents/_reformat/check_*.py`). It was an item of AGENTS.md §10. The current defaults are in AGENTS.md §1 (Current design). (updated 2026-11-12: stale statements have since been marked in place with dated "updated" and "pointer updated" notes, and the replay edit for `onerow` was added; the reformat checks read this file at commit 38a1b46.) (updated 2026-11-12 night: the replay edits for `zconf<β>`, `nocap` and `snap<r>` and the final design's default were added, 2026-11-12 below.)
 
 ## Defaults, by date
 
@@ -86,7 +86,7 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
 ### 2026-11-12
 
 - **Since 2026-11-12 (maintainer) the defaults are the unified limits and live side entries.**
-  - The default tail ends `_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10`, so D-opt's default string is P1's (`fin_npw3_nob_iso_sm3_vlog_20261111`).
+  - The default tail ends `_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10`, so D-opt's default string is P1's (`fin_npw3_nob_iso_sm3_vlog_20261111`) (updated 2026-11-12 night: until that night, when the final design became D-opt's default, below; the limits and the rest of this bullet stay).
   - `NGSIM_ISAMPC_POLICY` defaults to `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5` (q_slack unset, Zhou's 0.055; `ISAMPC_IAIMM_CFG` stays an env setting)
     - and `NGSIM_PCACC_POLICY` to `acc_pcacc_amin3.5_amax2_jlim2.5_jlimup5` (the port; PC-ACC as published stays the env string `acc_pcacc_paperdsafe_amin3.5_amax2_jlim2.5_jlimup5_emamin8_emjlim10_emics`).
   - `NGSIM_SIDE_ENTRY` (new) defaults to `live`: a vehicle that changes lanes into the ego lane beside the ego stays live (Route B, `open_items.md`; pointer updated 2026-11-12: it read "Route B below")
@@ -106,6 +106,26 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - md5 of `ngsim_replay.py` 8a5e75a8 → 03718256 (`md5_replay_pre_onerow.txt`, `md5_replay_post_onerow.txt`); the defaults are unchanged.
   - Bit-identical for every string without `onerow`: the parser then returns False, `NairACCConfig.one_row`'s default.
   - Checked on the default string: 13 smoke episodes against `fin_npw3_iso_side_20261112` and 3 lead-only episodes against `lo_fin_npw3_iso_side_20261112`, every non-timing tick array equal (`replay_out/onerow_20261112/ws_gate_20261112.out`).
+- **Replay edits for `zconf<β>`, `nocap` and `snap<r>` (2026-11-12; lines added 2026-11-12 night).** One line each in `build_controller`, so that the replay reads the tokens as the agent does (`replay_out/onerow_20261112/replay_edit_zconf.patch`, `replay_edit_nocap.patch`, `replay_edit_snap.patch`; backups `replay_out/onerow_20261112/replay_backup_pre_zconf/`, `replay_backup_pre_nocap/`, `replay_backup_pre_snap/`):
+  - `cfg.one_row_z_conf = A._parse_one_row_z_conf(policy)`: md5 of `ngsim_replay.py` 03718256 → 70d986aa;
+  - `cfg.one_row_no_cap = A._parse_one_row_no_cap(policy)`: 70d986aa → b803b6b7;
+  - `cfg.snap_weight = A._parse_snap(policy)`: b803b6b7 → 2030de45.
+  - The defaults were unchanged by them. Each was gated on the workstation and the lab server: the default string bit-identical to `fin_npw3_iso_side_20261112` / `lo_` on 13 + 3 episodes (strict), and the arm before without the new token tick-level identical to its roots (`ws_gate_zconf_20261112.out`, `ws_gate_nocap_20261112.out`, `ws_gate_snap_20261112.out` and the server logs `server_run_zconf.log`, `server_run_nocap.log`, `server_run_snap.log`, all in `replay_out/onerow_20261112/`).
+- **Since the night of 2026-11-12 (maintainer: "C + snap160 is the final NGSIM design") D-opt's default is the final design**, `onerow` with w 10 + `zconf0.95` + `nocap` + `snap160` (`replay_out/onerow_20261112/replay_edit_adopt_snap160.patch`; backup `results/ngsim_lambda_cal_20261019/replay_backup_20261112_pre_snap160/`; md5 of `ngsim_replay.py` 2030de45 → e78134fc, `md5_replay_pre_adopt.txt`, `md5_replay_post_adopt.txt`).
+  - `NGSIM_POLICY_DOPT` defaults to `_dopt10` (was `_dopt3lkr`).
+  - The default tail is `_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_occin0.1_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_nocap_snap160` (was P1's, `_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10`).
+  - With no variable set, D-opt's string (λ 0, `--latgate`) is that of `fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112`: `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_occin0.1_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_nocap_snap160`.
+  - Unchanged: `NGSIM_POLICY_CHANCE`, the condition (`NGSIM_V_SET`, `NGSIM_SPAWN_MARGIN`, `NGSIM_START_CMD`, `NGSIM_EGO_LAG_TAU`, `NGSIM_V_MAX`, `NGSIM_LANE_TEST`, `NGSIM_SIDE_ENTRY`) and the baselines' strings (`NGSIM_ISAMPC_POLICY`, `NGSIM_PCACC_POLICY`); the edit touches `POLICY_DOPT` and `POLICY_TAIL` only, which only D-opt's string reads. The code (f1bfbc4) and the CARLA agent are unchanged.
+  - Gates (`replay_out/onerow_20261112/adopt_snap160.log`; `adopt_snap160.sh`, outputs `adopt_snap160_ws.out`, `adopt_snap160_server.out`), on the workstation and, after the setup push, on the lab server:
+    - with no variable set, the 13 smoke episodes (`ghostfix_20261103/episodes_smoke12_ds5v2609.csv`, λ 0, `--latgate`) against `fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112` and the 3 lead-only check episodes against its `lo_` root: the same policy strings, max |Δa_cmd| 0, every non-timing tick array equal; results.csv differs only in `wall_s` and, in the lead-only root, in two cells at the last ulp (the splice's pandas round trip);
+    - P1 explicit (`NGSIM_POLICY_DOPT=_dopt3lkr`, `NGSIM_POLICY_TAIL` = P1's tail above) on the same 13 + 3 against `fin_npw3_iso_side_20261112` / `lo_fin_npw3_iso_side_20261112`: bit for bit, results.csv only `wall_s`;
+    - the server's runs equal the workstation's (every non-timing tick array, results.csv only `wall_s`); 0 errors, exceptions and fallbacks in every gate run.
+  - To reproduce a root made before this change, set its strings explicitly:
+    - P1 (`fin_npw3_iso_side_20261112`, `lo_`): `NGSIM_POLICY_DOPT=_dopt3lkr` and P1's tail as `NGSIM_POLICY_TAIL` (checked above); the ℓ1-slack-100 roots (`fin_npw3_iso_side_l1w100_20261112`, `lo_`) the same with `_l1slack100` in place of `_l1slack1e6`;
+    - the oracle-lead reference `ref_lo_oraclelead_iso_side_20261112` (the reference of `phantom_ref`): `--lead-only --oracle-lead` with `NGSIM_POLICY_DOPT=_dopt3lkr` and P1's tail without `_bcts` (the oracles have no probabilities to calibrate, so the replay refuses `bcts` with them and an oracle-lead run always needs an explicit tail; the final design's own reference would be `NGSIM_POLICY_DOPT=_dopt10` with its tail without `_bcts`, not run);
+    - the other `onerow` roots of 2026-11-12: `NGSIM_POLICY_DOPT` and `NGSIM_POLICY_TAIL` from their run_info.json `policy_example`, e.g. arm C (`fin_npw3_iso_side_onerow_w10_z95_nocap_20261112`) = `_dopt10` with the new tail without `_snap160`, arm A without `_nocap_snap160`, onerow w 3 / 10 / 30 / 100 = `_dopt3` / `_dopt10` / `_dopt30` / `_dopt100` with the new tail ending `_fsjerk10_onerow`;
+    - the baselines' 2026-11-12 roots keep their settings (their defaults did not change);
+    - roots made before 2026-11-12 additionally need `NGSIM_SIDE_ENTRY=ghost` (above).
 
 ### Condition of older roots
 
