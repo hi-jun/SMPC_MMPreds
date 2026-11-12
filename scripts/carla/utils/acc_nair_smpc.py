@@ -300,6 +300,14 @@ class NairACCConfig:
     #: cut-in cell's ``L + d0 + z sigma``, a priced lane-keeping cell's ``L + d0`` plus its own sigma term
     #: (``cell_sigma_term``), whose time-gap cap is lifted for it.  Off by default.
     price_row_no_sigma: bool = False
+    #: ``onerow`` (2026-11-12, maintainer): one row on every active lead cell, cut-in hypotheses and lane-keeping
+    #: leads alike, ``gap >= L + d0 + tau v - short - xi`` with ``0 <= short <= tau v`` and the price
+    #: ``w P_j short^2`` (``dopt<w>``'s weight), so ``L + d0`` is the hard floor through the cap: the factor on
+    #: ``L + d0`` is 1 on every cell (``_one_row_prediction``), no row has a sigma term, and there is no floor row
+    #: and no separate hard lane-keeping row.  The reference asks every cell for the plain ``d_safe`` at the planned
+    #: speed, ``L + d0 + tau v_bar_k``, without the remembered standoff.  Needs ``dopt<w>`` (not ``lk`` / ``lkr``)
+    #: under ``confidence_chance``; not with the floor, sigma and lane-keeping pricing options below and above.
+    one_row: bool = False
     #: ``safebranch``: the safety layer's fail-safe as one more branch of the
     #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
     #: contingency plan).  The branch shares the first input with every
@@ -536,6 +544,21 @@ class NairACCConfig:
             raise ValueError("lane_keep_risk (lkonesided<eps>) must lie in (0, 1)")
         if self.price_row_no_sigma and self.floor_risk is None:
             raise ValueError("price_row_no_sigma (nopricesigma) needs floor_risk (floorrisk<eps>), whose rows hold the floors")
+        if self.one_row:
+            if self.standoff_shortfall_weight is None or self.safety_constraint_mode != SAFETY_CONFIDENCE_CHANCE:
+                raise ValueError("one_row (onerow) needs the chance cells (chancecells) and dopt<w>")
+            if (self.standoff_shortfall_on_lk or self.standoff_shortfall_lk_cutin_only
+                    or self.standoff_shortfall_lk_release_sigma):
+                raise ValueError("one_row (onerow) prices every active cell itself: plain dopt<w>, "
+                                 "not dopt<w>lk, dopt<w>lkr or lkrsigma")
+            if (self.floor_risk is not None or self.floor_risk_hypothesis or self.floor_risk_top
+                    or self.price_row_no_sigma or self.lane_keep_risk is not None):
+                raise ValueError("one_row (onerow) has no floor row and no sigma term: not with floorrisk<eps>, "
+                                 "floorhyp, floortop, nopricesigma or lkonesided<eps>")
+            if (self.cutin_cvar_risk is not None or self.pass_miqp_margin is not None
+                    or self.relative_brake_decel is not None or self.failsafe_branch):
+                raise ValueError("one_row (onerow) is not implemented with cvar<eps>_<c>, passmiqp<m>, "
+                                 "relbrake<b> or safebranch")
         if self.failsafe_branch:
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
@@ -1389,7 +1412,9 @@ class OldACCReferenceAdapter:
             planned_s[step + 1] = planned_s[step] + planned_v[step] * dt
 
         remembered_standoff = dopt_cells = None
-        if self.config.standoff_shortfall_weight is not None:
+        # onerow: every cell asks for the plain d_safe at the planned speed (no remembered standoff, no sigma term;
+        # the solve's prediction has the factor 1, NairACCSMPC._one_row_prediction)
+        if self.config.standoff_shortfall_weight is not None and not self.config.one_row:
             remembered_standoff = self._remembered_standoff(lead_prediction)
             dopt_cells = standoff_shortfall_mask(lead_prediction, self.config.standoff_shortfall_on_lk)
 
@@ -1419,7 +1444,7 @@ class OldACCReferenceAdapter:
                 # Same reasoning for the sigma term: the constraint below adds
                 # it, so the reference has to ask for it too (with nopricesigma a
                 # priced row has none).
-                if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE and not (
+                if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE and not self.config.one_row and not (
                         self.config.price_row_no_sigma and dopt_cells is not None and dopt_cells[mode, step]):
                     safe_gap += cell_sigma_term(lead_prediction, mode, step, self.config)
                 target_s = lead_s - safe_gap
@@ -1590,6 +1615,8 @@ class NairACCSMPC:
         prediction = self._trim_prediction(lead_prediction)
         if self.config.standoff_shortfall_lk_cutin_only:
             prediction = self._restrict_lk_pricing(ego_state, prediction)
+        if self.config.one_row:
+            prediction = self._one_row_prediction(prediction)
         timing_breakdown["trim_prediction_s"] = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
@@ -1893,6 +1920,22 @@ class NairACCSMPC:
             reference.lead_mode_lk = np.where(passed, prediction.next_lead_mode_lk, prediction.lead_mode_lk)
         return reference
 
+    @staticmethod
+    def _one_row_prediction(prediction):
+        """``onerow``: the prediction with the factor on ``L + d0`` at 1 on every cell (``fullfoot``'s on the cut-in
+        cells; with ``nocutout`` the lane-keeping cells' is 1 already), so that the rows, the reference and the
+        margins read ``L + d0 + tau v`` in full.  The prediction object is not modified."""
+        one_row = copy.copy(prediction)
+        one_row.clearance_scale = np.ones(np.asarray(prediction.clearance_scale).shape)
+        return one_row
+
+    def _priced_cells(self, prediction):
+        """The cells whose standoff the optimizer picks (``dopt<w>``): ``standoff_shortfall_mask``, or with
+        ``onerow`` every active cell, lane-keeping leads included."""
+        if self.config.one_row:
+            return np.asarray(prediction.active_mask, dtype=bool).copy()
+        return standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
+
     def _restrict_lk_pricing(self, ego_state, prediction):
         """``dopt<w>lkr``: keep ``lead_mode_lk`` only on vehicles that came in as a
         cut-in and have not yet re-opened the full standoff.
@@ -2105,8 +2148,7 @@ class NairACCSMPC:
         target_safe_probability = 0.0
         risk_diagnostics = risks
         shortfall = self._standoff_shortfall
-        dopt_cells = (standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
-                      if shortfall is not None else None)
+        dopt_cells = self._priced_cells(prediction) if shortfall is not None else None
         # the cut-in chance cells and, with floorrisk<eps>, the cells with a floor row (with nopricesigma also
         # lkr's priced lane-keeping cells) and the sigma term of the floor each keeps
         cutin_cells = np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)
@@ -2210,9 +2252,9 @@ class NairACCSMPC:
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE and np.any(cutin_cells):
             # the plan's margin to the floor these cells have without floorrisk<eps>,
             # L + d0 + q(beta_j) sigma_jk (tightening_values is that sigma term on them, but with floortop the
-            # floor's z sigma and with nopricesigma 0)
+            # floor's z sigma and with nopricesigma or onerow 0)
             old_sigma = tightening_values
-            if self.config.floor_risk_top or self.config.price_row_no_sigma:
+            if self.config.floor_risk_top or self.config.price_row_no_sigma or self.config.one_row:
                 old_sigma = tightening_values.copy()
                 for mode, step in zip(*np.nonzero(cutin_cells)):
                     old_sigma[mode, step] = confidence_tightening(
@@ -2236,9 +2278,7 @@ class NairACCSMPC:
                                           lead_speed=prediction.means[:, :, 1])
             if shortfall is not None:  # None after a fallback, which plans no shortfall
                 standoff = standoff - shortfall
-            planned_standoff = np.where(
-                standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk),
-                standoff, np.nan)
+            planned_standoff = np.where(self._priced_cells(prediction), standoff, np.nan)
         speed_gap_tangent_error_max = 0.0
         if self.config.relative_brake_decel is not None and np.any(prediction.active_mask):
             # relbrake<b>: how far below the rule's v^2 the QP's tangent sat at the solved plan
@@ -2552,6 +2592,8 @@ class NairACCSMPC:
                 prediction.covariances[mode, step], risks[mode, step], self.config
             )
         if self.config.safety_constraint_mode == SAFETY_CONFIDENCE_CHANCE:
+            if self.config.one_row:
+                return 0.0      # onerow: no row has a sigma term
             if self.config.price_row_no_sigma and standoff_shortfall_mask(
                     prediction, self.config.standoff_shortfall_on_lk)[mode, step]:
                 return 0.0      # nopricesigma: a priced row asks for D on the mean gap; its floor row keeps sigma
@@ -3000,7 +3042,7 @@ class NairACCSMPC:
             opti.set_value(problem.lead_dev_v_params[sample_idx], lead_dev_v[sample_idx])
         shortfall_mask = None
         if problem.short_var is not None:
-            shortfall_mask = standoff_shortfall_mask(prediction, self.config.standoff_shortfall_on_lk)
+            shortfall_mask = self._priced_cells(prediction)     # onerow: every active cell
             opti.set_value(problem.shortfall_mask_param, shortfall_mask.astype(float))
         if problem.shortfall_price_param is not None:
             # pricep2: a prediction that does not give the cell probability prices as plain dopt<w>

@@ -330,6 +330,27 @@ class ACCNairSMPCAgent(object):
             raise ValueError("cvar<eps>_<c> needs fullfoot (with cutin_chance<beta_ref> and dopt<w>)")
         self.controller_config.cutin_cvar_risk, self.controller_config.cutin_cvar_bound = (
             (None, None) if cutin_cvar is None else cutin_cvar)
+        # onerow (2026-11-12): one priced row on every active lead cell, no floor row, no sigma term
+        self.controller_config.one_row = self._parse_one_row(smpc_config)
+        if self.controller_config.one_row:
+            if (not self.cutin_chance_ref or self.standoff_shortfall_weight is None or self.standoff_shortfall_on_lk
+                    or not self.full_footprint):
+                raise ValueError("onerow needs plain dopt<w> (not dopt<w>lk or dopt<w>lkr), chancecells and fullfoot")
+            conflicts = [token for token, present in (
+                ("floorrisk<eps>", self.controller_config.floor_risk is not None),
+                ("floorhyp", self.controller_config.floor_risk_hypothesis),
+                ("floortop", self.controller_config.floor_risk_top),
+                ("nopricesigma", self.controller_config.price_row_no_sigma),
+                ("lksigma", self.lk_sigma),
+                ("lkonesided<eps>", self.controller_config.lane_keep_risk is not None),
+                ("lkrsigma", self.controller_config.standoff_shortfall_lk_release_sigma),
+                ("cvar<eps>_<c>", cutin_cvar is not None),
+                ("passmiqp<m>", self.pass_miqp_margin is not None),
+                ("relbrake<b>", self.controller_config.relative_brake_decel is not None),
+                ("safebranch", self.controller_config.failsafe_branch)) if present]
+            if conflicts:
+                raise ValueError("onerow has one row per cell without a sigma term or a floor row; not with "
+                                 + ", ".join(conflicts))
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
@@ -1911,6 +1932,16 @@ class ACCNairSMPCAgent(object):
         floor row keeps the sigma term (``NairACCConfig.price_row_no_sigma``), 2026-11-10. Whole-token match.
         """
         return re.search(r"(?:^|_)nopricesigma(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_one_row(smpc_config):
+        """Read ``onerow`` from the config string (default: off).
+
+        With plain ``dopt<w>``: one row on every active lead cell, ``gap >= L + d0 + tau v - short - xi`` with
+        ``0 <= short <= tau v`` priced at ``w P_j short^2``, no sigma term, no floor row, no hard lane-keeping row,
+        and the reference's plain ``d_safe`` (``NairACCConfig.one_row``), 2026-11-12. Whole-token match.
+        """
+        return re.search(r"(?:^|_)onerow(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_safety_layer(smpc_config):
