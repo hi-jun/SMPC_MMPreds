@@ -281,6 +281,10 @@ class ACCNairSMPCAgent(object):
             self.controller_config.r_a = r_a
         self.controller_config.accel_lag_tau = self._parse_accel_lag_tau(smpc_config)
         self.controller_config.jerk_input = self._parse_jerk_input(smpc_config)
+        # snap<r> (2026-11-12): a cost on the jerk's changes; needs jinput
+        self.controller_config.snap_weight = self._parse_snap(smpc_config)
+        if self.controller_config.snap_weight is not None and not self.controller_config.jerk_input:
+            raise ValueError("snap<r> needs jinput")
         self.controller_config.relative_brake_decel = self._parse_relative_brake_decel(smpc_config)
         self.controller_config.slack_l1_weight = self._parse_slack_l1_weight(smpc_config)
         self.controller_config.terminal_cost_scale = self._parse_terminal_cost_scale(smpc_config)
@@ -1854,6 +1858,16 @@ class ACCNairSMPCAgent(object):
         role with it.  Not with ``alag<tau>``.
         """
         return re.search(r"(?:^|_)jinput(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_snap(smpc_config):
+        """Read ``snap<r>`` from the config string (None = off).
+
+        With ``jinput``: the cost ``3 P_j r sum_k (j_k - j_{k-1})^2`` on the jerk's changes, ``j_{-1}`` the jerk the plant
+        got on the last tick (``NairACCConfig.snap_weight``), 2026-11-12. Whole-token match; ``snap40`` reads as 40.
+        """
+        match = re.search(r"(?:^|_)snap([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_relative_brake_decel(smpc_config):

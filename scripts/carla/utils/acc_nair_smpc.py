@@ -231,6 +231,12 @@ class NairACCConfig:
     #: ``u_nominal`` keeps the planned accelerations; ``NairACCSolution.j_nominal``
     #: holds the jerk plan.  Cached feedback QP only; not with ``accel_lag_tau``.
     jerk_input: bool = False
+    #: ``snap<r>`` (2026-11-12, maintainer): with ``jerk_input``, a cost on the jerk's changes, per scenario
+    #: ``3 P_j r sum_{k=0}^{N-1} (j_k - j_{k-1})^2`` (the cached QP's x3 convention; in (m/s^3)^2, not divided by dt), with
+    #: ``j_{-1}`` the jerk the plant got on the last tick, ``(a_cmd[t-1] - a_cmd[t-2]) / command_dt`` from the issued
+    #: commands the controller is given (0 before it has two).  r = r_jerk makes a jerk step as costly as holding that
+    #: jerk for one step.  ``None`` is off.
+    snap_weight: Optional[float] = None
     #: ``relbrake<b>``: a relative-speed safe distance (2026-10-30, maintainer's
     #: decision), ``b`` in m/s^2.  The required centre gap to a lead with speed
     #: ``v_l`` is ``L + d0 + max(0, tau v + (v^2 - v_l^2) / (2 b))``: the gap at
@@ -518,6 +524,11 @@ class NairACCConfig:
                 raise ValueError("jerk_input (jinput) cannot be combined with accel_lag_tau (alag<tau>)")
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("jerk_input (jinput) is implemented only in the cached feedback QP")
+        if self.snap_weight is not None:
+            if not self.jerk_input:
+                raise ValueError("snap_weight (snap<r>) needs jerk_input (jinput)")
+            if not float(self.snap_weight) > 0.0:
+                raise ValueError("snap_weight (snap<r>) must be positive")
         if self.relative_brake_decel is not None:
             if not self.relative_brake_decel > 0.0:
                 raise ValueError("relative_brake_decel (relbrake<b>) must be positive")
@@ -1377,6 +1388,8 @@ class CachedFeedbackScalarChanceQP:
     cvar_eta_var: Any = None
     cvar_s_var: Any = None
     cvar_slack_var: Any = None
+    #: snap<r>: the jerk the plant got on the last tick; None without it
+    prev_jerk_param: Any = None
 
 
 class OldACCReferenceAdapter:
@@ -1593,6 +1606,9 @@ class NairACCSMPC:
         # cached QP's solved eta, s and row slacks
         self._cvar_active = False
         self._cvar_plan = None
+        # snap<r>: the issued command of the previous call and the jerk the plant got on the last tick
+        self._last_issued_cmd = None
+        self._prev_issued_jerk = 0.0
         # dopt<w>lkr: vehicles seen with a live cut-in hypothesis, and those of
         # them now followed as the in-lane lead -> ticks the gap has been full.
         self._armed_cutin_vehicles = set()
@@ -1711,6 +1727,10 @@ class NairACCSMPC:
         if not np.isfinite(command_dt) or command_dt <= 1.0e-6:
             command_dt = self.config.dt
         self._command_dt = max(float(command_dt), 1.0e-6)
+        # snap<r>: the jerk of the last tick from the issued commands (0 before there are two)
+        self._prev_issued_jerk = (0.0 if self._last_issued_cmd is None
+                                  else (self._previous_accel_cmd - self._last_issued_cmd) / self._command_dt)
+        self._last_issued_cmd = self._previous_accel_cmd
         # failsafe_recovery: the envelope from the acceleration the plan starts from (jinput: a_0, the
         # acceleration of the last interval; else the previous command), when it lies below a_min
         self._recovery_bounds = None
@@ -3020,6 +3040,8 @@ class NairACCSMPC:
         opti.set_value(problem.x0_param, np.asarray(x0, dtype=float).reshape((NX, 1)))
         if problem.a0_param is not None:
             opti.set_value(problem.a0_param, self._ego_accel)
+        if problem.prev_jerk_param is not None:
+            opti.set_value(problem.prev_jerk_param, self._prev_issued_jerk)
         if problem.a_lo_param is not None:
             # failsafe_recovery: the envelope's bounds inside a recovery, the nominal ones outside
             jerk_limit = self._jerk_limit_value()
@@ -3353,6 +3375,8 @@ class NairACCSMPC:
                      if self.config.accel_lag_tau is not None else None)
         jerk_input = bool(self.config.jerk_input)
         a0_param = opti.parameter() if accel_lag is not None or jerk_input else None
+        snap_weight = self.config.snap_weight
+        prev_jerk_param = opti.parameter() if snap_weight is not None else None     # snap<r>: j_{-1}
         prev_u_param = opti.parameter(num_modes, horizon)
         previous_accel_param = opti.parameter()
         command_dt_param = opti.parameter()
@@ -3560,6 +3584,11 @@ class NairACCSMPC:
                             # every step, r_move has no role
                             jerk = prev_u_param[mode, step] + h_var[mode, step]
                             smooth = self.config.r_jerk * jerk ** 2
+                            if prev_jerk_param is not None:
+                                # snap<r>: r (j_k - j_{k-1})^2, j_{-1} the jerk the plant got on the last tick
+                                last_jerk = (prev_jerk_param if step == 0
+                                             else prev_u_param[mode, step - 1] + h_var[mode, step - 1])
+                                smooth = smooth + snap_weight * (jerk - last_jerk) ** 2
                         else:
                             move = control - previous_input
                             smooth = (self.config.r_move * move ** 2 if step == 0
@@ -3916,6 +3945,7 @@ class NairACCSMPC:
             cvar_eta_var=cvar_eta_var,
             cvar_s_var=cvar_s_var,
             cvar_slack_var=cvar_slack_var,
+            prev_jerk_param=prev_jerk_param,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
