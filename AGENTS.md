@@ -34,7 +34,17 @@ It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Whe
 acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt3lkr_trajcutin_ctx0_latgate_nocutout_lksigma_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkrsigma_lkhold_entrant2_bcts_occin0.1_nolkentry_floorrisk0.1_floorhyp_nopricesigma_lkonesided0.05_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10
 ```
 
-The replay's default condition (no variable set; `results/ngsim_lambda_cal_20261019/replay/ngsim_replay.py`, `baselines.py`): set speed = the logged follower's (`NGSIM_V_SET=logged`), start gap d_safe + 3 m (`NGSIM_SPAWN_MARGIN=3`), previous command 0 at the start (`NGSIM_START_CMD`), ideal ego without lag (`NGSIM_EGO_LAG_TAU` 0), speed bound 20 m/s (`NGSIM_V_MAX`), `NGSIM_LANE_TEST=path`, `NGSIM_SIDE_ENTRY=live`, and the unified ISO limits for every controller (`NGSIM_ISAMPC_POLICY=acc_isampc_amin3.5_amax2_jlim2.5_jlimup5`, `NGSIM_PCACC_POLICY=acc_pcacc_amin3.5_amax2_jlim2.5_jlimup5`). Older roots and their settings: `docs/agents/ngsim_replay_defaults.md`.
+The replay's default condition (no variable set; `results/ngsim_lambda_cal_20261019/replay/ngsim_replay.py`, `baselines.py`):
+- set speed = the logged follower's (`NGSIM_V_SET=logged`),
+- start gap d_safe + 3 m (`NGSIM_SPAWN_MARGIN=3`),
+- previous command 0 at the start (`NGSIM_START_CMD`),
+- ideal ego without lag (`NGSIM_EGO_LAG_TAU` 0),
+- speed bound 20 m/s (`NGSIM_V_MAX`),
+- `NGSIM_LANE_TEST=path`,
+- `NGSIM_SIDE_ENTRY=live`,
+- and the unified ISO limits for every controller (`NGSIM_ISAMPC_POLICY=acc_isampc_amin3.5_amax2_jlim2.5_jlimup5`, `NGSIM_PCACC_POLICY=acc_pcacc_amin3.5_amax2_jlim2.5_jlimup5`).
+
+Older roots and their settings: `docs/agents/ngsim_replay_defaults.md`.
 
 What the token groups do (details §4, full records `docs/agents/tokens.md`):
 - `stdan_3int`, `modes8`: STDAN with three intentions; at most 8 joint modes. `fixed_risk`, `nominal_safe_distance`: labels only.
@@ -51,7 +61,13 @@ What the token groups do (details §4, full records `docs/agents/tokens.md`):
 - `safelayer`, `entrant2`, `fsdecel8_fsjerk10`: PC-ACC's safety layer around the command (fail-safe −8 m/s² at jerk 10 m/s³, path members assumed to brake at no more than −10.5 m/s²), also covering close entrants braking at −2 m/s².
 - `amin3.5_amax2_jlim2.5_jlimup5`: comfort limits a ∈ [−3.5, 2] m/s², falling jerk ≤ 2.5 m/s³, rising jerk ≤ 5 m/s³ (ISO 15622).
 
-**CARLA design** (the row "D-opt, current (2026-11-03 night, with `lkhold`)" of §4; every new CARLA run is to use it): `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin_ctx<λ>_latgate_entrypass0_nocutout_lksigma_rmove1000_rjerk40_fullfoot_l1slack1e6_leadmerge_mergefirst_lkrsigma_lkhold`. It has never run in CARLA as a whole. CARLA has run the paper's four controllers, D-opt (`dopt100lkr_trajcutin`) with its `ctx<λ>`, `latgate`, `rmove1000_rjerk40` and `rmove0_jlim1.5` variants, and the baselines `acc_pcacc` and `acc_isampc` (sweeps up to 2026-10-22). Every token added since then has run on the NGSIM replay only: `entrypass0`, `fullfoot`, `l1slack1e6`, `leadmerge`, `mergefirst`, `lkrsigma`, `lkhold` (each "not run in CARLA" in its record) and `nocutout`, `lksigma` (no CARLA sweep root carries them). The NGSIM design's other tokens are not decided for CARLA (`jinput`, `safelayer`, `entrant2`) or refused by the CARLA agent (`bcts`, `occin`).
+**CARLA design** (the row "D-opt, current (2026-11-03 night, with `lkhold`)" of §4; every new CARLA run is to use it): `acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_cutin_chance0.6_dopt100lkr_trajcutin_ctx<λ>_latgate_entrypass0_nocutout_lksigma_rmove1000_rjerk40_fullfoot_l1slack1e6_leadmerge_mergefirst_lkrsigma_lkhold`.
+- It has never run in CARLA as a whole.
+- CARLA has run the paper's four controllers, D-opt (`dopt100lkr_trajcutin`) with its `ctx<λ>`, `latgate`, `rmove1000_rjerk40` and `rmove0_jlim1.5` variants, and the baselines `acc_pcacc` and `acc_isampc` (sweeps up to 2026-10-22).
+- Every token added since then has run on the NGSIM replay only:
+  - `entrypass0`, `fullfoot`, `l1slack1e6`, `leadmerge`, `mergefirst`, `lkrsigma`, `lkhold` (each "not run in CARLA" in its record)
+  - and `nocutout`, `lksigma` (no CARLA sweep root carries them).
+- The NGSIM design's other tokens are not decided for CARLA (`jinput`, `safelayer`, `entrant2`) or refused by the CARLA agent (`bcts`, `occin`).
 
 **Pending decisions** (the maintainer's):
 - `l1slack100` in place of `l1slack1e6`: run on the final set on 2026-11-12 (`replay_out/l1w_20261112/result.md`).
@@ -325,7 +341,11 @@ What happens in each scenario:
 - **`cutout_no_sublv`.** The ego-lane lead leaves its lane at a fixed time.
 - **`cutout_sublv`.** A second lead drives 89 m ahead of the ego-lane lead, 6 m/s slower than it. The ego-lane lead leaves when its gap to that second lead reaches `--trigger-distances`.
 
-**Several sweeps at once.** Give each line its own `--port`, 200 apart (2030, 2230, 2430, …), and its own output root. The watchdog counts and cleans up only the CARLA servers in `[--port, --port + 200)` (`--carla-port-span`), so lines never kill each other's servers; before 2026-10-15 it killed every CarlaUE4 on the machine, and lines that shared `--port 2030` crashed each other's servers. Set `OMP_NUM_THREADS=6` per line so the predictors do not oversubscribe the CPU. Measured on 2026-10-15 with four lines: a run takes 69 s instead of 59 s, so throughput is about 3.5×, and the results match serial runs (§8.11).
+**Several sweeps at once.**
+- Give each line its own `--port`, 200 apart (2030, 2230, 2430, …), and its own output root.
+- The watchdog counts and cleans up only the CARLA servers in `[--port, --port + 200)` (`--carla-port-span`), so lines never kill each other's servers; before 2026-10-15 it killed every CarlaUE4 on the machine, and lines that shared `--port 2030` crashed each other's servers.
+- Set `OMP_NUM_THREADS=6` per line so the predictors do not oversubscribe the CPU.
+- Measured on 2026-10-15 with four lines: a run takes 69 s instead of 59 s, so throughput is about 3.5×, and the results match serial runs (§8.11).
 
 Metrics, tables and figures:
 
@@ -356,7 +376,12 @@ results/acc_scenario_sweep/<sweep>/<policy>/<group>/
         carla_server.log                     # only with --fresh-server-per-run
 ```
 
-Runs made before 2026-10-27 no longer carry `summary.json` (deleted on 2026-10-27 to free disk, 94 GiB; it was `{error, ran_successfully, policy_logs}`, i.e. the pickle's per-actor `policy_log` after a JSON round trip plus the two flags that `metrics.json` also holds; 4 spawn-failure runs without a pickle keep theirs). The tools read `scenario_result.pkl` + `metrics.json` instead: `analyze_acc_scenario_result.load_summary` rebuilds the same dict, the animation tool and the older devel readers go through it, and `sweep_acc_scenarios.py --resume` counts a run with `resolved_config.json` + `metrics.json` + `scenario_result.pkl` as finished (38ed197). New runs still write `summary.json`; the watchdog keeps it as a live activity marker.
+Runs made before 2026-10-27 no longer carry `summary.json` (deleted on 2026-10-27 to free disk, 94 GiB; it was `{error, ran_successfully, policy_logs}`, i.e. the pickle's per-actor `policy_log` after a JSON round trip plus the two flags that `metrics.json` also holds; 4 spawn-failure runs without a pickle keep theirs).
+- The tools read `scenario_result.pkl` + `metrics.json` instead:
+  - `analyze_acc_scenario_result.load_summary` rebuilds the same dict,
+  - the animation tool and the older devel readers go through it,
+  - and `sweep_acc_scenarios.py --resume` counts a run with `resolved_config.json` + `metrics.json` + `scenario_result.pkl` as finished (38ed197).
+- New runs still write `summary.json`; the watchdog keeps it as a live activity marker.
 
 `scenario_result.pkl` is a dict.
 
@@ -402,8 +427,20 @@ Inside it:
 11. **Runs made before 2026-10-15 carry a command/tick race.** `set_target_velocity` and `apply_control` are asynchronous RPCs. The runner used to send the ego's command right before `world.tick()`, and on 1.4–1.8 % of the ego's ticks the server processed the tick first: the command landed one tick late and the measured speed dipped by about 0.2 m/s for one tick.
     - Since 2026-10-15 the runner queues every vehicle command and applies the batch with `client.apply_batch_sync` before each tick (`_apply_tick_commands`), which returns only after the server applied it. The dips are gone (0 in 11,400 ego ticks, serial and parallel alike).
     - Measured-speed metrics (raw `j_max` and `a_min`, `j_max_filt`) and some δ values differ systematically between runs made before and after the fix; the command-based metrics (`j_max_cmd_filt`, `a_min_cmd`), Δt_ant and collisions do not. The paper sweeps (`*_final_20260910`) predate the fix. Do not mix the two in one table.
-12. **A predictor exception does not show up as a fallback.** When `predict_acc` raises, `_stdan_prediction_bundle` catches it and runs the tick on the synthetic two-mode prediction (`lane_keeping` 0.6 / `cutin` 0.4, no vehicle ids), logging `stdan_debug.fallback = True` and `stdan_debug.reason`; `solve_path` stays normal, so `fallback_ratio` is 0. The aggregator's `pred_fallback_ratio` and `pred_error_steps` columns count these (since 2026-10-17; `pred_error_steps > 0` makes the run invalid). The first `trajcutin` grid (2026-10-16, code `621d5ec`) hid such an exception in 108/108 cut-in runs, 6–9 ticks each, right before the TV was reclassified as ego-lane; the synthetic prediction also cleared `dopt<w>lkr`'s armed set, which is what made those runs look worse. `fallback = True` without a `reason` means the predictor returned nothing (no vehicle in the grid), which is normal.
-13. **Runs made before 2026-10-19 carry two run-start lateral artefacts.** (a) The scripted agents' first IPOPT solve (`mpc_agent.py`) started from an all-zero initial guess, often hit the 0.2 s CPU limit, and its unconverged steering (at the ±0.5 rad bound) was applied: the cut-in TV swerved up to 1.2 m sideways within the first second (7/50 TVs > 0.3 m under four parallel lines, 2–4/50 in the paper sweep, 0 after the fix). STDAN read the swerve as a cut-in (p 0.78 at t0 + 0.25 s in 01/cutin_0003) and the ego braked for it. (b) The 4 s cruise warm-up applied no steering, so a vehicle with a spawn heading error drifted straight: one right-lane car started t0 1.47 m off its lane centre. Since 2026-10-19 the first solve starts from the current state and the reference (converges in 0.02–0.03 s under load) and the warm-up steers every vehicle onto its lane centre (`_tick_vehicles_cruising`, Stanley form; the shared `lane_keeping_steer` was lightly damped under the velocity pin). Verified on 12 single runs (`startfix_check_20261019`): no infeasible TV tick, lateral motion ≤ 0.001 m, every vehicle ≤ 0.02 m off centre at t0, triggers unchanged, t_cross 0.05–0.15 s later. The first second's predictor behaviour differs between old and new runs, so do not mix them in one table; every sweep root before this date, the paper's included, is "old".
+12. **A predictor exception does not show up as a fallback.**
+    - When `predict_acc` raises, `_stdan_prediction_bundle` catches it and runs the tick on the synthetic two-mode prediction (`lane_keeping` 0.6 / `cutin` 0.4, no vehicle ids), logging `stdan_debug.fallback = True` and `stdan_debug.reason`.
+    - `solve_path` stays normal, so `fallback_ratio` is 0.
+    - The aggregator's `pred_fallback_ratio` and `pred_error_steps` columns count these (since 2026-10-17; `pred_error_steps > 0` makes the run invalid).
+    - The first `trajcutin` grid (2026-10-16, code `621d5ec`) hid such an exception in 108/108 cut-in runs, 6–9 ticks each, right before the TV was reclassified as ego-lane; the synthetic prediction also cleared `dopt<w>lkr`'s armed set, which is what made those runs look worse.
+    - `fallback = True` without a `reason` means the predictor returned nothing (no vehicle in the grid), which is normal.
+13. **Runs made before 2026-10-19 carry two run-start lateral artefacts.**
+    - (a) The scripted agents' first IPOPT solve (`mpc_agent.py`) started from an all-zero initial guess, often hit the 0.2 s CPU limit, and its unconverged steering (at the ±0.5 rad bound) was applied:
+      - the cut-in TV swerved up to 1.2 m sideways within the first second (7/50 TVs > 0.3 m under four parallel lines, 2–4/50 in the paper sweep, 0 after the fix).
+      - STDAN read the swerve as a cut-in (p 0.78 at t0 + 0.25 s in 01/cutin_0003) and the ego braked for it.
+    - (b) The 4 s cruise warm-up applied no steering, so a vehicle with a spawn heading error drifted straight: one right-lane car started t0 1.47 m off its lane centre.
+    - Since 2026-10-19 the first solve starts from the current state and the reference (converges in 0.02–0.03 s under load) and the warm-up steers every vehicle onto its lane centre (`_tick_vehicles_cruising`, Stanley form; the shared `lane_keeping_steer` was lightly damped under the velocity pin).
+      - Verified on 12 single runs (`startfix_check_20261019`): no infeasible TV tick, lateral motion ≤ 0.001 m, every vehicle ≤ 0.02 m off centre at t0, triggers unchanged, t_cross 0.05–0.15 s later.
+    - The first second's predictor behaviour differs between old and new runs, so do not mix them in one table; every sweep root before this date, the paper's included, is "old".
 
 ## 9. Working conventions
 
@@ -415,13 +452,21 @@ Inside it:
   - Keep one-off analysis scripts out of the repository.
 - **Claims.** Report only improvements that were measured. Before comparing with an older sweep, re-aggregate both with the current script, because metric definitions have changed over time.
 - **Changes.** Keep them surgical: touch only what the task needs, and match the existing style.
-- **Sweep roots deleted on 2026-10-27 to free disk.** 88 of the 120 roots under `results/acc_scenario_sweep/` (every superseded, invalid, aborted or uncited root of the inventory, 112 GiB) and the `summary.json` of the 32 remaining roots (94 GiB) were deleted; the disk went from 98 % to 74 %. The numbers quoted in this file stay as text; the list of what was deleted and what was kept, and why, is in `results/acc_scenario_sweep/CLEANUP_PLAN_20261027.md` (§8, with `cleanup_executed_20261027.sh`). `cutin_final_20260905` and `cutout_baselines_20260905` were kept because `overleaf/자소서_연구경력.md` cites them.
+- **Sweep roots deleted on 2026-10-27 to free disk.**
+  - 88 of the 120 roots under `results/acc_scenario_sweep/` (every superseded, invalid, aborted or uncited root of the inventory, 112 GiB) and the `summary.json` of the 32 remaining roots (94 GiB) were deleted; the disk went from 98 % to 74 %.
+  - The numbers quoted in this file stay as text; the list of what was deleted and what was kept, and why, is in `results/acc_scenario_sweep/CLEANUP_PLAN_20261027.md` (§8, with `cleanup_executed_20261027.sh`).
+  - `cutin_final_20260905` and `cutout_baselines_20260905` were kept because `overleaf/자소서_연구경력.md` cites them.
 
 ## 10. Open items
 
 Full text: `docs/agents/open_items.md`; the NGSIM replay's default history: `docs/agents/ngsim_replay_defaults.md`. Decisions waiting for the maintainer: §1, "Pending decisions".
 
-- **Safety and recursive feasibility.** No formal property: the safety rows are soft and act on predicted hypotheses only, and the hypothesis set neither covers the real cut-in before the point of no return nor stays nested between ticks. Implemented around it: `safelayer`, `entrant2`, the fail-safe exit (`safebranch` was dropped on 2026-11-11). Open: `passmiqp` / `passnocap` and how p and σ enter the pass condition; R1 (a hard first-step stopping row), `entrypass9`, `termcost`, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing.
+- **Safety and recursive feasibility.**
+  - No formal property: the safety rows are soft and act on predicted hypotheses only, and the hypothesis set neither covers the real cut-in before the point of no return nor stays nested between ticks.
+  - Implemented around it: `safelayer`, `entrant2`, the fail-safe exit (`safebranch` was dropped on 2026-11-11).
+  - Open:
+    - `passmiqp` / `passnocap` and how p and σ enter the pass condition
+    - R1 (a hard first-step stopping row), `entrypass9`, `termcost`, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing.
 - **Entry timing of cut-in hypotheses.** Open loop, the TV leads a cell at its real entry step on only 31–59 % of pre-entry ticks; not fixed (`replay_out/entry_coverage_20261104/result.md`).
 - **Calibrated lane-change probabilities.** `pcal` (2026-11-05) was superseded by `bcts` (2026-11-06 evening); open: the maintainer's review of the ds3_v1780 contact before the paper's tables switch.
 - **Side entries (ghosts).** Since 2026-11-12 a lane change into the ego lane beside the ego stays live (`NGSIM_SIDE_ENTRY=live`); `ghost` gives the old rule (`replay_out/side_live_20261112/`).
@@ -433,4 +478,14 @@ Full text: `docs/agents/open_items.md`; the NGSIM replay's default history: `doc
 - **Context trust λ.** No λ adopted; no λ met both budgets on any data set; `phantom_cf` was withdrawn in favour of `phantom_ep`.
 - **Jerk pricing.** `rmove1000_rjerk40` adopted on 2026-10-22, chosen after reading test episodes (the test set is not strictly untouched).
 - **CARLA verification sweep (2026-10-20).** Still open for ISA-MPC: ε (0.8 vs 0.1) and an 8 s horizon check.
-- **Code issues.** The step-0 jerk cost uses `config.dt` instead of `command_dt` (16× too cheap); unfiltered x₀; `slack_steps` misses slack use in chance policies; σ-term cap undecided (`sigmacap<c>`); the TV re-trigger ignores its gap to the ego; paper tex vs code (§3); the caption of `overleaf/table_cutin_final.tex`; IAIMM-KF tuned in-sample; `branchdec` with k_b = 1 untested. The fallback sign was fixed on 2026-11-03.
+- **Code issues.**
+  - The step-0 jerk cost uses `config.dt` instead of `command_dt` (16× too cheap)
+  - unfiltered x₀
+  - `slack_steps` misses slack use in chance policies
+  - σ-term cap undecided (`sigmacap<c>`)
+  - the TV re-trigger ignores its gap to the ego
+  - paper tex vs code (§3)
+  - the caption of `overleaf/table_cutin_final.tex`
+  - IAIMM-KF tuned in-sample
+  - `branchdec` with k_b = 1 untested.
+  - The fallback sign was fixed on 2026-11-03.
