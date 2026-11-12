@@ -526,6 +526,7 @@ class STDAN3IntACCAdapter:
         occupancy_risk: Optional[float] = None,
         intention_calibration: Optional[Callable[[int, np.ndarray], np.ndarray]] = None,
         occupancy_pin_gate: bool = False,
+        ahead_only: bool = False,
     ):
         """``occupancy_risk`` (``occin<eps>``, 2026-11-05) needs ``lane_membership_prob_fn(target_id,
         sampled_raw_traj_xy, sampled_raw_position_cov)``: per raw trajectory and step 0..N the probability
@@ -658,6 +659,7 @@ class STDAN3IntACCAdapter:
             pass_margin=pass_margin,
             pass_slots=pass_slots,
             pass_plan=pass_plan,
+            ahead_only=ahead_only,
         )
         return {
             "prediction": prediction,

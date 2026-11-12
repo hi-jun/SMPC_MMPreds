@@ -182,6 +182,9 @@ class ACCNairSMPCAgent(object):
         self.no_lk_entry = self._parse_no_lk_entry(smpc_config)
         if self.no_lk_entry and self.predictor_type != "stdan_3int":
             raise ValueError("nolkentry needs the stdan_3int predictor")
+        self.ahead_only = self._parse_ahead_only(smpc_config)
+        if self.ahead_only and self.predictor_type != "stdan_3int":
+            raise ValueError("aheadonly needs the stdan_3int predictor")
         # occin<eps> (2026-11-05): a cut-in cell is active where p * P(body overlaps the ego's path) > eps, which
         # needs a probabilistic ego-path test of the predicted trajectories (predict_acc(lane_membership_prob_fn=));
         # only the NGSIM replay has one, and inside the agent a predictor exception would be swallowed silently
@@ -1118,6 +1121,7 @@ class ACCNairSMPCAgent(object):
                 merge_first=self.merge_first,
                 lk_hold=self.lk_hold,
                 no_lk_entry=self.no_lk_entry,
+                ahead_only=self.ahead_only,
                 **({"entry_plan": entry_plan, "entry_clearance": self.controller_config.vehicle_length,
                     "entry_margin": entry_margin} if entry_plan is not None else {}),
                 **pass_kw,
@@ -2054,6 +2058,16 @@ class ACCNairSMPCAgent(object):
         lead, so ``trajcutin`` finds no entering lane-keeping trajectory (2026-11-06). Whole-token match.
         """
         return re.search(r"(?:^|_)nolkentry(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_ahead_only(smpc_config):
+        """Read ``aheadonly`` from the config string (default: off).
+
+        ISA-MPC's obstacle rule: only a vehicle whose current position is at or ahead of the ego's is an obstacle, so
+        a vehicle beside or behind the ego leads at no step, whatever its prediction, until it is ahead
+        (``acc_postprocess.build_multitarget_lead_prediction(ahead_only=)``), 2026-11-13. Whole-token match.
+        """
+        return re.search(r"(?:^|_)aheadonly(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_occupancy_risk(smpc_config):

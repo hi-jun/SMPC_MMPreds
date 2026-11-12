@@ -1514,8 +1514,15 @@ def build_multitarget_lead_prediction(
     pass_margin: Optional[float] = None,
     pass_slots: int = 0,
     pass_plan: Optional[Dict[int, np.ndarray]] = None,
+    ahead_only: bool = False,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
+
+    ``ahead_only`` (``aheadonly``, 2026-11-13) is ISA-MPC's obstacle rule (Zhou et al.'s ``ISA_MPC.py``,
+    ``Obst_k[i][0,0] >= x_EV_k``): a target is an obstacle only while its current position (``frenet[0, 0]``) is at
+    or ahead of the ego's (``ego_state[0]``), so every mode of a target behind it never leads, whatever its
+    prediction (the cell filter otherwise compares each predicted step with the ego's current position).  Every
+    scenario's metadata then lists those targets' vehicle ids under ``ahead_only``.
 
     ``pass_plan`` (``passnocap``) is the displacement the candidate test reads in place of ``entry_plan``
     (the ego's maximum-acceleration displacement, ``pass_maxacc_displacement``): a hypothesis is a candidate
@@ -1626,6 +1633,13 @@ def build_multitarget_lead_prediction(
             else:
                 entry_decisions[idx].update(candidate=False, excluded=True, overflow=True)
                 entry_excluded.add(id(mode))
+    behind_now = []
+    if ahead_only:
+        # aheadonly: a target behind the ego now is no obstacle; its modes join the never-leading set
+        for target in targets:
+            if float(target.mode_predictions[0].frenet[0, 0]) < ego_s:
+                behind_now.append(int(target.vehicle_id))
+                entry_excluded.update(id(mode) for mode in target.mode_predictions)
 
     # branchdec marks a cut-in mode only if it leads at some step: one that never does (gated, excluded, not in
     # the ego lane within the horizon, or behind the ego) has lane keeping's cells, so a branch for it changed no
@@ -1766,6 +1780,8 @@ def build_multitarget_lead_prediction(
         )
         if entry_plan is not None:
             metadata[-1]["entry_pass"] = entry_decisions
+        if ahead_only:
+            metadata[-1]["ahead_only"] = behind_now
 
     if lead_merge:
         cells = [means, covariances, active_mask, clearance_scale, chance_confidence, sigma_confidence,
