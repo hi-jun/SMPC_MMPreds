@@ -1173,6 +1173,26 @@ Braking-distance safety bound (experimental)
   - contacts against C: `snap40` 3 new and 2 removed, `snap160` 4 new and 3 removed, all side entries; the TV side entry ds4_v3230 (mild, at t_cross at 1.0 m/s): min gap 0.20 m (C), −0.03 m, −0.33 m (P1 3.34 m).
 - **Status:** `snap160` in the final NGSIM design since the night of 2026-11-12 (maintainer); not run in CARLA; off by default; not in the paper (added 2026-11-12, f1bfbc4).
 
+### `aheadonly`
+
+(Record added 2026-11-13 from `replay_out/aheadonly_20261113/`.)
+
+- **What:** ISA-MPC's obstacle rule (Zhou et al.'s `ISA_MPC.py`, `Obst_k[i][0,0] >= x_EV_k`; the port's `isampc_agent.py` `plan()`): a target is an obstacle only while its current position is at or ahead of the ego's (in the replay its rear + L against the ego's front, the ISA-MPC port's comparison). Every mode of a target behind it never leads, whatever its prediction.
+  - Without the token the lead filter compares each predicted step with the ego's *current* position, so a faster vehicle beside or behind the ego leads at the steps it is predicted past that position. In ds1_v2379 the TV's hypothesis, 1.6 m behind the planned ego at step 3, asked for a 29.5 m shortfall.
+  - Why (maintainer, 2026-11-13, after the ds1_v2379 analysis): obstacles are only the vehicles ahead of the ego, as in ISA-MPC.
+- **Code:**
+  - `acc_postprocess.build_multitarget_lead_prediction(ahead_only=)`: the target's modes join the never-leading set (`entry_excluded`, so `mergefirst` pools them); every scenario's metadata lists the targets under `ahead_only`.
+  - `STDAN3IntACCAdapter.predict_acc(ahead_only=)`; the agent's `_parse_ahead_only` (whole-token match; needs `stdan_3int`).
+  - The replay's `predictor_options` and its three direct calls (lead-only, the `mergefirst` diagnostic, the counterfactual) pass it; with the token only, tick keys `ao_n` (targets behind the ego now) and `ao_tv` (the TV one of them). Backup `replay_backup_20261113_pre_aheadonly/`.
+- **Checks:**
+  - 7 tests (`tests/test_aheadonly.py`: a TV beside the ego never leads and is listed; the rule equals that target's modes switched off by hand, plain, `leadmerge` and `mergefirst`; a target at or ahead of the ego is unchanged; release once ahead; off by default; the parser and the ValueError); the full suite passes (516 tests, `full_test_suite.out`).
+  - Without the token bit-identical to the final root on 13 + 3 episodes on the workstation (max |Δa_cmd| 0, every non-timing tick array equal; `gate_aheadonly.log`).
+  - With it, 14 smoke episodes (the 13 + ds1_v2379), valid (0 errors, exceptions, fallbacks).
+- **Smoke result (14 episodes, not a measurement):**
+  - 12 unchanged, and ds4_v3215 (no cut-in) a_min −0.15 → −0.09.
+  - ds1_v2379: the TV is excluded until 0.1 s before t_cross; braking starts +1.0 s after t_cross instead of −1.8 s, then still at the falling jerk bound (a_cmd min −3.47 against −3.42); the open-loop TV still enters beside the ego, so the side contact stays.
+- **Status:** decided by the maintainer on 2026-11-13; implemented (793aba3); off by default and not in the replay default yet (the final set not run); not run in CARLA.
+
 ## External baselines
 
 Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20, `cutin_verify_20261020` / `cutout_verify_20261020`, and on the NGSIM final set, e.g. `full_v20s0_{isampc,pcacc}_20261028`; `open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint").
