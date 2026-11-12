@@ -316,6 +316,10 @@ class NairACCConfig:
     #: not clamped.  The reference keeps the plain ``d_safe`` at the planned speed (maintainer).  ``None`` is off
     #: (onerow's rows without a sigma term).
     one_row_z_conf: Optional[float] = None
+    #: ``nocap`` (2026-11-12, maintainer): with ``one_row``, no upper bound on an active cell's shortfall (``short >= 0``
+    #: only; inactive cells keep ``short = 0``), so the row has no hard floor: a pure soft constraint priced
+    #: ``w P_j short^2``, under which the emergency slack never binds.  ``False`` keeps the cap ``short <= tau v``.
+    one_row_no_cap: bool = False
     #: ``safebranch``: the safety layer's fail-safe as one more branch of the
     #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
     #: contingency plan).  The branch shares the first input with every
@@ -572,6 +576,8 @@ class NairACCConfig:
                 raise ValueError("one_row_z_conf (zconf<b>) needs one_row (onerow)")
             if not 0.0 < float(self.one_row_z_conf) < 1.0:
                 raise ValueError("one_row_z_conf (zconf<b>) must lie in (0, 1)")
+        if self.one_row_no_cap and not self.one_row:
+            raise ValueError("one_row_no_cap (nocap) needs one_row (onerow)")
         if self.failsafe_branch:
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
@@ -3588,7 +3594,11 @@ class NairACCSMPC:
                             # floorrisk<eps>: no cap on a cut-in chance cell (the row then reads
                             # 0 <= tau v); the floor row below bounds the gap there instead
                             short_capped = (1.0 - floor_cell_param[mode, step]) * short_var[mode, step]
-                        opti.subject_to(short_capped <= shortfall_mask_param[mode, step] * timegap)
+                        if self.config.one_row_no_cap:
+                            # onerow + nocap: no upper bound on an active cell's shortfall; inactive cells keep 0
+                            opti.subject_to((1.0 - shortfall_mask_param[mode, step]) * short_var[mode, step] <= 0.0)
+                        else:
+                            opti.subject_to(short_capped <= shortfall_mask_param[mode, step] * timegap)
                     else:
                         # relbrake<b>: the priced part is the whole speed-dependent part h (its tangent),
                         # and the floor row below stands in for short <= h, infeasible where h < 0

@@ -355,6 +355,10 @@ class ACCNairSMPCAgent(object):
         self.controller_config.one_row_z_conf = self._parse_one_row_z_conf(smpc_config)
         if self.controller_config.one_row_z_conf is not None and not self.controller_config.one_row:
             raise ValueError("zconf<b> needs onerow")
+        # nocap (2026-11-12): onerow's shortfall without the cap tau v
+        self.controller_config.one_row_no_cap = self._parse_one_row_no_cap(smpc_config)
+        if self.controller_config.one_row_no_cap and not self.controller_config.one_row:
+            raise ValueError("nocap needs onerow")
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
@@ -1957,6 +1961,15 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"(?:^|_)zconf([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
         return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_one_row_no_cap(smpc_config):
+        """Read ``nocap`` from the config string (default: off).
+
+        With ``onerow``: no upper bound on an active cell's shortfall, so its row is a pure soft constraint priced
+        ``w P_j short^2`` (``NairACCConfig.one_row_no_cap``), 2026-11-12. Whole-token match (``passnocap`` is not it).
+        """
+        return re.search(r"(?:^|_)nocap(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_safety_layer(smpc_config):
