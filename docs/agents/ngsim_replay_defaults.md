@@ -127,6 +127,24 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
     - the baselines' 2026-11-12 roots keep their settings (their defaults did not change);
     - roots made before 2026-11-12 additionally need `NGSIM_SIDE_ENTRY=ghost` (above).
 
+### 2026-11-13 night
+
+- **D-opt's default is now the current design** (maintainer: "ISA랑 우리 설계 둘다 상한으로 바꾸고 우리 설계 평균 경로로 바꿔", then "재생기 기본값을 지금 설계로 전환"). That is the final design above:
+  - without `nocap`: the cap 0 ≤ short ≤ τv is back;
+  - without `occin0.1`: the mean-trajectory entry with the 0.1 gate;
+  - with `aheadonly`.
+- **The edit touches `POLICY_TAIL` only.** Backup `results/ngsim_lambda_cal_20261019/replay_backup_20261113_pre_capmp_default/`; md5 of `ngsim_replay.py` 24a66444 → see `replay_out/default_capmp_20261113/gate.log`.
+  - The default tail is `_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_snap160_aheadonly`.
+  - `NGSIM_POLICY_DOPT` stays `_dopt10`.
+  - With no variable set, D-opt's string (λ 0, `--latgate`) is that of `replay_out/cap_20261113/design_cap_meanpath`, the NGSIM main table's design row (`main_capmp_20261113`).
+- **Unchanged:** the condition variables and the baselines' default strings. `NGSIM_ISAMPC_POLICY` still defaults to ISA-MPC as published with the unified limits. The main table's ISA arm, `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5_slackcap_l1slack5500`, is an explicit env string.
+- **Gates** (`replay_out/default_capmp_20261113/gate.sh`, `gate.log`), on the 5 reproduction episodes (`finalset_v2_20261113/episodes_repro.csv`):
+  - **No variable set, with the v3 episode table**, against `cap_20261113/design_cap_meanpath`: max |Δa_cmd| 0; every non-timing tick array equal; results.csv differs only in `wall_s`.
+  - **The previous default tail as `NGSIM_POLICY_TAIL`, no episode table**, against `fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112`: the same, except one results.csv `slack_max` cell, which differs at the last ulp (1e-26, CSV round trip).
+- **To reproduce a root made before this change:**
+  - The 2026-11-12 final design and the roots spliced from it (`fin_v2_design_aheadonly_20261113`, `fin_v3_design_aheadonly_20261113`) need `NGSIM_POLICY_TAIL` set to the previous default tail. Append `_aheadonly` for the two `_aheadonly` roots.
+  - The CRC grid of the BCTS shift λ (`replay_out/bcts_shift_20261112/`) ran on the previous default and is to be re-run on this one.
+
 ### Condition of older roots
 
 - `NGSIM_V_SET=20 NGSIM_SPAWN_MARGIN=0` gives the condition of every root from 2026-10-27 to 2026-11-10, including the paper roots and the baseline roots of the earlier tables.

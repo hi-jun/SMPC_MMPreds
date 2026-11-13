@@ -54,9 +54,13 @@ PC-ACC stays as published.
     - fair j_max 0.98 / 0.81 / 0.37, 1.42 / 1.29 / 0.94 and 5.59 / 5.47 / 4.16;
     - phantom_ref 0.119, 0.531 and 0.953;
     - floor breaches (critical / mild) 12 / 5, 23 / 12 and 44 / 39.
-- **Not yet done:** the replay default is not switched (it is still the final design below, without `aheadonly`). The experiment record is `docs/agents/tokens.md` (ISA section, rounds 1–2).
+- **Replay default switched (2026-11-13 night, maintainer: "재생기 기본값을 지금 설계로 전환").** With no variable set, D-opt's string is the one above (`POLICY_TAIL` only).
+  - Gate: 5 reproduction episodes bit-identical to `cap_20261113/design_cap_meanpath`, and the previous tail as `NGSIM_POLICY_TAIL` bit-identical to the 2026-11-12 final-design root (`replay_out/default_capmp_20261113/gate.log`; `docs/agents/ngsim_replay_defaults.md` 2026-11-13 night).
+  - The ISA default stays ISA as published (the main table's ISA arm is an env string).
+  - Still pending: the CRC λ grid re-run on the new default.
+  - The experiment record is `docs/agents/tokens.md` (ISA section, rounds 1–2).
 
-**NGSIM design (since the night of 2026-11-12): the final design, `onerow` with w 10 + `zconf0.95` + `nocap` + `snap160`, the NGSIM replay's default** (updated 2026-11-13 night: superseded as the design by the block above; still the replay's default) (maintainer's decision, 2026-11-12 night: "C + snap160 is the final NGSIM design"). The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112/run_info.json` (λ = 0; the last row of §4's current-design table with `ctx<λ>` = `ctx0`):
+**NGSIM design (since the night of 2026-11-12): the final design, `onerow` with w 10 + `zconf0.95` + `nocap` + `snap160`, the NGSIM replay's default** (updated 2026-11-13 night: superseded as the design and as the replay's default by the block above; `NGSIM_POLICY_TAIL` with its tail reproduces it) (maintainer's decision, 2026-11-12 night: "C + snap160 is the final NGSIM design"). The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112/run_info.json` (λ = 0; the last row of §4's current-design table with `ctx<λ>` = `ctx0`):
 
 ```
 acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_occin0.1_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_nocap_snap160
@@ -310,7 +314,7 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `pcal` | Calibrated lane-change probabilities (logistic on the lateral state) | superseded by `bcts` |
 | `bcts` | Bias-corrected temperature scaling of STDAN's intention probabilities | **design** (NGSIM only) |
 | `nolkentry` | Adjacent lane-keeping and away trajectories never lead | **design** |
-| `occin<ε>` | A cut-in cell is active at step k iff p·P_in(k) > ε | **design** (`occin0.1`, NGSIM only) |
+| `occin<ε>` | A cut-in cell is active at step k iff p·P_in(k) > ε | not in the design since 2026-11-13 night (the mean-trajectory entry, §1); was **design** (`occin0.1`, NGSIM only) |
 | `pingate` | Switch-on by P_in(k) > ε alone; p sets the floor | dropped 2026-11-11 |
 | `cvar<ε>_<c>` | Per-step CVaR bound on the cut-in shortfall in place of the price | not adopted, pending |
 | `nocutout` | No cut-out mode for an ego-lane vehicle | **design**; CARLA string |
@@ -347,9 +351,9 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `fixed_risk`, `nominal_safe_distance` | Labels only | labels only |
 | `onerow` | One priced row gap ≥ L + d0 + τv − short (w·P_j·short², `dopt<w>`'s w) on every active lead cell, cut-in hypotheses and lane-keeping leads alike; no floor row, no separate hard lane-keeping row, no `lkr`; the reference at plain d_safe | **design** (with `dopt10`, since 2026-11-12 night) |
 | `zconf<β>` | With `onerow`: the row's σ term z·σ, z = Φ⁻¹(min(p, β)), p the cell's own hypothesis probability | **design** (`zconf0.95`) |
-| `nocap` | With `onerow`: no upper bound on the shortfall, so no row is hard | **design** |
+| `nocap` | With `onerow`: no upper bound on the shortfall, so no row is hard | not in the design since 2026-11-13 night (the cap is back, §1); was **design** |
 | `snap<r>` | With `jinput`: cost 3·P_j·r·Σ(j_k − j_{k−1})² on the jerk's changes, j_{−1} from the issued commands | **design** (`snap160`) |
-| `aheadonly` | ISA-MPC's obstacle rule: only a vehicle whose current position is at or ahead of the ego's is an obstacle; one beside or behind never leads | decided 2026-11-13; final set run (every metric equal or better); the design row of the NGSIM main table (§1); not in the replay default yet |
+| `aheadonly` | ISA-MPC's obstacle rule: only a vehicle whose current position is at or ahead of the ego's is an obstacle; one beside or behind never leads | decided 2026-11-13; final set run (every metric equal or better); **design**, and in the replay default since 2026-11-13 night (§1) |
 | `slackcap`, `l1slack<w>` (ISA-MPC, `acc_isampc_…`) | ISA-MPC's standoff slack bounded by τv (L + d0 hard), with the design's exact-penalty emergency slack | experiment 2026-11-13 (`replay_out/cap_20261113/`, with the design without `nocap`); not adopted |
 
 Matching is by substring. The predictor is chosen in the order `const_lead` > `iaimm` > `lstm_vel` > `lstm` > `stdan_vel` > `stdan_3int` > synthetic, and any `_ol` in the string selects the open-loop variant.
