@@ -28,7 +28,35 @@ It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Whe
 
 ### Current design (2026-11-12)
 
-**NGSIM design (since the night of 2026-11-12): the final design, `onerow` with w 10 + `zconf0.95` + `nocap` + `snap160`, the NGSIM replay's default** (maintainer's decision, 2026-11-12 night: "C + snap160 is the final NGSIM design"). The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112/run_info.json` (λ = 0; the last row of §4's current-design table with `ctx<λ>` = `ctx0`):
+**NGSIM design and main table since the night of 2026-11-13** (maintainer: "ISA랑 우리 설계 둘다 상한으로 바꾸고 우리 설계 평균 경로로 바꿔").
+
+The design is the final design below with three changes:
+- the cap 0 ≤ short ≤ τv back (no `nocap`), so the floor through the cap L + d0 + zσ is hard, with ξ (`l1slack1e6`);
+- the mean-trajectory entry (no `occin0.1`): a cut-in cell is active where the hypothesis' mean trajectory is in the ego lane and its p passes the 0.1 gate;
+- `aheadonly`.
+
+The string:
+
+```
+acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_snap160_aheadonly
+```
+
+The main table's ISA-MPC arm is its cap version, `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5_slackcap_l1slack5500`. That is ρ ≤ τv, plus the emergency slack at the design's ratio of ξ to its time-gap slack weight. It is not ISA as published. The tokens are in `docs/agents/tokens.md` (ISA-MPC section, 765de6b).
+
+PC-ACC stays as published.
+
+- **Main table:** `replay_out/main_capmp_20261113/main_capmp.md` (`main_v3.py --arm-set capmp`, rows from `tables_v3.py --arm-set cap2`).
+  - The side-overlap exclusion was recomputed over these three arms. It drops 87, leaving 955: critical 313, mild 257, no cut-in 384 + 1 = 385.
+  - Roots: `cap_20261113/design_cap_meanpath`, `cap_20261113/isa_cap55`, `fin_v3_pcacc_paper_20261113`.
+  - On it, design / ISA cap / PC-ACC (critical / mild / no cut-in):
+    - contacts 0 / 0 / 0, 1 / 0 / 0 (rear-end) and 0;
+    - δ_max (critical / mild) 21.2 / 15.9 %, 28.3 / 22.6 and 34.7 / 32.9;
+    - fair j_max 0.98 / 0.81 / 0.37, 1.42 / 1.29 / 0.94 and 5.59 / 5.47 / 4.16;
+    - phantom_ref 0.119, 0.531 and 0.953;
+    - floor breaches (critical / mild) 12 / 5, 23 / 12 and 44 / 39.
+- **Not yet done:** the replay default is not switched (it is still the final design below, without `aheadonly`). The experiment record is `docs/agents/tokens.md` (ISA section, rounds 1–2).
+
+**NGSIM design (since the night of 2026-11-12): the final design, `onerow` with w 10 + `zconf0.95` + `nocap` + `snap160`, the NGSIM replay's default** (updated 2026-11-13 night: superseded as the design by the block above; still the replay's default) (maintainer's decision, 2026-11-12 night: "C + snap160 is the final NGSIM design"). The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_20261112/run_info.json` (λ = 0; the last row of §4's current-design table with `ctx<λ>` = `ctx0`):
 
 ```
 acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_nocutout_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_safelayer_leadmerge_mergefirst_lkhold_entrant2_bcts_occin0.1_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_fsdecel8_fsjerk10_onerow_zconf0.95_nocap_snap160
