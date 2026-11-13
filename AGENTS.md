@@ -62,6 +62,27 @@ Against P1 on the NGSIM final set (paired, SE in brackets; `replay_out/onerow_20
   - δ_max (critical / mild): 18.1 / 11.5 % for the design, 38.8 / 22.2 for ISA-MPC, 34.1 / 32.2 for PC-ACC.
   - Fair j_max: 0.84 / 0.60 / 0.30 for the design, 0.93 / 0.65 / 0.49 for ISA-MPC, 5.52 / 4.76 / 4.14 for PC-ACC.
   - Against ISA-MPC, the design is worse in two cells: v_avg −0.12 m/s (SE 0.03) without a cut-in, and Δt_ant −0.20 s (0.09) in mild cut-ins.
+- (updated 2026-11-13 afternoon: superseded by the final set v2 below; the 824 set is the old final set's.)
+
+**NGSIM final set v2 and its main table (2026-11-13 afternoon, maintainer: abrupt cut-ins in; a cut-in is a TV that becomes the ego's lead).**
+- **Rules** (`replay_out/finalset_v2_20261113/select_v2.py`; thesis text `paper/notes/scenario_extraction_ngsim.tex`):
+  - The 2.8 s pre-cross rule is replaced by the return rule: the TV must not have been in the ego's lane during the 3 s before t_cross.
+  - Added, the lead rule: at t_cross the TV is the ego's lead (nearest in-lane vehicle with its front ahead of the ego's front).
+  - Everything else is unchanged. The no-cut-in list is unchanged.
+  - Check: the old rules through the same code reproduce the old 400 + 89 lists and the old survival flags exactly.
+- **Set:** 535 cut-ins (critical 297, mild 238; one per TV 430 + other lane changes 105) + 400 no-cut-ins, in `episodes_all.csv` there.
+- **Replay input:** the replay reads the relabelled episode table through the new `NGSIM_EPISODES_TABLE=.../finalset_v2_20261113/episodes_table_v2.csv`.
+  - It is needed for the 75 abrupt cut-ins. `out/episodes.csv` still labels them excl_short_pre_cross, so without the table their scored window ended before t_cross. The first round has that bug, kept in `bad_round1/`.
+  - With the variable unset the replay is unchanged: bit-identical, gate in `run_v2b.log`.
+- **Roots (spliced):** `fin_v2_design_aheadonly_20261113`, `fin_v2_isampc_q0055_20261113`, `fin_v2_pcacc_paper_20261113`.
+  - 759 episodes come from the old roots, 176 are new. The new ones are 3 arms × (101 + 75) runs; the 75 ran with the table.
+- **Main table:** `main_v2.md` (`main_v2.py`). Dropping 82 side-overlap episodes leaves 846: critical 254, mild 208, no cut-in 384.
+- **On it** (critical / mild / no cut-in):
+  - Contacts: none for the design. ISA-MPC has 8 / 1 / 8, all rear-end. PC-ACC has none.
+  - δ_max (critical / mild): 19.5 / 16.9 % for the design, 37.2 / 28.5 for ISA-MPC, 33.4 / 31.8 for PC-ACC.
+  - Fair j_max: 0.80 / 0.68 / 0.30 for the design, 0.92 / 0.72 / 0.49 for ISA-MPC, 5.64 / 5.22 / 4.14 for PC-ACC.
+  - Critical T_rec (runs not recovered): 1.18 s (1) for the design, 1.61 (25) for ISA-MPC, 1.02 (126) for PC-ACC.
+- **Still pending:** the 30 m other-entry rule, which drops both cut-ins of a double cut-in; and the replay default switch to `aheadonly`.
 
 How the replay was switched and gated, and how to reproduce P1 and the other roots of 2026-11-12: `docs/agents/ngsim_replay_defaults.md` (2026-11-12) and `replay_out/onerow_20261112/adopt_snap160.log`. The path to this design (w sweep, zσ, `nocap`, `snap`): `docs/agents/design_history.md` (2026-11-12).
 
