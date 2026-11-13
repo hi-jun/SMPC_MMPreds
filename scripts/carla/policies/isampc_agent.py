@@ -164,7 +164,8 @@ class ISAMPCPlanner:
                  zeta_l=0.0, zeta_w=ZHOU_ZETA_W, k_lon=ZHOU_K_LON_EV,
                  q_snap=ZHOU_Q_SNAP, q_accel=ZHOU_Q_ACCEL, q_terminal_v=ZHOU_Q_TERMINAL_V,
                  q_slack=ZHOU_Q_SLACK, gurobi_time_limit=0.15, solver_tol=1.0e-4,
-                 accel_input=False, r_jerk=None, r_move=None, jerk_limit_up=None):
+                 accel_input=False, r_jerk=None, r_move=None, jerk_limit_up=None,
+                 slack_cap=False, l1_slack_weight=None):
         self.N = int(horizon)
         self.dt = float(dt)
         self.v_des = float(v_des)
@@ -192,6 +193,16 @@ class ISAMPCPlanner:
         self._lon_a, self._lon_b = lon_tracker_matrices(self.dt, k_lon)
         self._gurobi_time_limit = gurobi_time_limit
         self._solver_tol = float(solver_tol)
+        # ``slackcap`` (2026-11-13, maintainer): the standoff slack is bounded by the time gap, rho_k <= tau v_k, so the
+        # footprint L + d0 is a hard floor, as D-opt's onerow cap short <= tau v.  ``l1slack<w>`` (with it): an emergency
+        # slack xi >= 0 on the same row, priced w sum xi (D-opt's exact penalty), keeps the QP feasible where L + d0
+        # cannot be kept.  Both off by default (Zhou's unbounded rho; the QP is built as before).
+        self.slack_cap = bool(slack_cap)
+        self.l1_slack_weight = None if l1_slack_weight is None else float(l1_slack_weight)
+        if self.l1_slack_weight is not None and not self.slack_cap:
+            raise ValueError("l1_slack_weight (l1slack<w>) for ISA-MPC needs slack_cap (slackcap)")
+        if self.l1_slack_weight is not None and not self.l1_slack_weight > 0.0:
+            raise ValueError("l1_slack_weight (l1slack<w>) must be positive")
         if self.accel_input:
             self._build_accel_qp()
         else:
@@ -242,6 +253,22 @@ class ISAMPCPlanner:
         return max(0.0, v_up), v_up, binding
 
     # ------------------------------------------------------------------ moving-target QP
+    def _standoff_rows(self, opti, s, v, RHO, XDV):
+        """The soft standoff row ``x_rear_k - s_k - (L + d0 + tau v_k) + rho_k >= 0`` with ``rho >= 0``; with
+        ``slack_cap`` also ``rho_k <= tau v_k``, and with ``l1_slack_weight`` the row's emergency slack ``xi >= 0``
+        (returned; None without it).  Without either option the rows are exactly Zhou's (as before 2026-11-13)."""
+        XI = opti.variable(self.N) if self.l1_slack_weight is not None else None
+        if XI is None:
+            opti.subject_to(v * self.time_headway - RHO.T <= XDV.T - s - (self.vehicle_length + self.d0))
+        else:
+            opti.subject_to(v * self.time_headway - RHO.T - XI.T <= XDV.T - s - (self.vehicle_length + self.d0))
+        opti.subject_to(RHO >= 0.0)
+        if self.slack_cap:
+            opti.subject_to(RHO.T <= self.time_headway * v)
+        if XI is not None:
+            opti.subject_to(XI >= 0.0)
+        return XI
+
     def _build_qp(self):
         N, T = self.N, self.dt
         opti = ca.Opti("conic")
@@ -266,14 +293,17 @@ class ISAMPCPlanner:
         opti.subject_to(opti.bounded(self.a_min, a, self.a_max))
         if self.jerk_limit is not None:
             opti.subject_to(opti.bounded(-self.jerk_limit, j, self.jerk_limit_up))
-        opti.subject_to(v * self.time_headway - RHO.T <= XDV.T - s - (self.vehicle_length + self.d0))
-        opti.subject_to(RHO >= 0.0)
+        XI = self._standoff_rows(opti, s, v, RHO, XDV)
         w = self.weights
         cost = (w["q_snap"] * ca.sumsqr(U) + w["q_accel"] * ca.sumsqr(a)
                 + w["q_terminal_v"] * (X[1, N] - VREF) ** 2 + w["q_slack"] * ca.sumsqr(RHO))
+        if XI is not None:
+            cost = cost + self.l1_slack_weight * ca.sum1(XI)
         opti.minimize(cost)
         self._set_gurobi(opti)
         self._qp = {"opti": opti, "X": X, "U": U, "RHO": RHO, "X0": X0, "VREF": VREF, "XDV": XDV, "cost": cost}
+        if XI is not None:
+            self._qp["XI"] = XI
 
     def _build_accel_qp(self):
         """``ainput``: the QP above with acceleration as the input and the fork's jerk terms.
@@ -307,16 +337,19 @@ class ISAMPCPlanner:
             opti.subject_to(U[0] - UPREV <= self.jerk_limit_up * CMD_DT)
             opti.subject_to(UPREV - U[0] <= self.jerk_limit * CMD_DT)
             opti.subject_to(opti.bounded(-self.jerk_limit * T, U[1:] - U[:-1], self.jerk_limit_up * T))
-        opti.subject_to(v * self.time_headway - RHO.T <= XDV.T - s - (self.vehicle_length + self.d0))
-        opti.subject_to(RHO >= 0.0)
+        XI = self._standoff_rows(opti, s, v, RHO, XDV)
         w = self.weights
         cost = (w["q_accel"] * ca.sumsqr(U) + w["q_terminal_v"] * (X[1, N] - VREF) ** 2
                 + w["q_slack"] * ca.sumsqr(RHO)
                 + w["r_move"] * (U[0] - UPREV) ** 2 + w["r_jerk"] * ca.sumsqr((U[1:] - U[:-1]) / T))
+        if XI is not None:
+            cost = cost + self.l1_slack_weight * ca.sum1(XI)
         opti.minimize(cost)
         self._set_gurobi(opti)
         self._qp = {"opti": opti, "X": X, "U": U, "RHO": RHO, "X0": X0, "VREF": VREF, "XDV": XDV,
                     "UPREV": UPREV, "CMD_DT": CMD_DT, "cost": cost}
+        if XI is not None:
+            self._qp["XI"] = XI
 
     def _set_gurobi(self, opti):
         s_opts = {"OutputFlag": 0, "FeasibilityTol": self._solver_tol, "OptimalityTol": self._solver_tol,
@@ -342,6 +375,7 @@ class ISAMPCPlanner:
         return ({"X": np.asarray(sol.value(q["X"]), dtype=float).reshape(-1, self.N + 1),
                  "U": np.asarray(sol.value(q["U"]), dtype=float).reshape(-1),
                  "rho": np.asarray(sol.value(q["RHO"]), dtype=float).reshape(-1),
+                 "xi": (np.asarray(sol.value(q["XI"]), dtype=float).reshape(-1) if "XI" in q else None),
                  "cost": float(sol.value(q["cost"])), "status": status},
                 "gurobi_return_status=%s" % status)
 
@@ -383,7 +417,7 @@ class ISAMPCPlanner:
             accel = float(np.clip(0.5 * (v_ref - v), self.a_min, self.a_max))
             out.update({"accel_raw": accel, "jerk_next": self._clip_jerk((accel - a) / tau),
                         "status": "fallback", "solve_path": "fallback", "feasible": False,
-                        "X": None, "U": None, "rho": None, "cost": float("nan"), "min_gap": float("nan")})
+                        "X": None, "U": None, "rho": None, "xi": None, "cost": float("nan"), "min_gap": float("nan")})
             return out
         X, U = sol["X"], sol["U"]
         margin = x_dv - X[0, 1:] - (self.vehicle_length + self.d0) - self.time_headway * X[1, 1:]
@@ -397,7 +431,7 @@ class ISAMPCPlanner:
                     "jerk_next": jerk_next,
                     "status": sol["status"], "solve_path": "isampc_gurobi_qp",
                     "feasible": sol["status"].upper() == "OPTIMAL",
-                    "X": X, "U": sol["U"], "rho": sol["rho"], "cost": sol["cost"],
+                    "X": X, "U": sol["U"], "rho": sol["rho"], "xi": sol["xi"], "cost": sol["cost"],
                     "min_gap": float(np.min(margin[finite])) if finite.any() else float("nan")})
         return out
 
@@ -452,7 +486,10 @@ class ISAMPCAgent(ACCNairSMPCAgent):
     ``rmove<w>``), as for D-opt.  ``qslack<w>`` (2026-10-22) sets the standoff
     slack weight in place of Zhou's 0.055 (the NGSIM lab table uses 5).  The
     limits are the parent's ``controller_config``'s, so ``amin<x>``, ``amax<x>``,
-    ``jlim<x>`` and ``jlimup<x>`` (2026-11-11) set them as for D-opt.
+    ``jlim<x>`` and ``jlimup<x>`` (2026-11-11) set them as for D-opt.  ``slackcap``
+    (2026-11-13) bounds the standoff slack by the time gap (rho <= tau v, so L + d0 is
+    hard, as D-opt's onerow cap), and ``l1slack<w>`` with it adds the row's emergency
+    slack priced w sum xi, as D-opt's ``l1slack<w>``.
     """
 
     def __init__(self, vehicle, goal_location, nominal_speed_mps=8.0, dt=0.2, N=8,
@@ -467,7 +504,8 @@ class ISAMPCAgent(ACCNairSMPCAgent):
             vehicle_length=cfg.vehicle_length, d0=cfg.d0, time_headway=cfg.time_headway,
             gurobi_time_limit=cfg.gurobi_time_limit,
             accel_input=self._parse_accel_input(smpc_config), r_jerk=cfg.r_jerk, r_move=cfg.r_move,
-            q_slack=self._parse_q_slack(smpc_config))
+            q_slack=self._parse_q_slack(smpc_config), slack_cap=self._parse_slack_cap(smpc_config),
+            l1_slack_weight=self._parse_slack_l1_weight(smpc_config))
         self._prev_command_jerk = 0.0
 
     @staticmethod
@@ -484,6 +522,13 @@ class ISAMPCAgent(ACCNairSMPCAgent):
         """Read ``qslack<w>`` from the config string (default: Zhou's 0.055)."""
         match = re.search(r"qslack(\d+(?:\.\d+)?)", str(smpc_config))
         return float(match.group(1)) if match else ZHOU_Q_SLACK
+
+    @staticmethod
+    def _parse_slack_cap(smpc_config):
+        """Read ``slackcap`` from the config string (default: off): the standoff slack bounded by the time gap,
+        ``rho_k <= tau v_k`` (2026-11-13).  Whole-token match.  ``l1slack<w>`` (the parent's
+        ``_parse_slack_l1_weight``) then adds the row's exact-penalty emergency slack."""
+        return re.search(r"(?:^|_)slackcap(?=_|$)", str(smpc_config)) is not None
 
     def run_step(self, pred_dict):
         del pred_dict

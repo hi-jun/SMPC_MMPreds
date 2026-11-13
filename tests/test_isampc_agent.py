@@ -347,6 +347,65 @@ class TestTargetsFromBundle(unittest.TestCase):
         self.assertEqual(isampc_targets_from_bundle(None, N, DT, sample_future), [])
 
 
+class TestSlackCap(unittest.TestCase):
+    """``slackcap`` / ``l1slack<w>`` (2026-11-13): rho <= tau v makes the footprint L + d0 hard, as D-opt's onerow cap;
+    the exact-penalty emergency slack keeps the QP feasible where L + d0 cannot be kept."""
+
+    @staticmethod
+    def _plan(planner, s0, v_ego=10.0):
+        return planner.plan(100.0, v_ego, 0.0, 0.0, 0.0, [_two_mode_target(1, s0, 0.0, 10.0, 0.0)])
+
+    @staticmethod
+    def _rho_minus_timegap(planner, out):
+        return out["rho"] - planner.time_headway * out["X"][1, 1:]
+
+    def test_default_has_no_cap_and_no_emergency_slack(self):
+        planner = ISAMPCPlanner(horizon=N, dt=DT, v_des=17.0)
+        self.assertNotIn("XI", planner._qp)
+        out = self._plan(planner, 104.0)              # the lead's rear inside L + d0 over the first steps
+        self.assertEqual(out["status"], "OPTIMAL")
+        self.assertIsNone(out["xi"])
+        self.assertGreater(np.max(self._rho_minus_timegap(planner, out)), 1.0)   # Zhou's rho exceeds the time gap
+
+    def test_cap_alone_makes_the_close_lead_infeasible(self):
+        planner = ISAMPCPlanner(horizon=N, dt=DT, v_des=17.0, slack_cap=True)
+        out = self._plan(planner, 104.0)
+        self.assertEqual(out["solve_path"], "fallback")
+        self.assertIsNone(out["xi"])
+
+    def test_cap_with_l1_slack_stays_optimal_and_uses_the_emergency_slack(self):
+        for accel_input in (False, True):
+            planner = ISAMPCPlanner(horizon=N, dt=DT, v_des=17.0, slack_cap=True, l1_slack_weight=1e6,
+                                    accel_input=accel_input, r_jerk=10.0, r_move=250.0)
+            self.assertIn("XI", planner._qp)
+            out = self._plan(planner, 104.0)
+            self.assertEqual(out["status"], "OPTIMAL")
+            self.assertGreater(np.max(out["xi"]), 0.1)
+            self.assertLessEqual(np.max(self._rho_minus_timegap(planner, out)), 1e-4)
+
+    def test_cap_with_l1_slack_leaves_xi_zero_where_the_footprint_can_be_kept(self):
+        planner = ISAMPCPlanner(horizon=N, dt=DT, v_des=17.0, slack_cap=True, l1_slack_weight=1e6)
+        out = self._plan(planner, 122.0, v_ego=14.0)    # gap below d_safe but above L + d0
+        self.assertEqual(out["status"], "OPTIMAL")
+        self.assertLessEqual(np.max(out["xi"]), 1e-4)
+        self.assertGreater(np.max(out["rho"]), 0.1)
+        self.assertLessEqual(np.max(self._rho_minus_timegap(planner, out)), 1e-4)
+
+    def test_l1_slack_needs_the_cap_and_a_positive_weight(self):
+        with self.assertRaises(ValueError):
+            ISAMPCPlanner(horizon=N, dt=DT, v_des=17.0, l1_slack_weight=1e6)
+        with self.assertRaises(ValueError):
+            ISAMPCPlanner(horizon=N, dt=DT, v_des=17.0, slack_cap=True, l1_slack_weight=0.0)
+
+    def test_tokens(self):
+        self.assertTrue(ISAMPCAgent._parse_slack_cap("acc_isampc_amin3.5_slackcap_l1slack1e6"))
+        self.assertTrue(ISAMPCAgent._parse_slack_cap("acc_isampc_slackcap"))
+        self.assertFalse(ISAMPCAgent._parse_slack_cap("acc_isampc_amin3.5_amax2_jlim2.5_jlimup5"))
+        self.assertFalse(ISAMPCAgent._parse_slack_cap("acc_isampc_slackcapx"))
+        self.assertEqual(ISAMPCAgent._parse_slack_l1_weight("acc_isampc_slackcap_l1slack1e6"), 1e6)
+        self.assertIsNone(ISAMPCAgent._parse_slack_l1_weight("acc_isampc_slackcap"))
+
+
 class TestPolicyString(unittest.TestCase):
     def test_acc_isampc_always_uses_the_iaimm_kf_predictor(self):
         self.assertEqual(ISAMPCAgent._parse_predictor_type("acc_isampc"), "iaimm_kf")
