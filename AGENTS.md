@@ -83,6 +83,35 @@ Against P1 on the NGSIM final set (paired, SE in brackets; `replay_out/onerow_20
   - Fair j_max: 0.80 / 0.68 / 0.30 for the design, 0.92 / 0.72 / 0.49 for ISA-MPC, 5.64 / 5.22 / 4.14 for PC-ACC.
   - Critical T_rec (runs not recovered): 1.18 s (1) for the design, 1.61 (25) for ISA-MPC, 1.02 (126) for PC-ACC.
 - **Still pending:** the 30 m other-entry rule, which drops both cut-ins of a double cut-in; and the replay default switch to `aheadonly`.
+- (updated 2026-11-13 evening: superseded by the final set v3 below.)
+
+**NGSIM final set v3: cut-in events (2026-11-13 evening, maintainer: consecutive cut-ins are one run, each cut-in scored for its own car; no sampling).**
+- **Rules** (`replay_out/finalset_v3_20261113/select_v3.py`; thesis text `paper/notes/scenario_extraction_ngsim.tex`):
+  - v2's rules 1–6 are unchanged. The isolation rule no longer drops cut-ins, and there is no sampling.
+  - **Neighbouring cut-in:** another vehicle that enters within 30 m ahead and becomes the ego's lead.
+  - Each cut-in is scored in [max(f0, previous cut-in), min(f1, next cut-in − 1)].
+  - Cut-ins of one ego whose episodes overlap are simulated in one run, from the first warm-up to the last t_cross + 5 s.
+  - dt_ant is NaN with a previous neighbouring cut-in, or when the cutter is not the run's TV.
+  - No-cut-ins are unchanged and keep the isolation rule.
+- **Replay input:** explicit windows through the episode table: `Episode.WINDOW_FIELDS` (`win_f0`, `win_f1`) in `NGSIM_EPISODES_TABLE=.../finalset_v3_20261113/episodes_table_v3.csv`.
+  - Unset or NaN windows are bit-identical to before.
+  - Gates: `finalset_v2_20261113/winoverride_gate/`, and the repro in `run_v3.log`.
+- **Set:**
+  - 650 cut-ins in 614 runs (31 runs hold 2–4 cut-ins, 67 cut-ins).
+  - 649 are scored: critical 358, mild 291. One has no frame after t_cross.
+  - Plus 400 no-cut-ins.
+  - 108 runs were new; the rest come from the v2 roots.
+  - Roots: `fin_v3_design_aheadonly_20261113`, `fin_v3_isampc_q0055_20261113`, `fin_v3_pcacc_paper_20261113`.
+- **Metrics per cut-in:** computed on an event view of the run's ticks (`event_view.py`: truncated at w1, scored from w0), with `ngsim_metrics` unchanged.
+  - Scripts: `tables_v3.py`, `main_v3.py`.
+  - Equivalence test: v2's 535 episodes as events reproduce `tables_v2.pkl` / `main_v2.pkl` exactly (`test_v3/`).
+- **Main table** (`main_v3.md`): 940 = critical 304, mild 252, no cut-in 384, after excluding 102 (side overlap inside the cut-in's window in any arm's run).
+- **On it** (critical / mild / no cut-in):
+  - Contacts: none for the design. ISA-MPC has 9 / 1 / 8, all rear-end. PC-ACC has none.
+  - δ_max (critical / mild): 20.9 / 16.4 % for the design, 37.7 / 28.4 for ISA-MPC, 34.5 / 32.4 for PC-ACC.
+  - Fair j_max: 0.82 / 0.71 / 0.30 for the design, 0.91 / 0.76 / 0.49 for ISA-MPC, 5.54 / 5.42 / 4.14 for PC-ACC.
+  - Critical T_rec (not recovered): 1.17 s (1) for the design, 1.62 (26) for ISA-MPC, 1.06 (152) for PC-ACC.
+- **Still pending:** the replay default switch to `aheadonly`.
 
 How the replay was switched and gated, and how to reproduce P1 and the other roots of 2026-11-12: `docs/agents/ngsim_replay_defaults.md` (2026-11-12) and `replay_out/onerow_20261112/adopt_snap160.log`. The path to this design (w sweep, zσ, `nocap`, `snap`): `docs/agents/design_history.md` (2026-11-12).
 
