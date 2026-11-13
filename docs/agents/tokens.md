@@ -1301,4 +1301,13 @@ They are separate ego policies, not `acc_nair_smpc` tokens; `run_all_scenarios.p
     - phantom_ref 0.252 → 0.626;
     - runs with a_min ≤ −2 in no cut-in 18 → 65;
     - 16 fallback runs (18 ticks; the QP fails in about 11 ms, also with 1 worker; cause not investigated).
+  - Round 2 (2026-11-13 evening, maintainer), `cap.sh run2`, `main_cap2.md`:
+    - The same ISA string at ξ 5,500, the design's ratio of ξ to its time-gap slack weight (1e6 / 10 × 0.055).
+      - It is not the same as ξ 1e6: of 1,014 runs, 290 differ in the command by ≥ 0.1 m/s² (`cmp_isa55_vs_isa1e6.txt`).
+      - On the fixed 940 set, against ξ 1e6 (critical / mild / no cut-in): fair j_max −0.13 / −0.12 / −0.11; phantom_ref 0.626 → 0.518.
+      - δ_max and floor breaches are within SE; 18 fallback runs.
+    - The design with the cap and the mean-trajectory entry (`occin0.1` dropped as well as `nocap`), against the cap with `occin`:
+      - critical δ_max +0.7 %p (SE 0.2), floor breaches 7 → 10;
+      - mild fair j_max −0.08;
+      - no cut-in the same.
   - Not adopted; the maintainer's decision.
