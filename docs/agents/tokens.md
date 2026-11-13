@@ -1287,3 +1287,18 @@ They are separate ego policies, not `acc_nair_smpc` tokens; `run_all_scenarios.p
   - the replay builds it from the fork's config (a ∈ [−3, 2], |j| ≤ 5) unless `NGSIM_ISAMPC_POLICY` names a string with them (since the night of 2026-11-11, `iso_limits_20261111/replay_edits.patch`)
   - its default is `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5` since 2026-11-12 (§10).
   - It has no emergency mode: its braking never goes beyond `a_min`
+- **`slackcap`, with `l1slack<w>`** (2026-11-13, maintainer's experiment "ISA-MPC and Proposed both with the short's upper bound τv"; `765de6b`):
+  - `slackcap` bounds the standoff slack by the time gap, ρ_k ≤ τ v_k, so L + d0 is hard, as the design's onerow cap.
+  - `l1slack<w>` (only with `slackcap`) adds the row's exact-penalty emergency slack ξ ≥ 0 priced w·Σξ, as the design's. Without ξ the cap alone makes a close lead infeasible, and ISA falls back.
+  - Off by default, and the QP is then built as before: 5 reproduction episodes were bit-identical to the v3 ISA root (`replay_out/cap_20261113/cap.log`).
+  - The replay reads both from `NGSIM_ISAMPC_POLICY` (`baselines.py`, backup `replay_backup_20261113_pre_isacap/`).
+  - Run on the final set v3 as `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5_slackcap_l1slack1e6`, next to the design without `nocap` (`replay_out/cap_20261113/`; `main_cap.md` on the fixed 940-event main set, made by `tables_v3.py` / `main_v3.py --arm-set cap --keep-csv episodes_main_v3.csv`).
+  - Result against ISA as published (critical / mild / no cut-in):
+    - rear-end contacts 9 / 1 / 8 → 0 / 0 / 0;
+    - δ_max −10.7 / −6.3 %p;
+    - floor breaches 44 / 23 → 19 / 8;
+    - fair j_max +0.60 / +0.61 / +0.55;
+    - phantom_ref 0.252 → 0.626;
+    - runs with a_min ≤ −2 in no cut-in 18 → 65;
+    - 16 fallback runs (18 ticks; the QP fails in about 11 ms, also with 1 worker; cause not investigated).
+  - Not adopted; the maintainer's decision.

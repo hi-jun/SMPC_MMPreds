@@ -322,6 +322,7 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `nocap` | With `onerow`: no upper bound on the shortfall, so no row is hard | **design** |
 | `snap<r>` | With `jinput`: cost 3·P_j·r·Σ(j_k − j_{k−1})² on the jerk's changes, j_{−1} from the issued commands | **design** (`snap160`) |
 | `aheadonly` | ISA-MPC's obstacle rule: only a vehicle whose current position is at or ahead of the ego's is an obstacle; one beside or behind never leads | decided 2026-11-13; final set run (every metric equal or better); the design row of the NGSIM main table (§1); not in the replay default yet |
+| `slackcap`, `l1slack<w>` (ISA-MPC, `acc_isampc_…`) | ISA-MPC's standoff slack bounded by τv (L + d0 hard), with the design's exact-penalty emergency slack | experiment 2026-11-13 (`replay_out/cap_20261113/`, with the design without `nocap`); not adopted |
 
 Matching is by substring. The predictor is chosen in the order `const_lead` > `iaimm` > `lstm_vel` > `lstm` > `stdan_vel` > `stdan_3int` > synthetic, and any `_ol` in the string selects the open-loop variant.
 
