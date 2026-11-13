@@ -48,6 +48,21 @@ Against P1 on the NGSIM final set (paired, SE in brackets; `replay_out/onerow_20
 - Contacts are side entries only, none rear-end (critical / mild 13 / 12 → 14 / 12); among the new ones the TV side entry ds4_v3230 (mild) at −0.33 m, where P1 kept 3.34 m.
 - Not run in CARLA.
 
+**NGSIM main table (2026-11-13, maintainer: "824개 겹침 제외 집합을 주 표로 쓰자").**
+- **Episode set:** 824 episodes: critical cut-in 183, mild 257, no cut-in 384 (`replay_out/main824_20261113/episodes_main824.csv`).
+- **How the set is made:** start from the final set's 882 scored episodes. Drop the 58 (`excluded_main824.csv`) in which a vehicle that changed lanes into the ego lane overlapped the ego longitudinally on a scored tick, in the run of any of the three table arms.
+  - The test is results.csv `n_side_ovl_scored` > 0. Every side contact is such an overlap.
+  - The three arms are the design, ISA-MPC 0.055 and PC-ACC as published.
+  - Why: the logged vehicles do not react to the simulated ego, so such an entry cannot happen in closed loop. The rule drops the episode for every arm, so the comparison stays paired.
+  - The rule was chosen after seeing the results. Report the rule, the count and the full-set table with it.
+- **Design row:** the final design + `aheadonly`, root `fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_aheadonly_20261113`. The replay default is not switched yet (pending, below).
+- **Table:** `main824.md`, made by `main824.py`: the per-run values of the table pickles, and `ngsim_metrics.fair_jerk_metrics`, the fair column for every arm.
+- **On it** (critical / mild / no cut-in):
+  - Contacts: the design has none. ISA-MPC has 3 / 3 / 8, all rear-end. PC-ACC has none.
+  - δ_max (critical / mild): 18.1 / 11.5 % for the design, 38.8 / 22.2 for ISA-MPC, 34.1 / 32.2 for PC-ACC.
+  - Fair j_max: 0.84 / 0.60 / 0.30 for the design, 0.93 / 0.65 / 0.49 for ISA-MPC, 5.52 / 4.76 / 4.14 for PC-ACC.
+  - Against ISA-MPC, the design is worse in two cells: v_avg −0.12 m/s (SE 0.03) without a cut-in, and Δt_ant −0.20 s (0.09) in mild cut-ins.
+
 How the replay was switched and gated, and how to reproduce P1 and the other roots of 2026-11-12: `docs/agents/ngsim_replay_defaults.md` (2026-11-12) and `replay_out/onerow_20261112/adopt_snap160.log`. The path to this design (w sweep, zσ, `nocap`, `snap`): `docs/agents/design_history.md` (2026-11-12).
 
 **Previous NGSIM design: P1** (updated 2026-11-12 night: it read "NGSIM design: P1, the NGSIM replay's default."; P1 was both from 2026-11-12 until that night; `NGSIM_POLICY_DOPT=_dopt3lkr` with its tail as `NGSIM_POLICY_TAIL` reproduces it). The string is `policy_example` of `results/ngsim_lambda_cal_20261019/replay_out/fin_npw3_iso_side_20261112/run_info.json` (λ = 0; the second-to-last row of §4's current-design table with `ctx<λ>` = `ctx0`; pointer updated 2026-11-12 night: it read "the last row" until the final design's row was added):
@@ -101,8 +116,8 @@ What the token groups do (details §4, full records `docs/agents/tokens.md`) (up
 - `entrypass9` in place of `entrypass0` (the CARLA string; entrypass left the NGSIM design on 2026-11-11): decision pending (`replay_out/entrypass9_20261101/result.md`).
 - The ds3_v1780 cut-in contact of the calibrated designs (it stays in NL): the maintainer's review before the paper's tables switch (`replay_out/pcal_cvar_20261106/result.md`, `replay_out/nps_lk_20261110/result.md`).
 - CARLA: whether `jinput`, `safelayer` and `entrant2` (and the NGSIM design as a whole) enter the CARLA design.
-- `aheadonly` (2026-11-13): decided by the maintainer (obstacles are only the vehicles ahead of the ego, as in ISA-MPC) and implemented (793aba3, `docs/agents/tokens.md`); pending: the final-set run and the replay default switch. The CRC calibration of the BCTS shift λ (`replay_out/bcts_shift_20261112/`) runs on the replay default, so its grid is to be re-run after the switch.
-- Side entries of the open-loop replay (2026-11-13, analysis only): of the final root's 43 side entries (40 runs), 19 are TVs that entered ahead of the logged human but beside a simulated ego 2.5–25 m ahead of the human, and 24 (21 not the TV) entered behind or beside the human, 23 of them beside an ego 2.4–23 m behind it. A time-varying set speed equal to the logged speed was judged against: it would bind on ≥ 1 s in 36 % of cut-ins before t_cross and 62 % of no-cut-ins. The candidates are a gap-acceptance hold for entering vehicles, the start at the logged speed, or reporting only; the choice is the maintainer's.
+- `aheadonly` (2026-11-13): decided by the maintainer (obstacles are only the vehicles ahead of the ego, as in ISA-MPC) and implemented (793aba3, `docs/agents/tokens.md`); pending: the final-set run and the replay default switch. The CRC calibration of the BCTS shift λ (`replay_out/bcts_shift_20261112/`) runs on the replay default, so its grid is to be re-run after the switch. (updated 2026-11-13: the final set ran, `replay_out/aheadonly_20261113/tables_aheadonly.md`. Against the final design every metric is equal or better, and no contact or floor breach appears only with it. It is the design row of the NGSIM main table, above. Still pending: the replay default switch, and the CRC grid re-run after it.)
+- Side entries of the open-loop replay (2026-11-13, analysis only): of the final root's 43 side entries (40 runs), 19 are TVs that entered ahead of the logged human but beside a simulated ego 2.5–25 m ahead of the human, and 24 (21 not the TV) entered behind or beside the human, 23 of them beside an ego 2.4–23 m behind it. A time-varying set speed equal to the logged speed was judged against: it would bind on ≥ 1 s in 36 % of cut-ins before t_cross and 62 % of no-cut-ins. The candidates are a gap-acceptance hold for entering vehicles, the start at the logged speed, or reporting only; the choice is the maintainer's. (updated 2026-11-13: decided by the maintainer: the main table drops the side-overlap episodes, "NGSIM main table" above; the replay is unchanged.)
 - Smaller open choices (R1, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing): §10 (updated 2026-11-12: `floorrisk0.3` is moot, `floorrisk<ε>` with `floorhyp` has been in the NGSIM design since 2026-11-10, at ε 0.1 since NL) (updated 2026-11-12 night: P1 had `floorrisk0.1`; the final design has no floor row).
 
 The record of every design decision since 2026-10-17 (D-opt's definition, each adoption with its measured effect, every older design string): `docs/agents/design_history.md`.
@@ -256,7 +271,7 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `zconf<β>` | With `onerow`: the row's σ term z·σ, z = Φ⁻¹(min(p, β)), p the cell's own hypothesis probability | **design** (`zconf0.95`) |
 | `nocap` | With `onerow`: no upper bound on the shortfall, so no row is hard | **design** |
 | `snap<r>` | With `jinput`: cost 3·P_j·r·Σ(j_k − j_{k−1})² on the jerk's changes, j_{−1} from the issued commands | **design** (`snap160`) |
-| `aheadonly` | ISA-MPC's obstacle rule: only a vehicle whose current position is at or ahead of the ego's is an obstacle; one beside or behind never leads | decided 2026-11-13; implemented, not in the replay default yet (final set not run) |
+| `aheadonly` | ISA-MPC's obstacle rule: only a vehicle whose current position is at or ahead of the ego's is an obstacle; one beside or behind never leads | decided 2026-11-13; final set run (every metric equal or better); the design row of the NGSIM main table (§1); not in the replay default yet |
 
 Matching is by substring. The predictor is chosen in the order `const_lead` > `iaimm` > `lstm_vel` > `lstm` > `stdan_vel` > `stdan_3int` > synthetic, and any `_ol` in the string selects the open-loop variant.
 
@@ -498,7 +513,7 @@ Full text: `docs/agents/open_items.md`; the NGSIM replay's default history: `doc
     - R1 (a hard first-step stopping row), `entrypass9`, `termcost`, `floorrisk0.3`, q_v, the entry-drift fixes, the PC-ACC appendix presentation, the t_comp timing (updated 2026-11-12: `entrypass9` matters only for the CARLA string, entrypass having left the NGSIM design on 2026-11-11; `floorrisk0.3` is moot, `floorrisk<ε>` with `floorhyp` being in the NGSIM design since 2026-11-10).
 - **Entry timing of cut-in hypotheses.** Open loop, the TV leads a cell at its real entry step on only 31–59 % of pre-entry ticks; not fixed (`replay_out/entry_coverage_20261104/result.md`).
 - **Calibrated lane-change probabilities.** `pcal` (2026-11-05) was superseded by `bcts` (2026-11-06 evening); open: the maintainer's review of the ds3_v1780 contact before the paper's tables switch.
-- **Side entries (ghosts).** Since 2026-11-12 a lane change into the ego lane beside the ego stays live (`NGSIM_SIDE_ENTRY=live`); `ghost` gives the old rule (`replay_out/side_live_20261112/`).
+- **Side entries (ghosts).** Since 2026-11-12 a lane change into the ego lane beside the ego stays live (`NGSIM_SIDE_ENTRY=live`); `ghost` gives the old rule (`replay_out/side_live_20261112/`). (updated 2026-11-13: the NGSIM main table drops every episode with a longitudinal side overlap in any table arm's run, §1 "NGSIM main table".)
 - **Floor breach on NGSIM.** Bumper gap < 3 m to that tick's lead after t_cross, whichever vehicle it is (a definition, settled).
 - **Computation time.** Quote only single-process timing (`replay_out/timing_noload_20261103/result.md`); whether the paper's t_comp column takes it is the maintainer's decision.
 - **NGSIM replay plant lag.** `NGSIM_EGO_LAG_TAU` (default 0, the ideal ego); `alag` runs' standstill fallback on the ideal plant is not fixed, by the maintainer's decision.

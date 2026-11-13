@@ -1191,7 +1191,16 @@ Braking-distance safety bound (experimental)
 - **Smoke result (14 episodes, not a measurement):**
   - 12 unchanged, and ds4_v3215 (no cut-in) a_min −0.15 → −0.09.
   - ds1_v2379: the TV is excluded until 0.1 s before t_cross; braking starts +1.0 s after t_cross instead of −1.8 s, then still at the falling jerk bound (a_cmd min −3.47 against −3.42); the open-loop TV still enters beside the ego, so the side contact stays.
-- **Status:** decided by the maintainer on 2026-11-13; implemented (793aba3); off by default and not in the replay default yet (the final set not run); not run in CARLA.
+- **Final set (2026-11-13):** root `fin_npw3_iso_side_onerow_w10_z95_nocap_snap160_aheadonly_20261113` (889 episodes on the workstation, 683 s; 0 errors, 1 fallback run as the final root; `run_final_aheadonly.{sh,log}`). Tables `tables_aheadonly.md` (a copy of `onerow_20261112/tables_onerow_snap.py`; its final-design and ISA rows equal the old pickle on 56 columns).
+  - Paired against the final design over 882 episodes (SE in brackets):
+    - critical: j_max −0.05 (0.02), δ_max −3.2 %p (1.4), floor breaches 22 → 17, contacts 14 → 10;
+    - mild: j_max −0.04 (0.01), contacts 12 → 11;
+    - no cut-in: contacts 5 → 2, phantom_ep −0.025 (0.008), v_avg +0.05 m/s (0.02);
+    - T_rec +0.04 s (0.03), within SE.
+  - No contact and no floor breach appears only with the token. The 8 contacts it removes are all side entries, and in its runs the ego was clear of those vehicles at that frame.
+  - Side-overlap runs went 15 / 16 / 7 → 14 / 15 / 5, and TV side entries stayed 8 / 14. My prediction that the token would add side entries was wrong.
+  - The lead-only loop was not re-run, because the token cannot drop its single target, the in-lane lead ahead.
+- **Status:** decided by the maintainer on 2026-11-13; implemented (793aba3); final set run (2026-11-13), the design row of the NGSIM main table (AGENTS.md §1); off by default and not in the replay default yet; not run in CARLA.
 
 ## External baselines
 
