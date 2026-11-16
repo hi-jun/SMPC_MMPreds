@@ -366,6 +366,22 @@ class ACCNairSMPCAgent(object):
         self.controller_config.one_row_no_cap = self._parse_one_row_no_cap(smpc_config)
         if self.controller_config.one_row_no_cap and not self.controller_config.one_row:
             raise ValueError("nocap needs onerow")
+        # tbmiqp<w> (2026-11-16): the branching step of each cut-in hypothesis chosen by the MIQP
+        self.controller_config.branch_time_miqp_weight = self._parse_branch_time_miqp(smpc_config)
+        if self.controller_config.branch_time_miqp_weight is not None:
+            if self.predictor_type != "stdan_3int":
+                raise ValueError("tbmiqp<w> needs the stdan_3int predictor (its scenarios' lead keys)")
+            if not (self.controller_config.jerk_input and self.controller_config.one_row):
+                raise ValueError("tbmiqp<w> needs jinput (its big-M is the jerk bounds' width) and onerow")
+            conflicts = [token for token, present in (
+                ("passmiqp<m>", self.pass_miqp_margin is not None),
+                ("passnocap", self.pass_no_cap),
+                ("cvar<eps>_<c>", cutin_cvar is not None),
+                ("branchdec<a>", self.branch_decision_brake is not None),
+                ("best_mode", self.best_mode_only),     # one scenario: nothing to branch
+                ("with_k", self.controller_config.optimize_k)) if present]
+            if conflicts:
+                raise ValueError("tbmiqp<w> chooses the branching step itself; not with " + ", ".join(conflicts))
         self.controller_config.__post_init__()
         self.controller = NairACCSMPC(self.controller_config)
         # safelayer (2026-11-02): PC-ACC's safety layer around the MPC's command, on PC-ACC's measured lane membership
@@ -832,6 +848,16 @@ class ACCNairSMPCAgent(object):
                     "accel_max": float(solution.pass_accel_max),
                     "solve_s": float(solution.pass_solve_s),
                     "iter_count": int(solution.pass_iter_count),
+                }
+            if self.controller_config.branch_time_miqp_weight is not None:
+                # tbmiqp<w>: per vehicle id, P_cut, k_on (today's split step), slot and the chosen t_b; the MIQP's
+                # status ("" plain QP, "today_rule"), solver time and penalty
+                self.policy_log[-1]["branch_time_miqp"] = {
+                    "decisions": list(solution.branch_time_decisions or []),
+                    "status": str(solution.branch_time_status),
+                    "solve_s": float(solution.branch_time_solve_s),
+                    "penalty": float(solution.branch_time_penalty),
+                    "today_exact": bool(solution.branch_time_today_exact),
                 }
             if self.controller_config.failsafe_branch:
                 # safebranch: the fail-safe branch of this solve (NairACCSolution.failsafe_*)
@@ -1988,6 +2014,21 @@ class ACCNairSMPCAgent(object):
         ``w P_j short^2`` (``NairACCConfig.one_row_no_cap``), 2026-11-12. Whole-token match (``passnocap`` is not it).
         """
         return re.search(r"(?:^|_)nocap(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_branch_time_miqp(smpc_config):
+        """Read ``tbmiqp<w>`` from the config string (None = off).
+
+        The step from which the scenarios that differ in a vehicle's cut-in hypothesis may use different jerks is the
+        MIQP's choice, penalised ``w P (N - t_b)`` per vehicle (``NairACCConfig.branch_time_miqp_weight``), 2026-11-16.
+        Whole-token match; ``tbmiqp100`` reads as 100, ``tbmiqp1e4`` as 1e4, ``tbmiqp0`` as 0; the weight is required.
+        """
+        match = re.search(r"(?:^|_)tbmiqp([0-9]*\.?[0-9]+(?:e[0-9]+)?)(?=_|$)", str(smpc_config))
+        if match is None:
+            if re.search(r"(?:^|_)tbmiqp", str(smpc_config)) is not None:
+                raise ValueError("tbmiqp<w> needs its weight w >= 0, e.g. tbmiqp100")
+            return None
+        return float(match.group(1))
 
     @staticmethod
     def _parse_safety_layer(smpc_config):

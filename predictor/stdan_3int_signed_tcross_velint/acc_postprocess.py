@@ -1839,6 +1839,7 @@ def build_multitarget_lead_prediction(
         lead_mode_probability=lead_mode_probability,
         k_group_map=k_group_map,
         k_group_names=k_group_names,
+        lead_keys=[list(keys) for keys in effective_lead_keys_by_scenario],    # tbmiqp reads them
         **pass_fields,
     )
     return prediction, metadata

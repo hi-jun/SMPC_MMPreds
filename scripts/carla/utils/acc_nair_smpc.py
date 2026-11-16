@@ -21,6 +21,7 @@ earlier SciPy/SLSQP prototype, which was too slow for receding-horizon use.
 import copy
 from dataclasses import dataclass
 import glob
+import itertools
 import os
 import re
 import time
@@ -446,6 +447,19 @@ class NairACCConfig:
     #: ``pass_miqp_margin``.
     cutin_cvar_risk: Optional[float] = None
     cutin_cvar_bound: Optional[float] = None
+    #: ``tbmiqp<w>`` (2026-11-16, maintainer; Wang, He & Althoff, IV 2026): the step ``t_b^i`` from which the scenarios
+    #: that differ in vehicle i's cut-in hypothesis may use different jerks becomes the optimiser's choice, one MIQP per
+    #: tick, in place of today's split at the first step that hypothesis leads.  Per vehicle a monotone binary
+    #: ``delta^i_k`` (k = 1..N-1, ``delta^i_{k+1} >= delta^i_k``), ``t_b^i = min{k : delta^i_k = 1}`` (N without one); a
+    #: pair of scenarios whose lead keys differ only through cut-in hypotheses (``branch_time_structure``) keeps
+    #: ``|j_a,k - j_b,k| <= M_k sum_{i in D(a,b)} delta^i_k``, M_k the widest jerk difference the step's bounds allow
+    #: (``_branch_time_bigm``), and every other pair today's rule.  The objective gains ``w sum_i P^i sum_k delta^i_k`` =
+    #: ``w sum_i P^i (N - t_b^i)``, ``P^i`` the probability of vehicle i's cut-in hypothesis (``lead_mode_probability``,
+    #: the gate's and zconf's p).  The rows, the price and the reference are unchanged; at most ``BRANCH_TIME_SLOTS``
+    #: vehicles get binaries, the rest keep today's split.  A tick without such a vehicle solves the plain QP bit for bit
+    #: (a separate cache entry).  ``None`` is off.  Needs ``jerk_input`` with a jerk limit and ``one_row``; not with
+    #: ``pass_miqp_margin``, ``cutin_cvar_risk``, ``optimize_k`` or ``failsafe_branch``.
+    branch_time_miqp_weight: Optional[float] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -631,6 +645,19 @@ class NairACCConfig:
                     or self.pass_miqp_margin is not None):
                 raise ValueError("cutin_cvar_risk (cvar<eps>_<c>) is not implemented with relbrake<b>, "
                                  "floorrisk<eps> or passmiqp<m>")
+        if self.branch_time_miqp_weight is not None:
+            weight = float(self.branch_time_miqp_weight)
+            if not (np.isfinite(weight) and weight >= 0.0):
+                raise ValueError("branch_time_miqp_weight (tbmiqp<w>) must be finite and non-negative")
+            if not self.jerk_input or self.jerk_limit is None:
+                raise ValueError("branch_time_miqp_weight (tbmiqp<w>) needs jerk_input (jinput) with a jerk limit: "
+                                 "its big-M is the widest jerk difference the jerk bounds allow")
+            if not self.one_row:
+                raise ValueError("branch_time_miqp_weight (tbmiqp<w>) needs one_row (onerow), the design it was built on")
+            if (self.pass_miqp_margin is not None or self.cutin_cvar_risk is not None or self.optimize_k
+                    or self.failsafe_branch):
+                raise ValueError("branch_time_miqp_weight (tbmiqp<w>) is not implemented with passmiqp<m>, "
+                                 "cvar<eps>_<c>, with_k or safebranch")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -899,6 +926,10 @@ class MultimodalLeadPrediction:
     next_sigma_confidence: Optional[np.ndarray] = None
     next_lead_mode_lk: Optional[np.ndarray] = None
     next_lead_vehicle_ids: Optional[np.ndarray] = None
+    # ``tbmiqp``: per scenario the effective-lead key of every step 0..N, ``(vehicle_id, label, ...)`` or
+    # ``("inactive", ...)`` (``build_multitarget_lead_prediction``'s keys, from which the policy tree is built); None
+    # when the predictor does not say.
+    lead_keys: Optional[List[List[tuple]]] = None
 
     def __post_init__(self):
         self.means = np.asarray(self.means, dtype=float)
@@ -1030,6 +1061,10 @@ class MultimodalLeadPrediction:
                                           else np.asarray(self.next_lead_vehicle_ids, dtype=int))
             if self.pass_candidates is None:
                 self.pass_candidates = []
+        if self.lead_keys is not None:
+            self.lead_keys = [[tuple(key) for key in keys] for keys in self.lead_keys]
+            if len(self.lead_keys) != self.num_modes or any(len(keys) != horizon + 1 for keys in self.lead_keys):
+                raise ValueError("lead_keys must hold one key per scenario and step 0..N")
 
     @property
     def num_modes(self) -> int:
@@ -1111,6 +1146,14 @@ PASS_MIQP_FAR_BEHIND_M = 9.0
 #: m/s) and the sigma term; the pass row's is the vehicle's lead over the ego at its entry step (under 100 m).
 #: Gurobi's IntFeasTol (1e-5) leaks at most 5e-3 m through it.
 PASS_MIQP_BIG_M = 500.0
+#: ``tbmiqp``: the vehicles per tick with branching binaries (cached-MIQP slots), the most likely cut-ins first; a vehicle
+#: beyond them keeps today's split (its binaries fixed at the first step its cut-in cell leads).
+BRANCH_TIME_SLOTS = 3
+#: ``tbmiqp``: Gurobi's relative MIP gap for these solves: its default, and the tolerance the plain QP is solved to
+#: (``optimizer_ftol``).  Not Wang, He & Althoff's 1e-2 (``gurobi_optimizer.py``): the gap is relative to the objective
+#: Gurobi is given, which lacks the constant CasADi drops (the cost at zero deviation), so 1e-2 of it was 0.7 to 7 cost
+#: units on recorded ticks, the size of one step of the branch penalty.
+BRANCH_TIME_MIP_GAP = 1.0e-4
 
 
 @dataclass
@@ -1251,6 +1294,18 @@ class NairACCSolution:
     cvar_s_max: float = float("nan")
     cvar_slack_max: float = float("nan")
     cvar_short_max: float = float("nan")
+    #: ``tbmiqp<w>`` only: per vehicle whose cut-in hypothesis tells two scenarios apart (dicts: vehicle_id, labels,
+    #: p_cut, k_on = the first step its cut-in cell leads in any scenario (today's split step), slot (-1 beyond
+    #: ``BRANCH_TIME_SLOTS``: today's split kept), t_b = the branching step the solve used, -1 after a fallback or under
+    #: today's rule); the MIQP's Gurobi status ("" on a tick that solved the plain QP, "today_rule" on a tick whose
+    #: pairs would not stay transitive, which solves the plain QP), its solver wall time [s] (NaN without an MIQP),
+    #: the branch penalty ``w sum_i P^i (N - t_b^i)`` of the solution (NaN without one), and whether t_b = max(k_on, 1)
+    #: for every vehicle would reproduce today's groups exactly (``branch_time_structure``'s ``today_exact``).
+    branch_time_decisions: Optional[List[dict]] = None
+    branch_time_status: str = ""
+    branch_time_solve_s: float = float("nan")
+    branch_time_penalty: float = float("nan")
+    branch_time_today_exact: bool = True
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -1390,6 +1445,16 @@ class CachedFeedbackScalarChanceQP:
     cvar_slack_var: Any = None
     #: snap<r>: the jerk the plant got on the last tick; None without it
     prev_jerk_param: Any = None
+    #: tbmiqp<w>: the binaries delta[slot, k - 1] for k = 1..N-1 (created first, the first entries of the decision
+    #: vector), their bounds, each slot's P^i, the big-M per step, and per scenario pair (a, b, the slots that tell
+    #: them apart, the fixed relaxation per step: today's rule or a vehicle beyond the slots); None without it (the
+    #: plain QP, whose pairs keep sharing_params)
+    tb_delta_var: Any = None
+    tb_lo_param: Any = None
+    tb_hi_param: Any = None
+    tb_price_param: Any = None
+    tb_bigm_param: Any = None
+    tb_pair_params: Optional[List[Tuple[int, int, Any, Any]]] = None
 
 
 class OldACCReferenceAdapter:
@@ -1606,6 +1671,11 @@ class NairACCSMPC:
         # cached QP's solved eta, s and row slacks
         self._cvar_active = False
         self._cvar_plan = None
+        # tbmiqp<w>: this solve's branching structure (branch_time_structure), whether it takes the MIQP cache entry,
+        # and the MIQP's outcome (status, solver time, rounded binaries)
+        self._tb_plan = None
+        self._tb_active = False
+        self._tb_result = None
         # snap<r>: the issued command of the previous call and the jerk the plant got on the last tick
         self._last_issued_cmd = None
         self._prev_issued_jerk = 0.0
@@ -1921,6 +1991,10 @@ class NairACCSMPC:
             ),
             k_group_map=k_group_map,
             k_group_names=prediction.k_group_names,
+            lead_keys=(
+                None if prediction.lead_keys is None
+                else [keys[:self.config.horizon + 1] for keys in prediction.lead_keys]
+            ),
             **({} if prediction.pass_slot is None else dict(
                 pass_slot=prediction.pass_slot[:, :self.config.horizon + 1],
                 pass_candidates=prediction.pass_candidates,
@@ -2107,6 +2181,11 @@ class NairACCSMPC:
             raise ValueError(
                 "cutin_cvar_risk (cvar<eps>_<c>) is implemented only in the cached feedback QP, "
                 "and this configuration would solve elsewhere")
+        if self.config.branch_time_miqp_weight is not None and not self._can_use_cached_feedback_scalar_chance_qp(
+                open_loop, prediction):
+            raise ValueError(
+                "branch_time_miqp_weight (tbmiqp<w>) is implemented only in the cached feedback QP, "
+                "and this configuration would solve elsewhere")
         solve_start = time.perf_counter()
         timing_breakdown = {}
         x0 = np.asarray(ego_state, dtype=float)
@@ -2124,6 +2203,13 @@ class NairACCSMPC:
         self._cvar_active = bool(self.config.cutin_cvar_risk is not None and np.any(
             np.asarray(prediction.active_mask, dtype=bool) & np.isfinite(prediction.chance_confidence)))
         self._cvar_plan = None
+        # tbmiqp<w>: the MIQP only on a tick where a vehicle's cut-in hypothesis tells two scenarios apart and the pairs
+        # stay transitive; the plain QP otherwise (a separate cache entry)
+        self._tb_plan = None
+        self._tb_result = None
+        if self.config.branch_time_miqp_weight is not None and not open_loop:
+            self._tb_plan = branch_time_structure(prediction, layout.group_map)
+        self._tb_active = bool(self._tb_plan is not None and not self._tb_plan["today_rule"])
 
         try:
             if self._can_use_cached_open_loop_fixed_qp(open_loop, prediction):
@@ -2326,6 +2412,7 @@ class NairACCSMPC:
             speed_gap_tangent_error_max = float(np.max(tangent_error[prediction.active_mask]))
         pass_fields = self._pass_solution_fields(x0, prediction, x_nominal, u_nominal, chance_margin_values)
         failsafe_fields = self._failsafe_solution_fields(x0)
+        branch_time_fields = self._branch_time_solution_fields(solve_path == "fallback")
         timing_breakdown["solution_postprocess_s"] = time.perf_counter() - phase_start
 
         j_nominal = None
@@ -2411,7 +2498,65 @@ class NairACCSMPC:
             **failsafe_fields,
             **pass_fields,
             **cvar_fields,
+            **branch_time_fields,
         )
+
+    def _branch_time_solution_fields(self, fallback):
+        """``tbmiqp``: this solve's branching decisions as ``NairACCSolution`` fields (``branch_time_*``): every vehicle
+        of ``_tb_plan`` with its ``t_b`` (``N - sum_k delta_k`` of its slot's rounded binaries, today's split for a
+        vehicle beyond the slots, -1 after a fallback or under today's rule), the MIQP's status and solver time, and
+        the penalty ``w sum_i P^i sum_k delta^i_k``.  Empty without the token."""
+        if self.config.branch_time_miqp_weight is None:
+            return {}
+        plan, result = self._tb_plan, self._tb_result
+        if plan is None:
+            return {"branch_time_decisions": []}
+        horizon = self.config.horizon
+        delta = None if (fallback or result is None) else result.get("delta")
+        decisions = []
+        penalty = 0.0
+        for vehicle in plan["vehicles"]:
+            entry = dict(vehicle)
+            if plan["today_rule"] or delta is None:
+                entry["t_b"] = -1
+            elif vehicle["slot"] < 0:
+                entry["t_b"] = max(int(vehicle["k_on"]), 1)
+            else:
+                entry["t_b"] = int(horizon - np.sum(delta[vehicle["slot"]]))
+                penalty += float(vehicle["p_cut"]) * float(np.sum(delta[vehicle["slot"]]))
+            decisions.append(entry)
+        if plan["today_rule"]:
+            status = "today_rule"
+        else:       # an MIQP tick: Gurobi's status, or "error" when the solve failed before Gurobi ran
+            status = "error" if result is None else str(result["status"])
+        fields = {"branch_time_decisions": decisions, "branch_time_status": status,
+                  "branch_time_today_exact": bool(plan["today_exact"])}
+        if result is not None:
+            fields["branch_time_solve_s"] = float(result["solve_s"])
+        if delta is not None:
+            fields["branch_time_penalty"] = float(self.config.branch_time_miqp_weight) * penalty
+        return fields
+
+    def _branch_time_bigm(self):
+        """``tbmiqp``: M_k per step, the widest jerk difference two scenarios can have at step k under the bounds of
+        this solve: ``j_hi(k) - j_lo(k)``, the rising side's bound (``jlimup<x>``, or inside a recovery the envelope's
+        per-step bound, ``failsafe_recovery_envelope``: up to the fail-safe's jerk) plus the falling side's
+        ``jerk_limit`` (k >= 1; step 0 is shared).  With delta = 1 the coupling row is then never tighter than the jerk
+        rows themselves."""
+        horizon = self.config.horizon
+        j_hi = (np.full(horizon, self._jerk_up_value()) if self._recovery_bounds is None
+                else np.asarray(self._recovery_bounds[1], dtype=float))
+        return j_hi + self._jerk_limit_value()
+
+    def _branch_time_bounds(self, plan):
+        """``tbmiqp``: the bounds of the binaries delta[slot, k - 1], (lo, hi): free in {0, 1} on the slots ``plan``
+        uses, 0 on the others.  (A check can fix t_b per vehicle by overriding this.)"""
+        lo = np.zeros((BRANCH_TIME_SLOTS, self.config.horizon - 1))
+        hi = np.zeros((BRANCH_TIME_SLOTS, self.config.horizon - 1))
+        for vehicle in plan["vehicles"]:
+            if vehicle["slot"] >= 0:
+                hi[vehicle["slot"]] = 1.0
+        return lo, hi
 
     def _pass_solution_fields(self, x0, prediction, x_nominal, u_nominal, chance_margin_values):
         """``passmiqp``: the decisions of this solve (``_pass_result``) as ``NairACCSolution`` fields, the
@@ -2975,6 +3120,8 @@ class NairACCSMPC:
             None if self.config.jerk_limit_up is None else float(self.config.jerk_limit_up),
             None if self.config.failsafe_decel is None else float(self.config.failsafe_decel),
             None if self.config.failsafe_jerk is None else float(self.config.failsafe_jerk),
+            None if self.config.branch_time_miqp_weight is None else float(self.config.branch_time_miqp_weight),
+            self._tb_rows(),
             # last: tests/test_termcost.py and test_l1slack.py read it as key[-1]
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
@@ -2984,6 +3131,12 @@ class NairACCSMPC:
         rows (and without the price on those cells) is used; a tick without one solves the design's QP bit for bit
         (as ``_entrant_rows``).  A separate cache entry per case."""
         return bool(self.config.cutin_cvar_risk is not None and self._cvar_active)
+
+    def _tb_rows(self):
+        """``tbmiqp``: whether this solve branches by binaries (``_tb_plan`` with a vehicle and transitive pairs), in
+        which case the cached MIQP is used; any other tick solves the design's QP, the same problem bit for bit (as
+        ``_pass_rows``).  A separate cache entry per case."""
+        return bool(self.config.branch_time_miqp_weight is not None and self._tb_active)
 
     def _pass_rows(self):
         """``passmiqp``: whether this solve carries a candidate hypothesis, in which case the cached MIQP (the
@@ -3182,6 +3335,27 @@ class NairACCSMPC:
                 if int(layout.group_map[mode_a, step]) == int(layout.group_map[mode_b, step]):
                     share_mask[step] = 1.0
             opti.set_value(share_param, share_mask)
+        tb_initial = None
+        if problem.tb_delta_var is not None:
+            # tbmiqp: the binaries' bounds, each slot's P^i, M_k, and per pair the slots that tell it apart and its
+            # fixed relaxation; the binaries start from today's split (t_b at the first step the hypothesis leads)
+            plan = self._tb_plan
+            tb_lo, tb_hi = self._branch_time_bounds(plan)
+            price = np.zeros(BRANCH_TIME_SLOTS)
+            tb_initial = np.zeros((BRANCH_TIME_SLOTS, horizon - 1))
+            for vehicle in plan["vehicles"]:
+                if vehicle["slot"] >= 0:
+                    price[vehicle["slot"]] = float(vehicle["p_cut"])
+                    tb_initial[vehicle["slot"], max(int(vehicle["k_on"]), 1) - 1:] = 1.0
+            tb_initial = np.clip(tb_initial, tb_lo, tb_hi)
+            opti.set_value(problem.tb_lo_param, tb_lo)
+            opti.set_value(problem.tb_hi_param, tb_hi)
+            opti.set_value(problem.tb_price_param, price)
+            opti.set_value(problem.tb_bigm_param, self._branch_time_bigm())
+            for mode_a, mode_b, slots_param, free_param in problem.tb_pair_params:
+                slots, free = plan["pairs"][(mode_a, mode_b)]
+                opti.set_value(slots_param, slots)
+                opti.set_value(free_param, free)
         set_value_s = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
@@ -3205,6 +3379,8 @@ class NairACCSMPC:
             opti.set_initial(problem.cvar_slack_var, np.zeros(horizon + 1))
         if problem.pass_z_var is not None:
             opti.set_initial(problem.pass_z_var, pass_initial)
+        if problem.tb_delta_var is not None:
+            opti.set_initial(problem.tb_delta_var, tb_initial)
         if problem.fs_u_var is not None:
             # safebranch: the branch starts from scenario 0's warm start (its inputs are absolute values)
             opti.set_initial(problem.fs_u_var, np.asarray(reference.prev_u[0], dtype=float) + h_initial[0])
@@ -3241,7 +3417,17 @@ class NairACCSMPC:
         set_initial_s = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
-        sol = opti.solve()
+        try:
+            sol = opti.solve()
+        except Exception:
+            if problem.tb_delta_var is not None:
+                # tbmiqp: a non-optimal status falls back (the caller's except); its status and time go to the log
+                try:
+                    status = str(opti.stats().get("return_status", "unknown"))
+                except Exception:   # noqa: BLE001 - the solve's own exception is the one to raise
+                    status = "unknown"
+                self._tb_result = {"status": status, "solve_s": time.perf_counter() - phase_start, "delta": None}
+            raise
         stats = opti.stats()
         opti_solve_s = time.perf_counter() - phase_start
 
@@ -3288,6 +3474,12 @@ class NairACCSMPC:
             iter_count = stats.get("iter_count")
             self._pass_result = (np.round(np.asarray(sol.value(problem.pass_z_var), dtype=float).reshape(-1)),
                                  opti_solve_s, -1 if iter_count is None else int(iter_count))
+        if problem.tb_delta_var is not None:
+            # tbmiqp: the binaries, rounded (Gurobi's integrality tolerance is 1e-5), the status and the solver time
+            delta = np.round(np.asarray(sol.value(problem.tb_delta_var), dtype=float).reshape(
+                (BRANCH_TIME_SLOTS, horizon - 1)))
+            self._tb_result = {"status": str(stats.get("return_status", "unknown")), "solve_s": opti_solve_s,
+                               "delta": delta}
 
         optimized_eta_data = None
         if problem.optimized_eta:
@@ -3354,6 +3546,9 @@ class NairACCSMPC:
         # vector the solver's ``discrete`` flags refer to
         pass_rows = self._pass_rows()
         pass_z_var = opti.variable(PASS_MIQP_SLOTS) if pass_rows else None
+        # tbmiqp: the branching binaries delta[slot, k - 1] (k = 1..N-1) first, likewise (not with passmiqp)
+        tb_rows = self._tb_rows()
+        tb_delta_var = opti.variable(BRANCH_TIME_SLOTS, horizon - 1) if tb_rows else None
         h_var = opti.variable(num_modes, horizon)
         k_var = (
             [[opti.variable(NO) for _ in range(horizon)] for _ in range(k_group_capacity)]
@@ -3464,13 +3659,47 @@ class NairACCSMPC:
                 opti.subject_to(h_var[mode, step] >= a_lo(step) - prev_u_param[mode, step])
                 opti.subject_to(h_var[mode, step] <= self.config.a_max - prev_u_param[mode, step])
 
-        for mode_a in range(num_modes):
-            for mode_b in range(mode_a + 1, num_modes):
-                share_param = opti.parameter(horizon)
-                sharing_params.append((mode_a, mode_b, share_param))
-                for step in range(horizon):
-                    share = share_param[step]
-                    opti.subject_to(share * (h_var[mode_a, step] - h_var[mode_b, step]) == 0.0)
+        tb_lo_param = tb_hi_param = tb_price_param = tb_bigm_param = None
+        tb_pair_params = None
+        if tb_rows:
+            # tbmiqp: in place of the share rows, per pair and step k = 1..N-1 (step 0 is shared below)
+            #   |j_a,k - j_b,k| <= M_k (sum_slot slots_ab[slot] delta[slot, k - 1] + free_ab[k]),
+            # slots_ab the slots whose vehicle's cut-in hypothesis tells a and b apart (D(a, b)), free_ab today's rule
+            # (1 - share) for a pair that differs otherwise, or a vehicle beyond the slots at today's split; the jerks
+            # are prev_u + h (prev_u is the same in every row, so equal h is equal jerk); monotone binaries.  A free
+            # binary at 0 ties the two jerks within the feasibility tolerance of a row whose largest coefficient is
+            # M_k (up to 7.5e-4 m/s^3 measured, tests/test_tbmiqp.py), not exactly as a share row does
+            tb_lo_param = opti.parameter(BRANCH_TIME_SLOTS, horizon - 1)
+            tb_hi_param = opti.parameter(BRANCH_TIME_SLOTS, horizon - 1)
+            tb_price_param = opti.parameter(BRANCH_TIME_SLOTS)
+            tb_bigm_param = opti.parameter(horizon)
+            opti.subject_to(ca.vec(tb_delta_var) >= ca.vec(tb_lo_param))
+            opti.subject_to(ca.vec(tb_delta_var) <= ca.vec(tb_hi_param))
+            for slot in range(BRANCH_TIME_SLOTS):
+                for step in range(1, horizon - 1):
+                    opti.subject_to(tb_delta_var[slot, step] >= tb_delta_var[slot, step - 1])
+            tb_pair_params = []
+            for mode_a in range(num_modes):
+                for mode_b in range(mode_a + 1, num_modes):
+                    slots_param = opti.parameter(BRANCH_TIME_SLOTS)
+                    free_param = opti.parameter(horizon)
+                    tb_pair_params.append((mode_a, mode_b, slots_param, free_param))
+                    for step in range(1, horizon):
+                        relax = free_param[step]
+                        for slot in range(BRANCH_TIME_SLOTS):
+                            relax = relax + slots_param[slot] * tb_delta_var[slot, step - 1]
+                        difference = ((prev_u_param[mode_a, step] + h_var[mode_a, step])
+                                      - (prev_u_param[mode_b, step] + h_var[mode_b, step]))
+                        opti.subject_to(difference <= tb_bigm_param[step] * relax)
+                        opti.subject_to(-difference <= tb_bigm_param[step] * relax)
+        else:
+            for mode_a in range(num_modes):
+                for mode_b in range(mode_a + 1, num_modes):
+                    share_param = opti.parameter(horizon)
+                    sharing_params.append((mode_a, mode_b, share_param))
+                    for step in range(horizon):
+                        share = share_param[step]
+                        opti.subject_to(share * (h_var[mode_a, step] - h_var[mode_b, step]) == 0.0)
 
         first_input = prev_u_param[0, 0] + h_var[0, 0]
         for mode in range(1, num_modes):
@@ -3869,6 +4098,11 @@ class NairACCSMPC:
                     objective += weight * (self.config.r_a * input_error ** 2 + smooth)
                     previous_input = inputs[step]
 
+        if tb_rows:
+            # tbmiqp: the branch penalty w sum_slot P_slot sum_k delta[slot, k - 1] = w sum_i P^i (N - t_b^i)
+            for slot in range(BRANCH_TIME_SLOTS):
+                objective += (float(self.config.branch_time_miqp_weight) * tb_price_param[slot]
+                              * ca.sum2(tb_delta_var[slot, :]))
         opti.minimize(objective)
         p_opts, s_opts = self._gurobi_options()
         if pass_rows:
@@ -3876,6 +4110,12 @@ class NairACCSMPC:
             # branch-and-bound does not fan out under the replay's parallel load
             p_opts["discrete"] = [True] * PASS_MIQP_SLOTS + [False] * (int(opti.nx) - PASS_MIQP_SLOTS)
             s_opts["Threads"] = 1
+        if tb_rows:
+            # tbmiqp: likewise, its binaries first; one thread; the relative MIP gap BRANCH_TIME_MIP_GAP
+            n_binary = BRANCH_TIME_SLOTS * (horizon - 1)
+            p_opts["discrete"] = [True] * n_binary + [False] * (int(opti.nx) - n_binary)
+            s_opts["Threads"] = 1
+            s_opts["MIPGap"] = BRANCH_TIME_MIP_GAP
         opti.solver(self.config.solver_name, p_opts, s_opts)
 
         problem = CachedFeedbackScalarChanceQP(
@@ -3946,6 +4186,12 @@ class NairACCSMPC:
             cvar_s_var=cvar_s_var,
             cvar_slack_var=cvar_slack_var,
             prev_jerk_param=prev_jerk_param,
+            tb_delta_var=tb_delta_var,
+            tb_lo_param=tb_lo_param,
+            tb_hi_param=tb_hi_param,
+            tb_price_param=tb_price_param,
+            tb_bigm_param=tb_bigm_param,
+            tb_pair_params=tb_pair_params,
         )
         self._feedback_scalar_chance_qp_cache[key] = problem
         return problem
@@ -5183,6 +5429,122 @@ def terminal_cost_matrix(config):
     r_mat = np.array([[float(config.r_jerk)]])
     p_mat = solve_discrete_are(a_mat, b_mat, q_mat, r_mat)
     return p_mat - q_mat
+
+
+def _is_cutin_key(key):
+    """``tbmiqp``: whether an effective-lead key is a cut-in hypothesis's (labels ``cutin``, ``cutin/LK``, ...)."""
+    return len(key) >= 2 and key[0] != "inactive" and str(key[1]).startswith("cutin")
+
+
+def branch_time_structure(prediction, group_map, slots=BRANCH_TIME_SLOTS):
+    """``tbmiqp<w>``: the branching structure of one tick, from the scenarios' effective-lead keys (``lead_keys``,
+    steps 0..N) and today's shared groups ``group_map`` (J x N, ``PolicyVariableLayout.group_map``).
+
+    A scenario's cut-in hypotheses are the cut-in keys ``(vehicle, label)`` of its key sequence (one per vehicle), and
+    ``D(a, b)`` is the set of vehicles whose cut-in hypothesis differs between scenarios a and b (a different label,
+    or one of them has none).  A pair *differs only because of cut-in hypotheses* when, at every step where their keys
+    differ, at least one of the two keys is the cut-in key of a vehicle of ``D(a, b)``; such a pair shares its jerk at a
+    step k >= 1 iff no vehicle of ``D(a, b)`` has branched by k, and every other pair keeps today's rule (``group_map``).
+    With pairs of the first kind only, the shared relation at a step is "the same hypothesis on every branched vehicle",
+    an equivalence; otherwise it is checked for transitivity at every step k >= 1 and every pattern of the slot
+    vehicles' binaries (``_branch_time_transitive``), and a tick where it fails keeps today's rule for every pair
+    (``today_rule``; it solves the plain QP).
+
+    The vehicles of the first kind's ``D(a, b)`` are ranked by ``p_cut`` (the probability of the vehicle's cut-in
+    hypothesis, ``lead_mode_probability`` on its cells, summed over its distinct cut-in labels), then by ``k_on`` (the
+    first step its cut-in cell leads in any scenario, 0..N: today's split step), then by id; the first ``slots`` get
+    binaries, the rest keep today's split, ``delta_k = 1`` iff ``k >= max(k_on, 1)`` (step 0 is always shared).
+
+    Returns None when there is no such vehicle (no lead keys, one scenario, a horizon below 2, or no pair told apart by
+    a cut-in hypothesis): the tick solves the plain QP.  Otherwise a dict with ``vehicles`` (dicts: vehicle_id, labels,
+    p_cut, k_on, slot (-1 beyond the slots)), ``pairs`` ((a, b) for every a < b -> (slots_ab: 1 on the slots of
+    ``D(a, b)``, free_ab: per step the fixed relaxation, today's ``1 - share`` for a pair that differs otherwise and the
+    count of out-of-slot vehicles of ``D(a, b)`` split by then for the others)), ``today_rule``, ``n_other_pairs``, and
+    ``today_exact``: whether fixing every ``t_b`` at ``max(k_on, 1)`` reproduces today's groups exactly (not when a
+    vehicle's cut-in starts leading at different steps in different scenarios)."""
+    keys = prediction.lead_keys
+    num_modes = int(prediction.num_modes)
+    group_map = np.asarray(group_map, dtype=int)
+    horizon = int(group_map.shape[1])
+    if keys is None or num_modes < 2 or horizon < 2:
+        return None
+    hypotheses = []
+    for scenario_keys in keys:
+        hypothesis = {}
+        for key in scenario_keys:
+            if _is_cutin_key(key) and hypothesis.setdefault(int(key[0]), str(key[1])) != str(key[1]):
+                raise ValueError("tbmiqp: vehicle %d has two cut-in hypotheses in one scenario" % int(key[0]))
+        hypotheses.append(hypothesis)
+    told_apart, other = {}, []
+    for a in range(num_modes):
+        for b in range(a + 1, num_modes):
+            differing = {vid for vid in set(hypotheses[a]) | set(hypotheses[b])
+                         if hypotheses[a].get(vid) != hypotheses[b].get(vid)}
+            if all(key_a == key_b or (_is_cutin_key(key_a) and int(key_a[0]) in differing)
+                   or (_is_cutin_key(key_b) and int(key_b[0]) in differing)
+                   for key_a, key_b in zip(keys[a], keys[b])):
+                told_apart[(a, b)] = differing
+            else:
+                other.append((a, b))
+    vehicle_ids = sorted(set().union(*told_apart.values())) if told_apart else []
+    if not vehicle_ids:
+        return None
+    if prediction.lead_mode_probability is None:
+        raise ValueError("tbmiqp needs the cells' hypothesis probabilities (lead_mode_probability)")
+    vehicles = []
+    for vid in vehicle_ids:
+        k_on, label_p = None, {}
+        for mode in range(num_modes):
+            for step, key in enumerate(keys[mode]):
+                if _is_cutin_key(key) and int(key[0]) == vid:
+                    k_on = step if k_on is None else min(k_on, step)
+                    label_p.setdefault(str(key[1]), float(prediction.lead_mode_probability[mode, step]))
+        vehicles.append({"vehicle_id": vid, "labels": tuple(sorted(label_p)), "p_cut": float(sum(label_p.values())),
+                         "k_on": int(k_on), "slot": -1})
+    vehicles.sort(key=lambda vehicle: (-vehicle["p_cut"], vehicle["k_on"], vehicle["vehicle_id"]))
+    for rank, vehicle in enumerate(vehicles[:int(slots)]):
+        vehicle["slot"] = rank
+    slot_of = {vehicle["vehicle_id"]: vehicle["slot"] for vehicle in vehicles}
+    split_of = {vehicle["vehicle_id"]: max(vehicle["k_on"], 1) for vehicle in vehicles}
+    pairs = {}
+    for (a, b), differing in told_apart.items():
+        slots_ab, free_ab = np.zeros(int(slots)), np.zeros(horizon)
+        for vid in differing:
+            if slot_of[vid] >= 0:
+                slots_ab[slot_of[vid]] = 1.0
+            else:
+                free_ab[split_of[vid]:] += 1.0
+        pairs[(a, b)] = (slots_ab, free_ab)
+    for a, b in other:
+        pairs[(a, b)] = (np.zeros(int(slots)), (group_map[a] != group_map[b]).astype(float))
+    n_used = min(len(vehicles), int(slots))
+    today_rule = bool(other) and not _branch_time_transitive(num_modes, pairs, n_used, horizon)
+    # today's split per vehicle: the slot vehicles' binaries at max(k_on, 1), against today's groups
+    slot_split = np.array([split_of[vehicle["vehicle_id"]] for vehicle in vehicles[:n_used]], dtype=int)
+    today_exact = True
+    for (a, b), (slots_ab, free_ab) in pairs.items():
+        for step in range(1, horizon):
+            relax = free_ab[step] + float(np.dot(slots_ab[:n_used], (step >= slot_split).astype(float)))
+            if (relax == 0.0) != bool(group_map[a, step] == group_map[b, step]):
+                today_exact = False
+    return {"vehicles": vehicles, "pairs": pairs, "today_rule": today_rule, "n_other_pairs": len(other),
+            "today_exact": today_exact}
+
+
+def _branch_time_transitive(num_modes, pairs, n_slots, horizon):
+    """``tbmiqp``: whether the tied relation of ``branch_time_structure``'s pairs (a pair is tied at step k when its
+    relaxation ``free_ab[k] + slots_ab . bits`` is 0) is transitive at every step k >= 1 for every pattern ``bits`` of
+    the ``n_slots`` slot vehicles' binaries at that step (a reflexive, symmetric relation R is transitive iff
+    R o R is within R)."""
+    for step in range(1, horizon):
+        for bits in itertools.product((0.0, 1.0), repeat=int(n_slots)):
+            tied = np.eye(num_modes, dtype=bool)
+            for (a, b), (slots_ab, free_ab) in pairs.items():
+                tied[a, b] = tied[b, a] = (free_ab[step] + float(np.dot(slots_ab[:int(n_slots)], bits))) == 0.0
+            reach = (tied.astype(int) @ tied.astype(int)) > 0
+            if np.any(reach & ~tied):
+                return False
+    return True
 
 
 def _scenario_names(prediction):
