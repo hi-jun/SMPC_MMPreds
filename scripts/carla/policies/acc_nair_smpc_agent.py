@@ -366,8 +366,14 @@ class ACCNairSMPCAgent(object):
         self.controller_config.one_row_no_cap = self._parse_one_row_no_cap(smpc_config)
         if self.controller_config.one_row_no_cap and not self.controller_config.one_row:
             raise ValueError("nocap needs onerow")
-        # tbmiqp<w> (2026-11-16): the branching step of each cut-in hypothesis chosen by the MIQP
+        # tbmiqp<w> (2026-11-16): the branching step of each cut-in hypothesis chosen by the MIQP; tbfix<k>: fixed at k
+        # (tbmiqp's rows with the binaries fixed, no penalty)
         self.controller_config.branch_time_miqp_weight = self._parse_branch_time_miqp(smpc_config)
+        self.controller_config.branch_time_fixed = self._parse_branch_time_fixed(smpc_config)
+        if self.controller_config.branch_time_fixed is not None:
+            if self.controller_config.branch_time_miqp_weight is not None:
+                raise ValueError("tbfix<k> fixes the branching step that tbmiqp<w> would choose; not both")
+            self.controller_config.branch_time_miqp_weight = 0.0
         if self.controller_config.branch_time_miqp_weight is not None:
             if self.predictor_type != "stdan_3int":
                 raise ValueError("tbmiqp<w> needs the stdan_3int predictor (its scenarios' lead keys)")
@@ -2029,6 +2035,21 @@ class ACCNairSMPCAgent(object):
                 raise ValueError("tbmiqp<w> needs its weight w >= 0, e.g. tbmiqp100")
             return None
         return float(match.group(1))
+
+    @staticmethod
+    def _parse_branch_time_fixed(smpc_config):
+        """Read ``tbfix<k>`` from the config string (None = off).
+
+        Every cut-in hypothesis branches at step k (1..N; N = never; step 0 is always shared): ``tbmiqp``'s rows with
+        the binaries fixed and no penalty (``NairACCConfig.branch_time_fixed``), 2026-11-16.  Whole-token match;
+        ``tbfix2`` reads as 2; the step is required.
+        """
+        match = re.search(r"(?:^|_)tbfix([0-9]+)(?=_|$)", str(smpc_config))
+        if match is None:
+            if re.search(r"(?:^|_)tbfix", str(smpc_config)) is not None:
+                raise ValueError("tbfix<k> needs its step k (1..N), e.g. tbfix2")
+            return None
+        return int(match.group(1))
 
     @staticmethod
     def _parse_safety_layer(smpc_config):

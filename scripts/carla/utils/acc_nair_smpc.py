@@ -460,6 +460,12 @@ class NairACCConfig:
     #: (a separate cache entry).  ``None`` is off.  Needs ``jerk_input`` with a jerk limit and ``one_row``; not with
     #: ``pass_miqp_margin``, ``cutin_cvar_risk``, ``optimize_k`` or ``failsafe_branch``.
     branch_time_miqp_weight: Optional[float] = None
+    #: ``tbfix<k>`` (2026-11-16, maintainer): every ``t_b^i`` of ``tbmiqp``'s structure fixed at k (1..N; N = never
+    #: branch; step 0 is always shared), the vehicles beyond ``BRANCH_TIME_SLOTS`` included, in place of today's split
+    #: at the first step the hypothesis leads.  ``tbmiqp``'s rows with the binaries fixed by their bounds and solved as
+    #: continuous variables (a QP, no branch-and-bound), with ``branch_time_miqp_weight`` 0 (no branch penalty), which
+    #: ``tbfix<k>`` sets.  ``None`` is off.
+    branch_time_fixed: Optional[int] = None
     solver_name: str = "gurobi"
     gurobi_output: bool = False
     gurobi_time_limit: Optional[float] = None
@@ -658,6 +664,12 @@ class NairACCConfig:
                     or self.failsafe_branch):
                 raise ValueError("branch_time_miqp_weight (tbmiqp<w>) is not implemented with passmiqp<m>, "
                                  "cvar<eps>_<c>, with_k or safebranch")
+        if self.branch_time_fixed is not None:
+            if self.branch_time_miqp_weight is None or float(self.branch_time_miqp_weight) != 0.0:
+                raise ValueError("branch_time_fixed (tbfix<k>) runs tbmiqp's rows without the penalty: "
+                                 "branch_time_miqp_weight must be 0")
+            if int(self.branch_time_fixed) != self.branch_time_fixed or not 1 <= int(self.branch_time_fixed) <= self.horizon:
+                raise ValueError("branch_time_fixed (tbfix<k>) must be an integer step in 1..horizon")
         if self.eta_std_min < 0.0:
             raise ValueError("eta_std_min must be non-negative")
         if self.eta_std_max <= self.eta_std_min:
@@ -2208,7 +2220,8 @@ class NairACCSMPC:
         self._tb_plan = None
         self._tb_result = None
         if self.config.branch_time_miqp_weight is not None and not open_loop:
-            self._tb_plan = branch_time_structure(prediction, layout.group_map)
+            self._tb_plan = branch_time_structure(prediction, layout.group_map,
+                                                  fixed_split=self.config.branch_time_fixed)
         self._tb_active = bool(self._tb_plan is not None and not self._tb_plan["today_rule"])
 
         try:
@@ -2519,8 +2532,9 @@ class NairACCSMPC:
             entry = dict(vehicle)
             if plan["today_rule"] or delta is None:
                 entry["t_b"] = -1
-            elif vehicle["slot"] < 0:
-                entry["t_b"] = max(int(vehicle["k_on"]), 1)
+            elif vehicle["slot"] < 0:       # beyond the slots: today's split, or tbfix<k>'s step
+                entry["t_b"] = (max(int(vehicle["k_on"]), 1) if self.config.branch_time_fixed is None
+                                else int(self.config.branch_time_fixed))
             else:
                 entry["t_b"] = int(horizon - np.sum(delta[vehicle["slot"]]))
                 penalty += float(vehicle["p_cut"]) * float(np.sum(delta[vehicle["slot"]]))
@@ -2550,12 +2564,18 @@ class NairACCSMPC:
 
     def _branch_time_bounds(self, plan):
         """``tbmiqp``: the bounds of the binaries delta[slot, k - 1], (lo, hi): free in {0, 1} on the slots ``plan``
-        uses, 0 on the others.  (A check can fix t_b per vehicle by overriding this.)"""
+        uses, 0 on the others; with ``tbfix<k>`` fixed on the used slots, 1 from step k on (none for k = N).  (A check
+        can fix t_b per vehicle by overriding this.)"""
         lo = np.zeros((BRANCH_TIME_SLOTS, self.config.horizon - 1))
         hi = np.zeros((BRANCH_TIME_SLOTS, self.config.horizon - 1))
+        fixed = self.config.branch_time_fixed
         for vehicle in plan["vehicles"]:
             if vehicle["slot"] >= 0:
-                hi[vehicle["slot"]] = 1.0
+                if fixed is None:
+                    hi[vehicle["slot"]] = 1.0
+                else:
+                    lo[vehicle["slot"], int(fixed) - 1:] = 1.0
+                    hi[vehicle["slot"], int(fixed) - 1:] = 1.0
         return lo, hi
 
     def _pass_solution_fields(self, x0, prediction, x_nominal, u_nominal, chance_margin_values):
@@ -3122,6 +3142,7 @@ class NairACCSMPC:
             None if self.config.failsafe_jerk is None else float(self.config.failsafe_jerk),
             None if self.config.branch_time_miqp_weight is None else float(self.config.branch_time_miqp_weight),
             self._tb_rows(),
+            None if self.config.branch_time_fixed is None else int(self.config.branch_time_fixed),
             # last: tests/test_termcost.py and test_l1slack.py read it as key[-1]
             None if self.config.terminal_cost_scale is None else float(self.config.terminal_cost_scale),
         )
@@ -4110,8 +4131,9 @@ class NairACCSMPC:
             # branch-and-bound does not fan out under the replay's parallel load
             p_opts["discrete"] = [True] * PASS_MIQP_SLOTS + [False] * (int(opti.nx) - PASS_MIQP_SLOTS)
             s_opts["Threads"] = 1
-        if tb_rows:
-            # tbmiqp: likewise, its binaries first; one thread; the relative MIP gap BRANCH_TIME_MIP_GAP
+        if tb_rows and self.config.branch_time_fixed is None:
+            # tbmiqp: likewise, its binaries first; one thread; the relative MIP gap BRANCH_TIME_MIP_GAP (tbfix<k>: the
+            # binaries are fixed by their bounds and stay continuous, a QP with the plain QP's options)
             n_binary = BRANCH_TIME_SLOTS * (horizon - 1)
             p_opts["discrete"] = [True] * n_binary + [False] * (int(opti.nx) - n_binary)
             s_opts["Threads"] = 1
@@ -5436,7 +5458,7 @@ def _is_cutin_key(key):
     return len(key) >= 2 and key[0] != "inactive" and str(key[1]).startswith("cutin")
 
 
-def branch_time_structure(prediction, group_map, slots=BRANCH_TIME_SLOTS):
+def branch_time_structure(prediction, group_map, slots=BRANCH_TIME_SLOTS, fixed_split=None):
     """``tbmiqp<w>``: the branching structure of one tick, from the scenarios' effective-lead keys (``lead_keys``,
     steps 0..N) and today's shared groups ``group_map`` (J x N, ``PolicyVariableLayout.group_map``).
 
@@ -5461,7 +5483,11 @@ def branch_time_structure(prediction, group_map, slots=BRANCH_TIME_SLOTS):
     ``D(a, b)``, free_ab: per step the fixed relaxation, today's ``1 - share`` for a pair that differs otherwise and the
     count of out-of-slot vehicles of ``D(a, b)`` split by then for the others)), ``today_rule``, ``n_other_pairs``, and
     ``today_exact``: whether fixing every ``t_b`` at ``max(k_on, 1)`` reproduces today's groups exactly (not when a
-    vehicle's cut-in starts leading at different steps in different scenarios)."""
+    vehicle's cut-in starts leading at different steps in different scenarios).
+
+    ``fixed_split`` (``tbfix<k>``): the out-of-slot vehicles split at that step instead of ``max(k_on, 1)`` (the slot
+    vehicles' binaries are fixed there by ``NairACCSMPC._branch_time_bounds``); ``today_exact`` still compares today's
+    split."""
     keys = prediction.lead_keys
     num_modes = int(prediction.num_modes)
     group_map = np.asarray(group_map, dtype=int)
@@ -5506,23 +5532,29 @@ def branch_time_structure(prediction, group_map, slots=BRANCH_TIME_SLOTS):
         vehicle["slot"] = rank
     slot_of = {vehicle["vehicle_id"]: vehicle["slot"] for vehicle in vehicles}
     split_of = {vehicle["vehicle_id"]: max(vehicle["k_on"], 1) for vehicle in vehicles}
-    pairs = {}
-    for (a, b), differing in told_apart.items():
-        slots_ab, free_ab = np.zeros(int(slots)), np.zeros(horizon)
-        for vid in differing:
-            if slot_of[vid] >= 0:
-                slots_ab[slot_of[vid]] = 1.0
-            else:
-                free_ab[split_of[vid]:] += 1.0
-        pairs[(a, b)] = (slots_ab, free_ab)
-    for a, b in other:
-        pairs[(a, b)] = (np.zeros(int(slots)), (group_map[a] != group_map[b]).astype(float))
+
+    def pair_rows(split):
+        rows = {}
+        for (a, b), differing in told_apart.items():
+            slots_ab, free_ab = np.zeros(int(slots)), np.zeros(horizon)
+            for vid in differing:
+                if slot_of[vid] >= 0:
+                    slots_ab[slot_of[vid]] = 1.0
+                else:
+                    free_ab[split[vid]:] += 1.0
+            rows[(a, b)] = (slots_ab, free_ab)
+        for a, b in other:
+            rows[(a, b)] = (np.zeros(int(slots)), (group_map[a] != group_map[b]).astype(float))
+        return rows
+
+    today_pairs = pair_rows(split_of)
+    pairs = today_pairs if fixed_split is None else pair_rows({vid: int(fixed_split) for vid in split_of})
     n_used = min(len(vehicles), int(slots))
     today_rule = bool(other) and not _branch_time_transitive(num_modes, pairs, n_used, horizon)
     # today's split per vehicle: the slot vehicles' binaries at max(k_on, 1), against today's groups
     slot_split = np.array([split_of[vehicle["vehicle_id"]] for vehicle in vehicles[:n_used]], dtype=int)
     today_exact = True
-    for (a, b), (slots_ab, free_ab) in pairs.items():
+    for (a, b), (slots_ab, free_ab) in today_pairs.items():
         for step in range(1, horizon):
             relax = free_ab[step] + float(np.dot(slots_ab[:n_used], (step >= slot_split).astype(float)))
             if (relax == 0.0) != bool(group_map[a, step] == group_map[b, step]):

@@ -721,5 +721,89 @@ class MIQPTests(unittest.TestCase):
         self.assertTrue(np.isnan(solution.branch_time_penalty))
 
 
+class FixedTokenTests(unittest.TestCase):
+    """``tbfix<k>`` (2026-11-16): tbmiqp's rows with every vehicle's binaries fixed at k by their bounds, solved as a QP
+    (the binaries continuous), weight 0."""
+
+    def test_parser(self):
+        parse = ACCNairSMPCAgent._parse_branch_time_fixed
+        self.assertEqual(parse(DESIGN + "_tbfix2"), 2)
+        self.assertEqual(parse("jinput_tbfix15_onerow"), 15)
+        self.assertIsNone(parse(DESIGN))
+        self.assertIsNone(parse(DESIGN + "_tbmiqp100"))
+        self.assertIsNone(parse("acc_x_xtbfix2"))
+        for bad in ("acc_x_tbfix", "acc_x_tbfix2x", "acc_x_tbfix-1", "acc_x_tbfix2.5"):     # the step is required
+            with self.assertRaises(ValueError, msg=bad):
+                parse(bad)
+
+    def test_config(self):
+        self.assertIsNone(design_config().branch_time_fixed)
+        self.assertEqual(design_config(weight=0.0, branch_time_fixed=2).branch_time_fixed, 2)
+        self.assertEqual(design_config(weight=0.0, branch_time_fixed=HORIZON).branch_time_fixed, HORIZON)
+        for overrides in (dict(branch_time_fixed=2),                            # without tbmiqp's rows
+                          dict(weight=100.0, branch_time_fixed=2),              # a penalty with a fixed step
+                          dict(weight=0.0, branch_time_fixed=0), dict(weight=0.0, branch_time_fixed=HORIZON + 1),
+                          dict(weight=0.0, branch_time_fixed=2.5)):
+            with self.assertRaises(ValueError, msg=str(overrides)):
+                design_config(**overrides)
+
+    def test_agent_refuses_both_tokens(self):
+        with self.assertRaises(ValueError) as caught:
+            ParserAndRefusalTests._agent(self, DESIGN + "_tbfix2_tbmiqp100")
+        self.assertIn("not both", str(caught.exception))
+
+    def test_fixed_step_is_the_tree_split_at_that_step(self):
+        cases = [(name, SCENES[name], scene_prediction(SCENES[name])) for name in ("cutin", "cutin_likely", "other_vehicle")]
+        cases.append(("two_vehicles", SCENES["cutin"], two_vehicle_scene()))
+        for name, scene, prediction in cases:
+            plain = controller(scene, allow_solver_fallback=False)
+            for step in (1, 2, 5, HORIZON):
+                with self.subTest(scene=name, step=step):
+                    fixed = controller(scene, 0.0, branch_time_fixed=step, allow_solver_fallback=False)
+                    solution = solve(fixed, scene, prediction)
+                    self.assertEqual(solution.branch_time_status, "OPTIMAL")
+                    self.assertTrue(solution.branch_time_decisions)
+                    self.assertEqual({d["t_b"] for d in solution.branch_time_decisions}, {step})
+                    self.assertEqual(solution.branch_time_penalty, 0.0)
+                    tree = solve(plain, scene, split_tree(prediction, step))
+                    np.testing.assert_allclose(solution.j_nominal, tree.j_nominal, atol=1.0e-4)
+                    self.assertAlmostEqual(solution.action, tree.action, places=6)
+                    assert_cost_close(self, solution.cost, tree.cost)
+
+    def test_fixed_problem_has_no_discrete_variables(self):
+        scene = SCENES["cutin"]
+        fresh = NairACCSMPC(design_config(scene["v_set"], 0.0, branch_time_fixed=2, allow_solver_fallback=False))
+        original, captured = fresh._gurobi_options, []
+
+        def spy():      # the build adds its options to these dicts after the call
+            options = original()
+            captured.append(options)
+            return options
+        fresh._gurobi_options = spy
+        solution = solve(fresh, scene, scene_prediction(scene))
+        self.assertEqual(solution.branch_time_status, "OPTIMAL")
+        self.assertIsNotNone(fresh._tb_plan)
+        self.assertTrue(captured)
+        for p_opts, s_opts in captured:
+            self.assertNotIn("discrete", p_opts)
+            self.assertNotIn("MIPGap", s_opts)
+
+    def test_fixed_split_moves_the_vehicles_beyond_the_slots(self):
+        vehicles = {11: (0.2, 4), 12: (0.5, 6), 13: (0.15, 2), 14: (0.9, 9)}
+        keys = [sequence((LEAD, 16))] + [
+            sequence((LEAD, first), ((vid, "cutin"), 16 - first)) for vid, (_, first) in vehicles.items()]
+        prediction, groups = keyed_prediction(keys, {vid: p for vid, (p, _) in vehicles.items()})
+        today = branch_time_structure(prediction, groups)
+        plan = branch_time_structure(prediction, groups, fixed_split=3)
+        self.assertEqual(plan["vehicles"], today["vehicles"])
+        slots, free = plan["pairs"][(0, 3)]                                       # lane keeping against vehicle 13
+        np.testing.assert_array_equal(slots, np.zeros(BRANCH_TIME_SLOTS))
+        np.testing.assert_array_equal(free, (np.arange(HORIZON) >= 3).astype(float))
+        for pair in ((0, 1), (0, 2), (0, 4), (1, 2)):                             # slot vehicles only: unchanged
+            np.testing.assert_array_equal(plan["pairs"][pair][0], today["pairs"][pair][0])
+            np.testing.assert_array_equal(plan["pairs"][pair][1], today["pairs"][pair][1])
+        self.assertTrue(plan["today_exact"])                                      # still against today's split
+
+
 if __name__ == "__main__":
     unittest.main()
