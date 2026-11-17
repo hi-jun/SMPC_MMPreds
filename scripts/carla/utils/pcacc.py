@@ -173,7 +173,7 @@ class PCACCConfig:
     theta_c: float = 0.035        # heading deviation threshold [rad]
     q_keep: Tuple[float, float, float] = (5.0, 10.0, 50.0)    # Q_k
     r_keep: float = 100.0                                       # r_k
-    q_recap: Tuple[float, float, float] = (10.0, 30.0, 50.0)  # Q_r
+    q_recap: Tuple[float, float, float] = (15.0, 30.0, 50.0)  # Q_r (Table I; was (10, 30, 50) until 2026-11-17)
     r_recap: float = 100.0                                      # r_r
     horizon_keep_s: float = 6.0   # h_k
     a_cutin: float = -2.0         # a_cut-in
