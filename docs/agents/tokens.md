@@ -1213,6 +1213,60 @@ Braking-distance safety bound (experimental)
 - **Checks:** 4 tests (`tests/test_noegonoise.py`: the parser; `safety_std` with and without the term; the zconf σ term; a solve with a zero-covariance lead).
 - **Status:** implemented; not run. Arms to re-run (they use the design's σ term): the final design (without `nocutout`) on the cut-in and cut-out sets, CV-ACC on both, and IAIMM-KF + design. ISA-MPC and PC-ACC are unaffected.
 
+### `floorsigma`
+
+(Record added 2026-11-18 from `replay_out/floorA_20261118/result.md`.)
+
+- **What:** With `onerow` and `zconf<β>` or `flooreps<ε>` (ValueError otherwise, and with `nocap`): the σ term leaves the priced row and lives only in a hard floor row (maintainer, 2026-11-18: "σ를 바닥에만").
+  - Each active cell has two rows that share its emergency slack ξ: the priced row gap ≥ L + d0 + τv − short − ξ with short ≥ 0 and no upper bound, priced w·P_j·short² as before; and the floor row gap ≥ L + d0 + T − ξ, with T = `zconf`'s zσ or `flooreps`'s.
+  - Why (maintainer): the chance constraint's event is the floor breach (bumper gap < d0), and the time gap is a comfort target that is already priced by probability. Before, the lead's row carried +1.645σ even in plain following.
+  - The form is a separate floor row, not the cap short ≤ τv − T on the old row. Where T ≤ τv the two are the same problem: the same feasible set in (plan, ξ) and the same optimal shortfall, max(0, L + d0 + τv − gap − ξ). Where T > τv, at low speed, that cap has no feasible shortfall, but the floor row still holds.
+  - The reference keeps the plain d_safe.
+- **Code:**
+  - `NairACCConfig.one_row_floor_sigma`, `acc_nair_smpc.one_row_floor_terms` (T per cell).
+  - In the cached QP the floor row reuses `floorrisk`'s floor-row parameters (`floor_mask_param` = the active cells, `floor_sigma_param` = T), and the cap row is `nocap`'s, (1 − mask)·short ≤ 0. T and the mask are parameters, so nothing is rebuilt per tick; the token is one more cache-key entry.
+  - `_cell_tightening` returns 0 (the priced row), and the solution's chance margin on an active cell is its floor margin.
+  - The agent's `_parse_floor_sigma` (whole-token match). The NGSIM replay reads it in `build_controller` (backup `replay_backup_20261118_pre_floorsigma_flooreps/`).
+- **Checks:** 10 tests (`tests/test_floorsigma.py`): the σ term off the priced row and on the floor; the priced target is the plain d_safe; a gap 0.5 m inside the floor takes a 0.5 m slack and the shortfall τv − zσ (the capped form's values); at 0.5 m/s with T > τv the floor row holds; at every active cell of a solved plan ξ = max(0, L + d0 + T − gap) and short = max(0, L + d0 + τv − gap − ξ); inactive cells keep no shortfall; no floor parameters without the token; the reference unchanged; the parser and the ValueErrors. Gate: without the token bit-identical to `noegonoise_20261118/srv_smoke_design` on the 5 reproduction runs (lab server and workstation); the token's smoke is bit-identical between the machines.
+- **Result** (root `replay_out/floorA_20261118/fs_cutin`: the current final design, `noegonoise_20261118`'s, + `floorsigma`; 0 errors, 0 fallback runs; `result.md`, `paired_cutin.md`), paired against the current final design on the main table's 937 (SE in brackets):
+  - the ego follows closer: no-cut-in lead ticks with gap < d_safe 1.0 → 9.3 % (median deficit 0.43 m), v_avg +0.08 m/s (0.01); behind non-TV leads in cut-ins 0.7 → 2.5 % / 0.6 → 2.4 %;
+  - δ_max +3.8 / +2.9 / +2.4 %p (critical / mild / no cut-in; SE 0.3 / 0.4 / 0.2), floor breaches 9 → 14 / 3 → 4 (all new ones TV entries), T_rec +0.21 / +0.25 s (not recovered 1 → 11 / 0 → 7);
+  - j_max fair −0.02 (0.02) / +0.02 (0.02) / +0.03 (0.01), phantom_ref +0.016 (0.006), runs at the falling jerk bound 26 → 31 / 15 → 22 / 13 → 19; contacts 0 / 0 / 0 as before.
+  - Why (inferred): the +1.645σ of the lead's priced row was the buffer that kept the steady-state gap at d_safe; without it the price w·P·short² settles the ego slightly inside d_safe, the mechanism of onerow w10 before `zconf`.
+- **Status:** implemented (dddead3); run on the lab server 2026-11-18 (cut-in set; with `flooreps0.05` also the cut-out set); not adopted, the maintainer's decision; off by default; not run in CARLA (the agent parses it).
+
+### `flooreps<ε>`
+
+(Record added 2026-11-18 from `replay_out/floorA_20261118/result.md`; run as `flooreps0.05`.)
+
+- **What:** With `floorsigma` (ValueError otherwise; ε in (0, 0.9)): the floor's T of each active cell comes from the lateral occupancy of the cell's vehicle at that step, in place of `zconf`'s zσ (maintainer, 2026-11-18, "(A)"). Activation is unchanged (the mean-trajectory path test, the 0.1 gate, `aheadonly`, `nolkentry`).
+  - P_lat(i, k) = Σ_m p_im·Z_imk over all of vehicle i's predicted trajectories m (the ego-lane lead included): p_im the BCTS-calibrated trajectory probability, Z_imk the Gaussian probability that trajectory m's lateral position is inside the ego path interval |x − x_ego| < (W_i + W_ego)/2 (the replay's `lane_membership_prob_fn`, `occin`'s test).
+  - b = clip(1 − ε/P_lat, 0.10, 1 − ε). The lower clip keeps the floor from relaxing below zconf's lowest level, Φ⁻¹(0.1) at the 0.1 gate.
+  - The longitudinal and lateral errors of the cell's own trajectory are correlated: given the overlap, the longitudinal position is taken as Gaussian with the truncated-normal moments of the lateral coordinate (α, β the standardized interval bounds, Z = Φ(β) − Φ(α), E_z = (φ(α) − φ(β))/Z, V_z = 1 + (αφ(α) − βφ(β))/Z − E_z²): mean μ_s + ρσ_sE_z, std σ_c = √(ρ²σ_s²V_z + σ_s²(1 − ρ²)). The conditioning is skipped (ρ := 0) when Z < 1e-6.
+  - T = Φ⁻¹(b)·σ_c − ρσ_sE_z: the conditional mean's shift is folded into the tightening, so the lead's position parameter stays the mean. The floor then keeps P_lat·P(gap < L + d0 | overlap) ≤ ε. With P_lat = 1 and ρ = 0 it is Φ⁻¹(1 − ε)σ, zconf0.95's lead term at ε 0.05.
+  - σ_s is the row's σ (the lead's predicted longitudinal std; with the ego's process noise σ_c also carries that term). ρ is the correlation of the trajectory's Frenet s (the rows' coordinate) with the replay's lateral coordinate, from STDAN's 2-D position covariance sampled at the controller steps. The interval bounds use the replay's lateral std floored at 0.01 m.
+  - With `flooreps`, `zconf<β>` in the string has no effect: `floorsigma` takes the σ term off the priced row and `flooreps` replaces z on the floor.
+- **Code:**
+  - `NairACCConfig.one_row_floor_eps`, `acc_nair_smpc.floor_eps_tightening` (the formula, array-safe), `one_row_floor_terms`; `MultimodalLeadPrediction.floor_lateral` (J, N+1, 4: P_lat, α, β, ρ per cell).
+  - The adapter's `predict_acc(floor_lateral_fn=)` gives every target's per-trajectory Z and bounds and adds ρ (`STDAN3IntACCAdapter._longitudinal_lateral_correlation`). `acc_postprocess.process_vehicle_prediction(floor_lateral=)` sums P_lat, and each mode carries its own trajectory's statistics (`ACCModePrediction.floor_lateral`). `build_multitarget_lead_prediction` fills the cells from each cell's selected mode, and the `leadmerge` classes are unchanged.
+  - A prediction without the statistics and without a cut-in chance cell (the replay's no-target placeholder) is taken as P_lat 1 without conditioning; one with a cut-in chance cell raises.
+  - Solution fields `floor_eps_cells`, `floor_eps_clipped`, `floor_eps_cutin_cells`, `floor_eps_cutin_clipped`; replay tick arrays `fe_cells`, `fe_clip`, `fe_cutin`, `fe_clip_cutin` (with the token only).
+  - The agent's `_parse_floor_eps` (whole-token match). The CARLA agent refuses the token, as it does `occin<ε>`: it has no probabilistic path test. The replay passes `floor_lateral_fn` (needs `NGSIM_LANE_TEST=path`).
+- **Checks:** 16 tests (`tests/test_flooreps.py`):
+  - the maintainer's reference case (CUT_IN p 0.3, μ (15, 0.8), σ (2, 0.5), ρ −0.4; LK p 0.7, μ (20, 3.5), σ (2, 0.3), ρ 0; ε 0.01, half-width 1.8, half-length 4.5): P_lat 0.293, ε/P_lat 0.0341, bound on the ego centre 6.93 m, Monte Carlo collision probability at the bound 1 % (4e5 samples; the scratchpad's 2e6-sample run gave 0.983 %);
+  - the conditional mean shift and σ_c against samples; P_lat 1 with ρ 0 gives 1.645σ; ρ 0 keeps μ_c = μ_s and σ_c = σ_s; no conditioning below Z 1e-6; the lower clip, P_lat 0 included;
+  - the controller's floor terms from the cells' statistics, the placeholder, the floor row and the clip counts in a solve, the trim;
+  - the adapter-to-cells pipeline with a mocked predictor: P_lat over all three trajectories, each cell's own bounds and ρ, the scenarios unchanged; ρ under a heading; the parser, the ValueErrors and the CARLA agent's refusal.
+  - The full suite ran 588 tests OK (`replay_out/floorA_20261118/full_test_suite.out`). Smoke with both tokens: 0 errors, 0 fallbacks, bit-identical between the lab server and the workstation.
+- **Result** (roots `replay_out/floorA_20261118/both_cutin`, `both_cutout`: the current final design + `floorsigma` + `flooreps0.05`; 0 errors, 0 fallback runs; `result.md`):
+  - cut-in, paired against the current final design (937): δ_max +3.4 / +2.7 / +2.4 %p (critical / mild / no cut-in; SE 0.4 / 0.4 / 0.2), floor breaches 9 → 14 / 3 → 4, T_rec +0.22 / +0.24 s (not recovered 1 → 10 / 0 → 8), j_max fair −0.02 (0.02) / +0.05 (0.03) / +0.04 (0.01), phantom_ref +0.018 (0.006), v_avg +0.08 m/s (0.01), contacts 0.
+  - Against `floorsigma` alone: δ_max −0.4 / −0.3 %p (SE 0.2 / 0.1), mild j_max fair +0.03 (0.02), phantom_ref +0.003 (0.001); floor breaches, T_rec and contacts unchanged. Almost all of the change against the current design is `floorsigma`'s.
+  - Cut-out (1310 events), against the current final design: δ_max +2.3 %p (0.1), floor breaches 0 → 2, v_avg +0.08 m/s, j_max fair −0.00 (0.01), contacts 0.
+  - The lower clip b = 0.1 bound on 0.02 % of the active cells (521 of 2.6 M on the cut-in set, 33 of them cut-in chance cells; 0.25 % of ticks).
+  - Probe (40 sampled runs, the floor of the same cells under zconf0.95 and under flooreps, `result.md`): unchanged on the lead's lane keeping (P_lat ≈ 1, ρ ≈ 0); +0.33 m median on cut-in hypotheses (+0.98 m at step 15); the lead's cut-out cells move from zconf's negative z at p ≈ 0 to P_lat ≈ 1 (+1.68 m median). STDAN's ρ is small (p10 / p90 about ±0.15).
+  - IAIMM-KF (from the code, not run): its adapter supplies the 2-D covariance and probabilities that the token reads, but its covariance has no longitudinal-lateral cross term in its own lane frame, so the conditioning would do essentially nothing.
+- **Status:** implemented (dddead3); run on the lab server 2026-11-18; not adopted, the maintainer's decision; off by default; NGSIM replay only (the CARLA agent refuses it).
+
 ## External baselines
 
 Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20, `cutin_verify_20261020` / `cutout_verify_20261020`, and on the NGSIM final set, e.g. `full_v20s0_{isampc,pcacc}_20261028`; `open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint").
