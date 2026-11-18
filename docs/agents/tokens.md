@@ -1202,6 +1202,17 @@ Braking-distance safety bound (experimental)
   - The lead-only loop was not re-run, because the token cannot drop its single target, the in-lane lead ahead.
 - **Status:** decided by the maintainer on 2026-11-13; implemented (793aba3); final set run (2026-11-13), the design row of the NGSIM main table (AGENTS.md §1); off by default and not in the replay default yet; not run in CARLA.
 
+### `noegonoise`
+
+(Record added 2026-11-18.)
+
+- **What:** the margin's σ (`safety_std`) drops the ego's process-noise term h_ego Q h_egoᵀ, h_ego = [−1, −τ], Q = `process_noise_cov` = diag(0.1², 0.1²), a constant 0.164 m at every step. σ is then the predicted lead position's standard deviation alone, 0 for a prediction without covariance (the CV-ACC arm's constant-velocity lead).
+  - Why (maintainer, 2026-11-18, "ego 잡음은 빼"): the chance constraint's random variable is the lead's predicted position. The ego's planned state is deterministic in the model and the plant executes the command, and a real ego noise would grow over the horizon instead of staying constant.
+  - The 11-04 open-loop records support it: with STDAN's σ alone, z 1.645 covers 97.7 → 93.0 % from 0.2 s to 3 s (tuning-set lane-keeping cells), while the ego term makes 0.2 s cover 99.9 %.
+- **Code:** the agent's `_parse_no_ego_noise` (whole-token match) sets `controller_config.process_noise_cov` to zero, and the replay's controller options do the same (backup `replay_backup_20261118_pre_noegonoise/`). Only `safety_std` reads `process_noise_cov`.
+- **Checks:** 4 tests (`tests/test_noegonoise.py`: the parser; `safety_std` with and without the term; the zconf σ term; a solve with a zero-covariance lead).
+- **Status:** implemented; not run. Arms to re-run (they use the design's σ term): the final design (without `nocutout`) on the cut-in and cut-out sets, CV-ACC on both, and IAIMM-KF + design. ISA-MPC and PC-ACC are unaffected.
+
 ## External baselines
 
 Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20, `cutin_verify_20261020` / `cutout_verify_20261020`, and on the NGSIM final set, e.g. `full_v20s0_{isampc,pcacc}_20261028`; `open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint").

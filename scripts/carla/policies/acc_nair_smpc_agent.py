@@ -366,6 +366,9 @@ class ACCNairSMPCAgent(object):
         self.controller_config.one_row_no_cap = self._parse_one_row_no_cap(smpc_config)
         if self.controller_config.one_row_no_cap and not self.controller_config.one_row:
             raise ValueError("nocap needs onerow")
+        # noegonoise (2026-11-18): the margin's sigma is the predicted lead position's alone (no ego process noise)
+        if self._parse_no_ego_noise(smpc_config):
+            self.controller_config.process_noise_cov = ((0.0, 0.0), (0.0, 0.0))
         # tbmiqp<w> (2026-11-16): the branching step of each cut-in hypothesis chosen by the MIQP; tbfix<k>: fixed at k
         # (tbmiqp's rows with the binaries fixed, no penalty)
         self.controller_config.branch_time_miqp_weight = self._parse_branch_time_miqp(smpc_config)
@@ -2020,6 +2023,16 @@ class ACCNairSMPCAgent(object):
         ``w P_j short^2`` (``NairACCConfig.one_row_no_cap``), 2026-11-12. Whole-token match (``passnocap`` is not it).
         """
         return re.search(r"(?:^|_)nocap(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_no_ego_noise(smpc_config):
+        """Read ``noegonoise`` from the config string (default: off).
+
+        The margin's sigma (``safety_std``) drops the ego's process-noise term ``h_ego Q h_ego^T`` (0.164 m with the
+        default ``process_noise_cov``), so it is the predicted lead position's standard deviation alone: the ego's
+        planned state is deterministic in the model and the plant executes the command, 2026-11-18. Whole-token match.
+        """
+        return re.search(r"(?:^|_)noegonoise(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_branch_time_miqp(smpc_config):
