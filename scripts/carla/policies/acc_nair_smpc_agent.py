@@ -199,6 +199,12 @@ class ACCNairSMPCAgent(object):
                 raise ValueError("occin<eps> needs trajcutin")
             raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
                              "(lane_membership_prob_fn); the CARLA agent has none (NGSIM replay only)")
+        # flooreps<eps> (2026-11-18): the floor's confidence from the per-step lateral occupancy of every target's
+        # predicted trajectories (predict_acc(floor_lateral_fn=)), the same probabilistic ego-path test occin<eps>
+        # needs; only the NGSIM replay has one, so the token is refused here as occin<eps> is
+        if self._parse_floor_eps(smpc_config) is not None:
+            raise ValueError("flooreps<eps> needs a probabilistic ego-path test of every target's predicted "
+                             "trajectories (floor_lateral_fn); the CARLA agent has none (NGSIM replay only)")
         # pcal (2026-11-05): the calibration maps are fitted on natural NGSIM traffic and read NGSIM's lateral
         # features; the replay applies them, and CARLA has neither a map nor those features
         if self._parse_probability_calibration(smpc_config):
@@ -369,6 +375,10 @@ class ACCNairSMPCAgent(object):
         # noegonoise (2026-11-18): the margin's sigma is the predicted lead position's alone (no ego process noise)
         if self._parse_no_ego_noise(smpc_config):
             self.controller_config.process_noise_cov = ((0.0, 0.0), (0.0, 0.0))
+        # floorsigma (2026-11-18): onerow's sigma term only in a hard floor row; the priced row asks for the plain d_safe
+        self.controller_config.one_row_floor_sigma = self._parse_floor_sigma(smpc_config)
+        if self.controller_config.one_row_floor_sigma and not self.controller_config.one_row:
+            raise ValueError("floorsigma needs onerow")
         # tbmiqp<w> (2026-11-16): the branching step of each cut-in hypothesis chosen by the MIQP; tbfix<k>: fixed at k
         # (tbmiqp's rows with the binaries fixed, no penalty)
         self.controller_config.branch_time_miqp_weight = self._parse_branch_time_miqp(smpc_config)
@@ -2033,6 +2043,28 @@ class ACCNairSMPCAgent(object):
         planned state is deterministic in the model and the plant executes the command, 2026-11-18. Whole-token match.
         """
         return re.search(r"(?:^|_)noegonoise(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_floor_sigma(smpc_config):
+        """Read ``floorsigma`` from the config string (default: off).
+
+        With ``onerow`` and ``zconf<b>`` or ``flooreps<eps>``: the sigma term leaves the priced row, which asks for the
+        plain ``d_safe`` with an uncapped shortfall, and lives in a hard floor row ``gap >= L + d0 + T - xi`` on every
+        active cell (``NairACCConfig.one_row_floor_sigma``), 2026-11-18. Whole-token match.
+        """
+        return re.search(r"(?:^|_)floorsigma(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_floor_eps(smpc_config):
+        """Read ``flooreps<eps>`` from the config string (None = off).
+
+        With ``floorsigma``: the floor's ``T`` from the lateral occupancy of the cell's vehicle at that step, so the
+        floor keeps ``P_lat P(gap < L + d0 | overlap) <= eps`` (``NairACCConfig.one_row_floor_eps``), 2026-11-18. Needs a
+        probabilistic ego-path test of every target's predicted trajectories, which only the NGSIM replay has (the
+        agent refuses it). Whole-token match; ``flooreps0.05`` reads as 0.05.
+        """
+        match = re.search(r"(?:^|_)flooreps([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
+        return float(match.group(1)) if match else None
 
     @staticmethod
     def _parse_branch_time_miqp(smpc_config):

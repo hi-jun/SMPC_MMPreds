@@ -42,6 +42,9 @@ class ACCModePrediction:
     # modes of one vehicle stay distinct scenarios -- under one name they shared
     # one remembered ``dopt`` standoff and one policy group (2026-10-17).
     scenario_label: Optional[str] = None
+    # ``flooreps`` (2026-11-18): per step (steps, 4) the vehicle's P_lat and the mode's own trajectory's standardized
+    # lateral bounds and longitudinal-lateral correlation (``process_vehicle_prediction(floor_lateral=)``); None without.
+    floor_lateral: Optional[np.ndarray] = None
 
     def __post_init__(self):
         if self.scenario_label is None:
@@ -1040,6 +1043,7 @@ def process_vehicle_prediction(
     occupancy_risk: Optional[float] = None,
     no_lk_entry: bool = False,
     occupancy_pin_gate: bool = False,
+    floor_lateral: Optional[Sequence[np.ndarray]] = None,
 ) -> ACCProcessedPrediction:
     """``occupancy_risk`` (``occin<eps>``, 2026-11-05): for an adjacent vehicle the per-trajectory occupancy
     at steps 1.. is ``occupancy_memberships`` (``p_i * P_in,i(k) > eps``, with ``mode_lane_probabilities``
@@ -1051,7 +1055,14 @@ def process_vehicle_prediction(
 
     ``no_lk_entry`` (``nolkentry``, 2026-11-06): an adjacent vehicle's trajectories other than its lane change
     toward the ego lane (lane keeping, the change away) are out of the ego's path at steps 1.., whatever the
-    lane test says, so they never lead and ``trajcutin`` finds no entering trajectory."""
+    lane test says, so they never lead and ``trajcutin`` finds no entering trajectory.
+
+    ``floor_lateral`` (``flooreps<eps>``, 2026-11-18): per raw trajectory and step 0..N four arrays, the probability
+    ``Z`` that the vehicle's body overlaps the ego's path laterally on that trajectory (the caller's Gaussian test,
+    ``occin``'s), the standardized lower and upper bounds of that path interval on the trajectory's lateral
+    coordinate, and the correlation of its longitudinal position with that coordinate.  Each mode then carries
+    ``floor_lateral`` (steps, 4): ``P_lat = sum_i p_i Z_i`` over all the vehicle's trajectories (the probabilities
+    every mode reads) and its own trajectory's bounds and correlation.  Activation is unchanged."""
     if no_cutout and use_trajectory_aware_cutin_mapping:
         raise ValueError("nocutout acts on the default mapping, not the trajectory-aware one")
     if no_lk_entry and use_trajectory_aware_cutin_mapping:
@@ -1148,6 +1159,15 @@ def process_vehicle_prediction(
             if mode != toward:
                 memberships[mode, 1:] = False
 
+    floor_by_trajectory = None
+    if floor_lateral is not None:
+        # flooreps<eps>: P_lat over all the vehicle's trajectories, each trajectory's own bounds and correlation
+        lane_z, lower, upper, corr = (np.asarray(array, dtype=float) for array in floor_lateral)
+        if any(array.shape != memberships.shape for array in (lane_z, lower, upper, corr)):
+            raise ValueError(f"floor_lateral arrays must have shape {memberships.shape}")
+        p_lat = np.sum(raw_probs[: lane_z.shape[0], None] * lane_z, axis=0)
+        floor_by_trajectory = np.stack((np.broadcast_to(p_lat, lane_z.shape), lower, upper, corr), axis=-1)
+
     ego_lane_membership_split_step = ego_lane_membership_split_step_from_mask(memberships)
     trajectory_mode_specs, trajectory_cutin_raw_idx = _trajectory_aware_mode_specs(
         relation_to_ego_lane,
@@ -1185,6 +1205,7 @@ def process_vehicle_prediction(
                 lead_covariance=(
                     None if lead_covariances is None else lead_covariances[rep_idx].copy()
                 ),
+                floor_lateral=None if floor_by_trajectory is None else floor_by_trajectory[rep_idx].copy(),
             )
         )
 
@@ -1564,7 +1585,8 @@ def build_multitarget_lead_prediction(
     modes pooled first, ``_pool_never_leading_modes``), orders the classes by
     their summed probability and keeps the ``num_modes`` most likely
     classes; every scenario's metadata then holds the counts under
-    ``merge_first``.
+    ``merge_first``.  Modes that carry ``floor_lateral`` (``flooreps``) give the
+    prediction its per-cell ``floor_lateral``, each cell's from its selected mode.
     """
     if merge_first and not lead_merge:
         raise ValueError("mergefirst needs leadmerge")
@@ -1676,6 +1698,10 @@ def build_multitarget_lead_prediction(
     next_sigma_confidence = np.full((len(scenarios), horizon + 1), np.nan)
     next_lead_mode_lk = np.zeros((len(scenarios), horizon + 1), dtype=bool)
     next_lead_vehicle_ids = np.full((len(scenarios), horizon + 1), -1, dtype=int)
+    # flooreps: each cell's lead's lateral occupancy statistics, when the modes carry them (NaN off the active cells)
+    floor_lateral = None
+    if any(mode.floor_lateral is not None for target in targets for mode in target.mode_predictions):
+        floor_lateral = np.full((len(scenarios), horizon + 1, 4), np.nan)
     mode_names = []
     probabilities = []
     metadata = []
@@ -1743,6 +1769,8 @@ def build_multitarget_lead_prediction(
             lead_mode_lk[scenario_out_idx, step] = selected.mode_name == "lk"
             lead_vehicle_ids[scenario_out_idx, step] = int(selected.vehicle_id)
             lead_mode_probability[scenario_out_idx, step] = float(selected.probability)
+            if floor_lateral is not None and selected.floor_lateral is not None and step < selected.floor_lateral.shape[0]:
+                floor_lateral[scenario_out_idx, step] = selected.floor_lateral[step]
             if id(selected) in pass_slot_of_mode:
                 # passmiqp: a candidate leads this cell; its next lead is the nearest active mode ahead that
                 # is no candidate (no vacating inheritance on it: with nocutout there is none to inherit)
@@ -1788,6 +1816,9 @@ def build_multitarget_lead_prediction(
                  lead_mode_lk, lead_vehicle_ids, lead_mode_probability,
                  pass_slot, next_means, next_covariances, next_active, next_clearance_scale,
                  next_chance_confidence, next_sigma_confidence, next_lead_mode_lk, next_lead_vehicle_ids]
+        if floor_lateral is not None:
+            # flooreps: a function of each cell's selected mode, so equal within a class (it splits none)
+            cells.append(floor_lateral)
         cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario = _merge_duplicate_scenarios(
             cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario)
         if merge_first:
@@ -1796,6 +1827,8 @@ def build_multitarget_lead_prediction(
                 cells, probabilities, mode_names, metadata, effective_lead_keys_by_scenario, num_modes)
             for entry in metadata:
                 entry["merge_first"] = counts
+        if floor_lateral is not None:
+            floor_lateral = cells.pop()
         (means, covariances, active_mask, clearance_scale, chance_confidence, sigma_confidence,
          lead_mode_lk, lead_vehicle_ids, lead_mode_probability,
          pass_slot, next_means, next_covariances, next_active, next_clearance_scale,
@@ -1840,6 +1873,7 @@ def build_multitarget_lead_prediction(
         k_group_map=k_group_map,
         k_group_names=k_group_names,
         lead_keys=[list(keys) for keys in effective_lead_keys_by_scenario],    # tbmiqp reads them
+        floor_lateral=floor_lateral,
         **pass_fields,
     )
     return prediction, metadata

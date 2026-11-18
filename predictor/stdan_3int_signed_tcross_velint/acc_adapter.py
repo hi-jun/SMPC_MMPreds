@@ -235,6 +235,24 @@ class STDAN3IntACCAdapter:
         lead_covariance[:, :, 1, 1] = np.maximum(velocity_cov_frenet[:, :, 0, 0], 0.0)
         return lead_covariance
 
+    @staticmethod
+    def _longitudinal_lateral_correlation(
+        position_cov_global: np.ndarray,
+        psi: np.ndarray,
+        longitudinal_variance: np.ndarray,
+    ) -> np.ndarray:
+        """``flooreps``: the correlation of the rows' longitudinal position ``s = cos(psi) x + sin(psi) y`` (the Frenet
+        rotation of ``rotate_covariances_to_frenet``, whose variance is ``longitudinal_variance``) with the global
+        lateral coordinate ``y`` (the NGSIM replay's path test's), per trajectory and step, from the global 2-D
+        position covariance; 0 where either variance is 0."""
+        cov = np.asarray(position_cov_global, dtype=np.float64)
+        psi = np.asarray(psi, dtype=np.float64)
+        cov_sy = np.cos(psi) * cov[..., 0, 1] + np.sin(psi) * cov[..., 1, 1]
+        scale = np.sqrt(np.maximum(np.asarray(longitudinal_variance, dtype=np.float64), 0.0)
+                        * np.maximum(cov[..., 1, 1], 0.0))
+        positive = scale > 0.0
+        return np.where(positive, np.clip(cov_sy / np.where(positive, scale, 1.0), -1.0, 1.0), 0.0)
+
     def _history_to_ngsim(
         self,
         history: np.ndarray,
@@ -527,6 +545,7 @@ class STDAN3IntACCAdapter:
         intention_calibration: Optional[Callable[[int, np.ndarray], np.ndarray]] = None,
         occupancy_pin_gate: bool = False,
         ahead_only: bool = False,
+        floor_lateral_fn: Optional[Callable[[int, np.ndarray, Optional[np.ndarray]], tuple]] = None,
     ):
         """``occupancy_risk`` (``occin<eps>``, 2026-11-05) needs ``lane_membership_prob_fn(target_id,
         sampled_raw_traj_xy, sampled_raw_position_cov)``: per raw trajectory and step 0..N the probability
@@ -540,7 +559,15 @@ class STDAN3IntACCAdapter:
         ``intention_calibration`` (``pcal``, 2026-11-05): ``f(target_id, raw_intention_prob)`` returns the
         calibrated intention probabilities that every step below reads (the caller's map,
         ``acc_postprocess.calibrate_intention_probabilities``); the predictor's own stay in
-        ``raw_intention_prob_uncal``.  None leaves them as the predictor gave them."""
+        ``raw_intention_prob_uncal``.  None leaves them as the predictor gave them.
+
+        ``floor_lateral_fn`` (``flooreps<eps>``, 2026-11-18): ``f(target_id, sampled_raw_traj_xy,
+        sampled_raw_position_cov)`` returns, per raw trajectory and step 0..N, the probability that the vehicle's body
+        overlaps the ego's path laterally (``lane_membership_prob_fn``'s) and the standardized lower and upper bounds
+        of that path interval on the trajectory's global lateral coordinate y.  For every target (the ego-lane lead
+        included) the adapter adds the correlation of the trajectory's longitudinal position, as the rows read it
+        (Frenet s), with y (``_longitudinal_lateral_correlation``; 0 at step 0) and hands the four arrays to
+        ``process_vehicle_prediction(floor_lateral=)``."""
         if occupancy_risk is not None and lane_membership_prob_fn is None:
             raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
                              "(lane_membership_prob_fn)")
@@ -597,6 +624,20 @@ class STDAN3IntACCAdapter:
                     else self._sample_future(np.asarray(position_cov, dtype=float), horizon, controller_dt))
                 mode_lane_probabilities = lane_membership_prob_fn(
                     int(target_id), raw["sampled_raw_traj_xy"], raw["sampled_raw_position_cov_global"])
+            floor_lateral = None
+            if floor_lateral_fn is not None:
+                # flooreps<eps>: every target's path occupancy per trajectory, the interval's bounds on its lateral
+                # coordinate, and that coordinate's correlation with the rows' longitudinal position
+                if "raw_position_cov_global" not in raw or "pred_lead_covariance" not in raw:
+                    raise ValueError("flooreps<eps> needs the predictor's 2-D position covariance")
+                sampled_cov = self._sample_future(
+                    np.asarray(raw["raw_position_cov_global"], dtype=float), horizon, controller_dt)
+                lane_z, lower, upper = floor_lateral_fn(int(target_id), raw["sampled_raw_traj_xy"], sampled_cov)
+                corr = np.zeros(np.shape(lane_z), dtype=float)
+                corr[:, 1:] = self._longitudinal_lateral_correlation(
+                    sampled_cov, self._sample_future(np.asarray(psi_nearest, dtype=float), horizon, controller_dt),
+                    np.asarray(raw["pred_lead_covariance"], dtype=float)[..., 0, 0])
+                floor_lateral = (lane_z, lower, upper, corr)
             processed.append(
                 process_vehicle_prediction(
                     raw,
@@ -639,6 +680,7 @@ class STDAN3IntACCAdapter:
                     occupancy_risk=occupancy_risk,
                     no_lk_entry=no_lk_entry,
                     occupancy_pin_gate=occupancy_pin_gate,
+                    floor_lateral=floor_lateral,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(
