@@ -1211,7 +1211,7 @@ Braking-distance safety bound (experimental)
   - The 11-04 open-loop records support it: with STDAN's σ alone, z 1.645 covers 97.7 → 93.0 % from 0.2 s to 3 s (tuning-set lane-keeping cells), while the ego term makes 0.2 s cover 99.9 %.
 - **Code:** the agent's `_parse_no_ego_noise` (whole-token match) sets `controller_config.process_noise_cov` to zero, and the replay's controller options do the same (backup `replay_backup_20261118_pre_noegonoise/`). Only `safety_std` reads `process_noise_cov`.
 - **Checks:** 4 tests (`tests/test_noegonoise.py`: the parser; `safety_std` with and without the term; the zconf σ term; a solve with a zero-covariance lead).
-- **Status:** implemented; not run. Arms to re-run (they use the design's σ term): the final design (without `nocutout`) on the cut-in and cut-out sets, CV-ACC on both, and IAIMM-KF + design. ISA-MPC and PC-ACC are unaffected.
+- **Status:** implemented (3d81894); run on the lab server 2026-11-18 (`replay_out/noegonoise_20261118/result.md`: 0 errors, 0 fallback runs after splicing; on the main table's 937, unpaired against `cutoutmode_20261117/main_pcq15cvco.md`, the final design's critical δ_max 21.1 → 21.2 %, floor breaches 8 → 9, mild and no cut-in unchanged; CV-ACC critical δ_max 33.4 → 34.2 %, floor breaches 23 → 26). (updated 2026-11-18: it read "implemented; not run.") Arms re-run (they use the design's σ term): the final design (without `nocutout`) on the cut-in and cut-out sets, CV-ACC on both, and IAIMM-KF + design. ISA-MPC and PC-ACC are unaffected.
 
 ### `floorsigma`
 
