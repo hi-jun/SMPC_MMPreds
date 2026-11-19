@@ -1044,6 +1044,7 @@ def process_vehicle_prediction(
     no_lk_entry: bool = False,
     occupancy_pin_gate: bool = False,
     floor_lateral: Optional[Sequence[np.ndarray]] = None,
+    pz_risk: Optional[float] = None,
 ) -> ACCProcessedPrediction:
     """``occupancy_risk`` (``occin<eps>``, 2026-11-05): for an adjacent vehicle the per-trajectory occupancy
     at steps 1.. is ``occupancy_memberships`` (``p_i * P_in,i(k) > eps``, with ``mode_lane_probabilities``
@@ -1062,7 +1063,16 @@ def process_vehicle_prediction(
     ``occin``'s), the standardized lower and upper bounds of that path interval on the trajectory's lateral
     coordinate, and the correlation of its longitudinal position with that coordinate.  Each mode then carries
     ``floor_lateral`` (steps, 4): ``P_lat = sum_i p_i Z_i`` over all the vehicle's trajectories (the probabilities
-    every mode reads) and its own trajectory's bounds and correlation.  Activation is unchanged."""
+    every mode reads) and its own trajectory's bounds and correlation.  Activation is unchanged.
+
+    ``pz_risk`` (``pzrisk<eps>``, 2026-11-19, maintainer): needs ``floor_lateral``.  Each mode's cell at step k >= 1 is
+    active iff ``pi = p Z_k > eps``, ``p`` the mode's probability (after the normalisation below: the cell's
+    ``lead_mode_probability``) and ``Z_k`` its own (representative) trajectory's overlap probability, in place of the
+    mean-trajectory test, for every mode that may lead: an adjacent vehicle's cut-in hypotheses and an ego-lane
+    vehicle's lane keeping and cut-out (so ``lkhold``, a rule of the mean-trajectory test, has no effect).  The mode
+    mapping (which trajectories are a cut-in or a cut-out) still reads the mean-trajectory test, ``nolkentry``'s
+    trajectories never lead, step 0 keeps the measured test, and the 0.1 gate stays (``pi <= p``).  Each mode's
+    ``floor_lateral`` then carries its own trajectory's ``Z`` in place of ``P_lat``.  Not with ``occupancy_risk``."""
     if no_cutout and use_trajectory_aware_cutin_mapping:
         raise ValueError("nocutout acts on the default mapping, not the trajectory-aware one")
     if no_lk_entry and use_trajectory_aware_cutin_mapping:
@@ -1071,6 +1081,11 @@ def process_vehicle_prediction(
         raise ValueError("occin<eps> needs trajcutin (lk_entry_as_cutin): it generalises its entering-trajectory rule")
     if occupancy_pin_gate and occupancy_risk is None:
         raise ValueError("pingate needs occin<eps>")
+    if pz_risk is not None:
+        if floor_lateral is None:
+            raise ValueError("pzrisk<eps> needs each trajectory's per-step path-overlap probability (floor_lateral)")
+        if occupancy_risk is not None:
+            raise ValueError("pzrisk<eps> replaces the activation that occin<eps> sets; not both")
     raw_probs = normalize_probabilities(raw_prediction["raw_intention_prob"])
     context_trust_info = None
     if context_trust is not None:
@@ -1150,6 +1165,7 @@ def process_vehicle_prediction(
             "activated": int(np.sum(occin & ~today)),
             "suppressed": int(np.sum(today & ~occin)),
         }
+    kept_out = set()        # pzrisk: the trajectories nolkentry keeps out of the path
     if no_lk_entry and relation_to_ego_lane in (REL_LEFT_ADJACENT, REL_RIGHT_ADJACENT):
         # nolkentry: a vehicle that keeps its lane, or changes away from the ego lane, stays out of the ego's path;
         # a predicted trajectory of those hypotheses that reaches the path (its drift or, with occin, its lateral
@@ -1158,15 +1174,18 @@ def process_vehicle_prediction(
         for mode in range(memberships.shape[0]):
             if mode != toward:
                 memberships[mode, 1:] = False
+                kept_out.add(mode)
 
-    floor_by_trajectory = None
+    floor_by_trajectory = lane_z = None
     if floor_lateral is not None:
         # flooreps<eps>: P_lat over all the vehicle's trajectories, each trajectory's own bounds and correlation
         lane_z, lower, upper, corr = (np.asarray(array, dtype=float) for array in floor_lateral)
         if any(array.shape != memberships.shape for array in (lane_z, lower, upper, corr)):
             raise ValueError(f"floor_lateral arrays must have shape {memberships.shape}")
         p_lat = np.sum(raw_probs[: lane_z.shape[0], None] * lane_z, axis=0)
-        floor_by_trajectory = np.stack((np.broadcast_to(p_lat, lane_z.shape), lower, upper, corr), axis=-1)
+        # pzrisk<eps>: each trajectory's own Z in place of P_lat
+        first = lane_z if pz_risk is not None else np.broadcast_to(p_lat, lane_z.shape)
+        floor_by_trajectory = np.stack((first, lower, upper, corr), axis=-1)
 
     ego_lane_membership_split_step = ego_lane_membership_split_step_from_mask(memberships)
     trajectory_mode_specs, trajectory_cutin_raw_idx = _trajectory_aware_mode_specs(
@@ -1183,6 +1202,7 @@ def process_vehicle_prediction(
     )
     prob_maps = _acc_probabilities_from_mode_specs(raw_probs, raw_map, mode_specs)
     mode_predictions = []
+    rep_indices = []        # pzrisk: each mode's representative trajectory
     for mode_name, raw_indices, probability in mode_specs:
         rep_idx = _representative_index(raw_probs, raw_indices)
         active = memberships[rep_idx].copy()
@@ -1208,6 +1228,7 @@ def process_vehicle_prediction(
                 floor_lateral=None if floor_by_trajectory is None else floor_by_trajectory[rep_idx].copy(),
             )
         )
+        rep_indices.append(rep_idx)
 
     if lk_entry_as_cutin:
         # The cut-in mode made from an entering trajectory is told apart from the
@@ -1223,6 +1244,19 @@ def process_vehicle_prediction(
         norm = normalize_probabilities([mode.probability for mode in mode_predictions])
         for idx, mode in enumerate(mode_predictions):
             mode.probability = float(norm[idx])
+
+    pz_info = None
+    if pz_risk is not None:
+        # pzrisk<eps>: a mode's cell at step k >= 1 leads iff p Z_k > eps (its own trajectory's Z), in place of the
+        # mean-trajectory test (and lkhold's hold); nolkentry's trajectories stay out, step 0 keeps the measured test
+        pz_info = {"risk": float(pz_risk), "activated": 0, "suppressed": 0}
+        for mode, rep_idx in zip(mode_predictions, rep_indices):
+            if rep_idx in kept_out:
+                continue
+            mean_rule = np.asarray(mode.active_mask, dtype=bool)[1:].copy()
+            mode.active_mask[1:] = float(mode.probability) * lane_z[rep_idx, 1:] > float(pz_risk)
+            pz_info["activated"] += int(np.sum(mode.active_mask[1:] & ~mean_rule))
+            pz_info["suppressed"] += int(np.sum(mean_rule & ~mode.active_mask[1:]))
 
     gated_cutin_modes = gate_unlikely_cutin_modes(
         # occin<eps>: the occupancy bound replaces the gate (p <= eps never activates)
@@ -1272,6 +1306,7 @@ def process_vehicle_prediction(
             "lk_hold": bool(lk_hold),
             "no_lk_entry": bool(no_lk_entry),
             "occupancy": occupancy_info,
+            "pz_risk": pz_info,
             "cutin_probability_threshold": float(cutin_probability_threshold),
             "gated_cutin_modes": gated_cutin_modes,
             "cutin_clearance_ramp_ref": float(cutin_clearance_ramp_ref),

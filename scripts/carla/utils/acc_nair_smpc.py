@@ -345,6 +345,19 @@ class NairACCConfig:
     #: ``P_lat P(gap < L + d0 | overlap) <= eps``.  Activation is unchanged.  ``eps`` in (0, 1 - FLOOR_EPS_B_MIN);
     #: ``None`` is off.  The NGSIM replay supplies ``floor_lateral``; the CARLA agent refuses the token.
     one_row_floor_eps: Optional[float] = None
+    #: ``pzrisk<eps>`` (2026-11-19, maintainer): with ``one_row`` (and its cap), each active cell's sigma term is
+    #: ``T = Phi^-1(b) sigma_c - rho sigma_s E_z`` with ``b = 1 - eps / pi`` (guarded at ``PZ_RISK_B_MIN``), in place of
+    #: ``zconf``'s ``z sigma`` (``one_row_pz_risk_terms``).  ``pi = p Z``: ``p`` the cell's lead-mode probability
+    #: (``lead_mode_probability``, ``zconf``'s ``p``), ``Z`` the probability that the cell's own predicted position
+    #: overlaps the ego's path laterally at that step, and ``sigma_c``, ``E_z``, ``rho`` that trajectory's longitudinal
+    #: moments given the overlap (``floor_eps_tightening``; ``MultimodalLeadPrediction.floor_lateral``, whose first
+    #: column is the cell's own ``Z`` under this token).  The cells themselves are switched on by ``pi > eps``
+    #: (``acc_postprocess.process_vehicle_prediction(pz_risk=)``), so per active cell
+    #: ``P(hypothesis, overlap, gap < L + d0 + tau v - short) <= eps`` under the Gaussian prediction model.  Needs
+    #: ``one_row`` and a zero ``process_noise_cov`` (``noegonoise``); not with ``zconf<b>``, ``floorsigma``,
+    #: ``flooreps<eps>`` or ``nocap``.  ``eps`` in (0, 1); ``None`` is off.  The NGSIM replay supplies ``floor_lateral``;
+    #: the CARLA agent refuses the token.
+    one_row_pz_risk: Optional[float] = None
     #: ``safebranch``: the safety layer's fail-safe as one more branch of the
     #: scenario tree (2026-11-03, maintainer: the safety plan belongs in the
     #: contingency plan).  The branch shares the first input with every
@@ -641,6 +654,18 @@ class NairACCConfig:
                 raise ValueError("one_row_floor_eps (flooreps<eps>) needs one_row_floor_sigma (floorsigma)")
             if not 0.0 < float(self.one_row_floor_eps) < 1.0 - FLOOR_EPS_B_MIN:
                 raise ValueError("one_row_floor_eps (flooreps<eps>) must lie in (0, %g)" % (1.0 - FLOOR_EPS_B_MIN))
+        if self.one_row_pz_risk is not None:
+            if not self.one_row:
+                raise ValueError("one_row_pz_risk (pzrisk<eps>) needs one_row (onerow)")
+            if not 0.0 < float(self.one_row_pz_risk) < 1.0:
+                raise ValueError("one_row_pz_risk (pzrisk<eps>) must lie in (0, 1)")
+            if (self.one_row_z_conf is not None or self.one_row_floor_sigma or self.one_row_floor_eps is not None
+                    or self.one_row_no_cap):
+                raise ValueError("one_row_pz_risk (pzrisk<eps>) is the capped row's sigma term in place of zconf<b>'s: "
+                                 "not with zconf<b>, floorsigma, flooreps<eps> or nocap")
+            if np.any(np.asarray(self.process_noise_cov, dtype=float) != 0.0):
+                raise ValueError("one_row_pz_risk (pzrisk<eps>) needs noegonoise (process_noise_cov = 0): its sigma is "
+                                 "the predicted lead position's alone")
         if self.failsafe_branch:
             if self.controller_variant == VARIANT_MULTIMODAL_OL:
                 raise ValueError("failsafe_branch (safebranch) is implemented only in the cached feedback QP")
@@ -979,7 +1004,8 @@ class MultimodalLeadPrediction:
     # standardized lower and upper bounds of that path interval on the lateral coordinate of the cell's own trajectory,
     # and the correlation of that trajectory's longitudinal position (the rows' s) with that lateral coordinate
     # (``acc_postprocess.process_vehicle_prediction(floor_lateral=)``); NaN where not set; None when the predictor
-    # does not say.
+    # does not say.  With ``pzrisk`` (``process_vehicle_prediction(pz_risk=)``) the first column is the cell's own
+    # trajectory's overlap probability Z in place of P_lat.
     floor_lateral: Optional[np.ndarray] = None
 
     def __post_init__(self):
@@ -1215,6 +1241,10 @@ FLOOR_EPS_B_MIN = 0.10
 #: ``flooreps<eps>``: below this probability that the cell's own trajectory overlaps the ego's path, the longitudinal
 #: moments are not conditioned on the overlap (``rho := 0``).
 FLOOR_EPS_Z_MIN = 1.0e-6
+#: ``pzrisk<eps>``: the numerical guard on the confidence ``b = 1 - eps / pi`` (maintainer, 2026-11-19), so that ``T``
+#: stays finite where ``pi`` is at or barely above ``eps`` (``Phi^-1(1e-6) = -4.75``); ``pi > eps`` on every active cell
+#: at steps >= 1 puts ``b`` in (0, 1 - eps].
+PZ_RISK_B_MIN = 1.0e-6
 
 
 @dataclass
@@ -1373,6 +1403,10 @@ class NairACCSolution:
     floor_eps_clipped: int = 0
     floor_eps_cutin_cells: int = 0
     floor_eps_cutin_clipped: int = 0
+    #: ``pzrisk<eps>`` only (0 without it): the active cells of this solve and those whose confidence
+    #: ``b = 1 - eps / pi`` sat at its guard ``PZ_RISK_B_MIN``.
+    pz_risk_cells: int = 0
+    pz_risk_guarded: int = 0
 
     @property
     def policy_branch_step(self) -> Optional[int]:
@@ -1722,6 +1756,8 @@ class NairACCSMPC:
         self._open_loop_fixed_qp_cache = {}
         self._feedback_scalar_chance_qp_cache = {}
         self._standoff_shortfall = None  # dopt<w>: the cached QP's solved shortfall
+        # pzrisk<eps>: (prediction, T, guarded) of the prediction object last asked about (_pz_risk_terms)
+        self._pz_risk_memo = None
         # safebranch: the branch given to this solve, and the cached QP's solved branch
         # (inputs, row slacks, terminal slack, lead per step, stop point; the last two relative to the ego)
         self._failsafe_branch = None
@@ -2499,6 +2535,11 @@ class NairACCSMPC:
                 floor_eps_cells=int(np.sum(prediction.active_mask)), floor_eps_clipped=int(np.sum(floor_clipped)),
                 floor_eps_cutin_cells=int(np.sum(cutin_cells)),
                 floor_eps_cutin_clipped=int(np.sum(floor_clipped & cutin_cells)))
+        pz_risk_fields = {}
+        if self.config.one_row_pz_risk is not None:
+            # pzrisk: the active cells and those whose confidence sat at its guard
+            pz_risk_fields = dict(pz_risk_cells=int(np.sum(prediction.active_mask)),
+                                  pz_risk_guarded=int(np.sum(self._pz_risk_terms(prediction)[1])))
         pass_fields = self._pass_solution_fields(x0, prediction, x_nominal, u_nominal, chance_margin_values)
         failsafe_fields = self._failsafe_solution_fields(x0)
         branch_time_fields = self._branch_time_solution_fields(solve_path == "fallback")
@@ -2589,6 +2630,7 @@ class NairACCSMPC:
             **cvar_fields,
             **branch_time_fields,
             **floor_eps_fields,
+            **pz_risk_fields,
         )
 
     def _branch_time_solution_fields(self, fallback):
@@ -2876,6 +2918,8 @@ class NairACCSMPC:
             if self.config.one_row:
                 if self.config.one_row_floor_sigma:
                     return 0.0      # floorsigma: the priced row has no sigma term; the floor row keeps it
+                if self.config.one_row_pz_risk is not None:
+                    return float(self._pz_risk_terms(prediction)[0][mode, step])     # pzrisk<eps>: the cell's T
                 # onerow: no row has a sigma term, or with zconf<b> the cell's z sigma
                 return one_row_sigma_term(prediction, mode, step, self.config)
             if self.config.price_row_no_sigma and standoff_shortfall_mask(
@@ -2883,6 +2927,14 @@ class NairACCSMPC:
                 return 0.0      # nopricesigma: a priced row asks for D on the mean gap; its floor row keeps sigma
             return cell_sigma_term(prediction, mode, step, self.config)
         return 0.0
+
+    def _pz_risk_terms(self, prediction):
+        """``pzrisk<eps>``: ``one_row_pz_risk_terms(prediction)`` (T, guarded), computed once per prediction object: the
+        callers ask cell by cell, and the array formula costs about as much for all cells as for one.  The solve's
+        prediction is a new object every tick (``_one_row_prediction``), so the memo never outlives its solve's data."""
+        if self._pz_risk_memo is None or self._pz_risk_memo[0] is not prediction:
+            self._pz_risk_memo = (prediction,) + one_row_pz_risk_terms(prediction, self.config)
+        return self._pz_risk_memo[1:]
 
     def _can_use_cached_open_loop_fixed_qp(self, open_loop, prediction):
         if not open_loop:
@@ -5194,7 +5246,7 @@ def one_row_sigma_term(prediction, mode, step, config):
     return float(norm.ppf(beta) * safety_std(prediction.covariances[mode, step], config))
 
 
-def floor_eps_tightening(p_lat, lower, upper, rho, sigma_s, eps, ego_variance=0.0):
+def floor_eps_tightening(p_lat, lower, upper, rho, sigma_s, eps, ego_variance=0.0, b_min=FLOOR_EPS_B_MIN):
     """``flooreps<eps>``: the floor's tightening ``T`` and the confidence before its clip, array-safe.
 
     ``p_lat`` is the probability that the vehicle's body overlaps the ego's path laterally at the step, summed over all
@@ -5209,7 +5261,10 @@ def floor_eps_tightening(p_lat, lower, upper, rho, sigma_s, eps, ego_variance=0.
     with ``Z < FLOOR_EPS_Z_MIN`` or a NaN bound it is not conditioned (``rho := 0``: ``sigma_c`` is ``safety_std``).
     The rows keep the mean ``mu_s`` as the lead's position, so the conditional mean's shift is folded into
     ``T = Phi^-1(b) sigma_c - rho sigma_s E_z``.  Returns ``(T, b_raw)`` with ``b_raw = 1 - eps / P_lat`` before the clip
-    (``-inf`` at ``P_lat = 0``)."""
+    (``-inf`` at ``P_lat = 0``).
+
+    ``pzrisk<eps>`` (``one_row_pz_risk_terms``) calls it with the cell's own ``pi = p Z`` in place of ``P_lat`` and the
+    lower clip ``b_min = PZ_RISK_B_MIN``, a numerical guard, in place of ``FLOOR_EPS_B_MIN``."""
     p_lat = np.asarray(p_lat, dtype=float)
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
@@ -5217,7 +5272,7 @@ def floor_eps_tightening(p_lat, lower, upper, rho, sigma_s, eps, ego_variance=0.
     eps = float(eps)
     with np.errstate(divide="ignore"):
         b_raw = 1.0 - eps / p_lat
-    b = np.clip(b_raw, FLOOR_EPS_B_MIN, 1.0 - eps)
+    b = np.clip(b_raw, b_min, 1.0 - eps)
     bounded = ~(np.isnan(lower) | np.isnan(upper))
     lo = np.where(bounded, lower, 0.0)
     hi = np.where(bounded, upper, 0.0)
@@ -5273,6 +5328,54 @@ def one_row_floor_terms(prediction, config):
     terms[active] = floor[active]
     clipped[active] = b_raw[active] < FLOOR_EPS_B_MIN
     return terms, clipped
+
+
+def one_row_pz_risk_terms(prediction, config):
+    """``pzrisk<eps>``: the capped row's sigma term ``T`` per (mode, step), 0 off the active cells, and the active cells
+    whose confidence ``b = 1 - eps / pi`` sits at its guard ``PZ_RISK_B_MIN``.
+
+    ``pi = p Z`` per cell: ``p`` the probability of the cell's lead mode for its vehicle (``lead_mode_probability``,
+    ``zconf``'s ``p``) and ``Z`` the probability that the cell's own predicted position overlaps the ego's path laterally
+    at that step (``floor_lateral[..., 0]``, which ``process_vehicle_prediction(pz_risk=)`` fills with the own
+    trajectory's ``Z``).  ``T = floor_eps_tightening(pi, ...)`` with ``b_min = PZ_RISK_B_MIN``:
+    ``Phi^-1(b) sigma_c - rho sigma_s E_z``, the cell's own trajectory's longitudinal moments given the overlap, so the
+    row ``gap >= L + d0 + tau v - short + T`` keeps ``pi P(gap < L + d0 + tau v - short | overlap) <= eps``.  The
+    activation ``pi > eps`` gives every active cell at steps >= 1 a ``b`` in (0, 1 - eps]; step 0 keeps the measured
+    lane test, where an ego-lane lead's unlikely mode can have ``pi <= eps`` (the guard binds) and ``sigma`` is 0.  A
+    prediction without ``floor_lateral`` (or without ``lead_mode_probability``) and without a cut-in chance cell (the
+    synthetic placeholder of a tick with no target) is taken as ``pi = 1`` without conditioning; one with a cut-in
+    chance cell raises."""
+    active = np.asarray(prediction.active_mask, dtype=bool)
+    terms = np.zeros(active.shape)
+    guarded = np.zeros(active.shape, dtype=bool)
+    cutin = np.any(active & np.isfinite(prediction.chance_confidence))
+    if prediction.floor_lateral is not None:
+        lateral = np.asarray(prediction.floor_lateral, dtype=float)
+    elif cutin:
+        raise ValueError("pzrisk needs the cells' lateral occupancy statistics (floor_lateral)")
+    else:
+        lateral = np.full(active.shape + (4,), np.nan)
+        lateral[..., 0] = 1.0
+        lateral[..., 3] = 0.0
+    if prediction.lead_mode_probability is not None:
+        p = np.asarray(prediction.lead_mode_probability, dtype=float)
+    elif cutin:
+        raise ValueError("pzrisk needs the cells' hypothesis probabilities (lead_mode_probability)")
+    else:
+        p = np.ones(active.shape)
+    pi = np.where(active, p * lateral[..., 0], 1.0)
+    rho = np.where(active, lateral[..., 3], 0.0)
+    if not (np.all(np.isfinite(pi)) and np.all(np.isfinite(rho))):
+        raise ValueError("pzrisk: an active cell without its probability or lateral occupancy statistics")
+    sigma_s = np.sqrt(np.maximum(np.asarray(prediction.covariances, dtype=float)[..., 0, 0], 0.0))
+    h_ego = np.array([-1.0, -config.time_headway])
+    ego_variance = float(h_ego.dot(np.asarray(config.process_noise_cov, dtype=float)).dot(h_ego))
+    tightening, b_raw = floor_eps_tightening(
+        pi, np.where(active, lateral[..., 1], np.nan), np.where(active, lateral[..., 2], np.nan),
+        rho, sigma_s, config.one_row_pz_risk, ego_variance, b_min=PZ_RISK_B_MIN)
+    terms[active] = tightening[active]
+    guarded[active] = b_raw[active] < PZ_RISK_B_MIN
+    return terms, guarded
 
 
 def standoff_shortfall_mask(prediction, include_lk=False):

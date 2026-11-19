@@ -205,6 +205,11 @@ class ACCNairSMPCAgent(object):
         if self._parse_floor_eps(smpc_config) is not None:
             raise ValueError("flooreps<eps> needs a probabilistic ego-path test of every target's predicted "
                              "trajectories (floor_lateral_fn); the CARLA agent has none (NGSIM replay only)")
+        # pzrisk<eps> (2026-11-19): the activation and the sigma term from each cell's own trajectory's per-step lateral
+        # occupancy (predict_acc(floor_lateral_fn=), the test flooreps<eps> needs); refused here as flooreps<eps> is
+        if self._parse_pz_risk(smpc_config) is not None:
+            raise ValueError("pzrisk<eps> needs a probabilistic ego-path test of every target's predicted "
+                             "trajectories (floor_lateral_fn); the CARLA agent has none (NGSIM replay only)")
         # pcal (2026-11-05): the calibration maps are fitted on natural NGSIM traffic and read NGSIM's lateral
         # features; the replay applies them, and CARLA has neither a map nor those features
         if self._parse_probability_calibration(smpc_config):
@@ -2065,6 +2070,41 @@ class ACCNairSMPCAgent(object):
         """
         match = re.search(r"(?:^|_)flooreps([0-9]*\.?[0-9]+)(?=_|$)", str(smpc_config))
         return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _parse_pz_risk(smpc_config):
+        """Read ``pzrisk<eps>`` from the config string (None = off).
+
+        With ``onerow`` (its cap) and ``noegonoise``: a lead cell at step k >= 1 is active iff ``pi = p Z > eps`` (``p`` the
+        cell's lead-mode probability, ``Z`` the probability that its own predicted position overlaps the ego's path
+        laterally), in place of the mean-trajectory test, and its row's sigma term is
+        ``T = Phi^-1(1 - eps / pi) sigma_c - rho sigma_s E_z`` in place of ``zconf<b>``'s (``NairACCConfig.one_row_pz_risk``),
+        2026-11-19.  Raises ValueError with ``zconf<b>``, ``floorsigma``, ``flooreps<eps>``, ``occin<eps>`` or ``nocap``, or
+        without ``onerow`` or ``noegonoise``.  Needs a probabilistic ego-path test of every target's predicted
+        trajectories, which only the NGSIM replay has (the agent refuses it).  Whole-token match; ``pzrisk0.1`` reads
+        as 0.1; ``pzrisk`` without its eps raises.
+        """
+        config = str(smpc_config)
+        match = re.search(r"(?:^|_)pzrisk([0-9]*\.?[0-9]+)(?=_|$)", config)
+        if match is None:
+            if re.search(r"(?:^|_)pzrisk", config) is not None:
+                raise ValueError("pzrisk<eps> needs its eps in (0, 1), e.g. pzrisk0.1")
+            return None
+        agent = ACCNairSMPCAgent
+        conflicts = [token for token, present in (
+            ("zconf<b>", agent._parse_one_row_z_conf(config) is not None),
+            ("floorsigma", agent._parse_floor_sigma(config)),
+            ("flooreps<eps>", agent._parse_floor_eps(config) is not None),
+            ("occin<eps>", agent._parse_occupancy_risk(config) is not None),
+            ("nocap", agent._parse_one_row_no_cap(config))) if present]
+        if conflicts:
+            raise ValueError("pzrisk<eps> sets the activation and the capped row's sigma term itself; not with "
+                             + ", ".join(conflicts))
+        missing = [token for token, present in (("onerow", agent._parse_one_row(config)),
+                                                ("noegonoise", agent._parse_no_ego_noise(config))) if not present]
+        if missing:
+            raise ValueError("pzrisk<eps> needs " + " and ".join(missing))
+        return float(match.group(1))
 
     @staticmethod
     def _parse_branch_time_miqp(smpc_config):

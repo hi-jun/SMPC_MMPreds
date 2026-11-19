@@ -546,6 +546,7 @@ class STDAN3IntACCAdapter:
         occupancy_pin_gate: bool = False,
         ahead_only: bool = False,
         floor_lateral_fn: Optional[Callable[[int, np.ndarray, Optional[np.ndarray]], tuple]] = None,
+        pz_risk: Optional[float] = None,
     ):
         """``occupancy_risk`` (``occin<eps>``, 2026-11-05) needs ``lane_membership_prob_fn(target_id,
         sampled_raw_traj_xy, sampled_raw_position_cov)``: per raw trajectory and step 0..N the probability
@@ -567,7 +568,13 @@ class STDAN3IntACCAdapter:
         of that path interval on the trajectory's global lateral coordinate y.  For every target (the ego-lane lead
         included) the adapter adds the correlation of the trajectory's longitudinal position, as the rows read it
         (Frenet s), with y (``_longitudinal_lateral_correlation``; 0 at step 0) and hands the four arrays to
-        ``process_vehicle_prediction(floor_lateral=)``."""
+        ``process_vehicle_prediction(floor_lateral=)``.
+
+        ``pz_risk`` (``pzrisk<eps>``, 2026-11-19) needs ``floor_lateral_fn``: every target's mode cells are switched on by
+        ``p Z > eps`` with its own trajectory's ``Z`` (``process_vehicle_prediction(pz_risk=)``)."""
+        if pz_risk is not None and floor_lateral_fn is None:
+            raise ValueError("pzrisk<eps> needs a probabilistic ego-path test of every target's predicted trajectories "
+                             "(floor_lateral_fn)")
         if occupancy_risk is not None and lane_membership_prob_fn is None:
             raise ValueError("occin<eps> needs a probabilistic ego-path test of the predicted trajectories "
                              "(lane_membership_prob_fn)")
@@ -681,6 +688,7 @@ class STDAN3IntACCAdapter:
                     no_lk_entry=no_lk_entry,
                     occupancy_pin_gate=occupancy_pin_gate,
                     floor_lateral=floor_lateral,
+                    pz_risk=pz_risk,
                 )
             )
         prediction, metadata = build_multitarget_lead_prediction(
