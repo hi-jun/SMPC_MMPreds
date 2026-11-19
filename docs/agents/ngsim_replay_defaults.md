@@ -145,6 +145,49 @@ Moved verbatim from AGENTS.md on 2026-11-12 (git `3d9bcf8`); the text is unchang
   - The 2026-11-12 final design and the roots spliced from it (`fin_v2_design_aheadonly_20261113`, `fin_v3_design_aheadonly_20261113`) need `NGSIM_POLICY_TAIL` set to the previous default tail. Append `_aheadonly` for the two `_aheadonly` roots.
   - The CRC grid of the BCTS shift λ (`replay_out/bcts_shift_20261112/`) ran on the previous default and is to be re-run on this one.
 
+### 2026-11-19
+
+The student chose "S를 논문 설계에 넣기 (주 표 설계 행·그림·재생기 기본값 갱신)": **D-opt's default is the thesis design.**
+
+**What it contains.** The 11-13 night default plus every change since:
+- without the safety layer (`safelayer`, `entrant2`, `fsdecel8_fsjerk10`; 2026-11-16);
+- without `nocutout` (2026-11-18);
+- `noegonoise` (2026-11-18);
+- `pzrisk0.1` in place of `zconf0.95` (2026-11-19, d2db471);
+- the lead's own lead S as a predictor target (`NGSIM_SUBLEAD_TARGET`, `replay_out/sublead_20261119/result.md`, `replay_out/pzsub_20261119/result.md`).
+
+**The edit.**
+- `ngsim_replay.py` (backup `results/ngsim_lambda_cal_20261019/replay_backup_20261119_pre_pzsub_default/` on the workstation and the lab server; md5 72e2702c → 8aef08a6, `run_replay.py` 8ed4a442 → e14eb621, both machines):
+  - **`POLICY_TAIL`** is `_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_leadmerge_mergefirst_lkhold_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_onerow_pzrisk0.1_snap160_aheadonly_noegonoise`. `NGSIM_POLICY_DOPT` stays `_dopt10`.
+  - **`NGSIM_SUBLEAD_TARGET`** is on by default. `0` or empty turns it off.
+  - **S's scope:** it applies to D-opt's targets only (STDAN, or IAIMM-KF with `NGSIM_DOPT_PREDICTOR=iaimm`).
+    - It never applies to the ISA-MPC baseline, whose obstacles are the replay's target set.
+    - It never applies to CV-ACC, which is the in-lane lead only.
+    - The replay's metrics (`lead_id`, `gap`) are unchanged.
+- `run_replay.py` records `sublead_target` (as in effect) in every D-opt root's `run_info.json`.
+- With no variable set, D-opt's string (λ 0, `--latgate`) and condition are those of `replay_out/pzsub_20261119/pzsub_cutin` and `pzsub_cutout`.
+
+**Gates** (`replay_out/default_pzsub_20261119/gate_ws.sh`, `gate_srv.sh`, `gate_ws.log`, `gate_srv.log`). Each passing gate has max |Δa_cmd| 0, every non-timing tick array equal, and results.csv differing only in `wall_s`. Runs are the 5 reproduction episodes (`finalset_v2_20261113/episodes_repro.csv`) unless stated.
+
+| gate | condition | against | result |
+|---|---|---|---|
+| new default, cut-in | no variable set, the v3 table | `pzsub_20261119/pzsub_cutin` | pass |
+| new default, cut-out | the 5 cut-out smoke events | `pzsub_20261119/pzsub_cutout` | pass |
+| previous default | its tail as `NGSIM_POLICY_TAIL`, `NGSIM_SUBLEAD_TARGET=0`, the v3 table | `cap_20261113/design_cap_meanpath` | pass |
+| PC-ACC | Table I's Q_r, the main table's arm | `pcacc_qr15_20261117/pcacc_qr15` | pass |
+| CV-ACC | `NGSIM_DOPT_PREDICTOR=cv`, its tail | `noegonoise_20261118/cv_cutin` | pass |
+| ISA-MPC cap | `acc_isampc_amin3.5_amax2_jlim2.5_jlimup5_slackcap_l1slack5500` with `ISAMPC_IAIMM_CFG` as `cap_20261113/cap.sh` set it (`proj_horizon_s` 3.0) | `cap_20261113/isa_cap55` | pass (`ws_isa_iaimmcfg`) |
+
+**ISA-MPC needs the root's IAIMM-KF setting.**
+- The main table's ISA-MPC root ran with `ISAMPC_IAIMM_CFG='{"lat_speedup": 2.0, "proj_horizon_s": 3.0, "q_lat_scale": 1.0, "trans_eps": 0.25, "weight": [0.1, 0.3, 10.0, 0.02]}'` (`cap_20261113/cap.sh`; its `run_info.json` `iaimm_cfg`).
+  - `baselines.py`'s default is `proj_horizon_s` 8.0.
+- Without the variable, ISA-MPC differs from the root from tick 0 on: `ws_isa`, `ws_isa_oldtail` and `ws_isa_presub`, max |Δa_cmd| 4.0.
+  - The cut-in probability of the run's TV differs already at tick 0 (0.0685 → 0.0024 on ds1_v2373).
+  - This was first misread as a code drift. The replay versions back to 2026-11-13 all give the same, so it was not one.
+  - (Corrected 2026-11-19 15:40.)
+
+**To reproduce a D-opt root made before this change:** set `NGSIM_SUBLEAD_TARGET=0`. Also set `NGSIM_POLICY_TAIL` to that root's tail (`run_info.json` `policy_example`). The pre-switch roots of 2026-11-19, `sublead_20261119` and `pzsub_20261119`, set the variable to 1 explicitly.
+
 ### Condition of older roots
 
 - `NGSIM_V_SET=20 NGSIM_SPAWN_MARGIN=0` gives the condition of every root from 2026-10-27 to 2026-11-10, including the paper roots and the baseline roots of the earlier tables.

@@ -28,6 +28,27 @@ It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Whe
 
 ### Current design (2026-11-12)
 
+**Thesis design and NGSIM replay default since 2026-11-19** (student: "S를 논문 설계에 넣기 (주 표 설계 행·그림·재생기 기본값 갱신)"). This block supersedes the design statements below. The string, with no variable set:
+
+```
+acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_leadmerge_mergefirst_lkhold_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_onerow_pzrisk0.1_snap160_aheadonly_noegonoise
+```
+
+The condition adds `NGSIM_SUBLEAD_TARGET` (on by default). It makes the in-lane lead's own lead S a predictor target, so the lead's cut-out hypothesis hands the lane to S. It applies to D-opt only, not to the ISA-MPC or CV-ACC baselines.
+
+The path from the 2026-11-13 night design:
+- the safety layer dropped (2026-11-16);
+- `nocutout` dropped (2026-11-18);
+- `noegonoise` (2026-11-18);
+- `pzrisk0.1` in place of `zconf0.95` (2026-11-19);
+- S (2026-11-19).
+
+Records:
+- `replay_out/pzsub_20261119/result.md`: the final sets with S — 954-key main table within 0.1 %p of `pzrisk0.1`; cut-outs δ_max 1.8 → 1.6 %, v_post −0.12 m/s;
+- `replay_out/sublead_20261119/result.md`;
+- `docs/agents/ngsim_replay_defaults.md` 2026-11-19: the switch and its gates. All pass.
+  - The ISA-MPC root `cap_20261113/isa_cap55` reproduces only with its IAIMM-KF setting `ISAMPC_IAIMM_CFG` (`proj_horizon_s` 3.0, `cap_20261113/cap.sh`). `baselines.py`'s default is 8.0.
+
 **NGSIM design and main table since the night of 2026-11-13** (maintainer: "ISA랑 우리 설계 둘다 상한으로 바꾸고 우리 설계 평균 경로로 바꿔").
 
 The design is the final design below with three changes:
