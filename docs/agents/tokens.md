@@ -1267,6 +1267,40 @@ Braking-distance safety bound (experimental)
   - IAIMM-KF (from the code, not run): its adapter supplies the 2-D covariance and probabilities that the token reads, but its covariance has no longitudinal-lateral cross term in its own lane frame, so the conditioning would do essentially nothing.
 - **Status:** implemented (dddead3); run on the lab server 2026-11-18; not adopted, the maintainer's decision; off by default; NGSIM replay only (the CARLA agent refuses it).
 
+### `pzrisk<ε>`
+
+(Record added 2026-11-19 from `replay_out/pzrisk_20261119/result.md`; run as `pzrisk0.1`, in place of `zconf0.95`.)
+
+- **What:** With `onerow` (its cap) and `noegonoise` (ValueError otherwise; ε in (0, 1)): the activation and the σ term of every lead cell from π = p·Z (maintainer, 2026-11-19, "진행해").
+  - p is the cell's lead-mode probability (`lead_mode_probability`, `zconf`'s p). Z is the Gaussian probability that the cell's own predicted position overlaps the ego's path laterally at that step (the replay's path test, `flooreps`'s per-trajectory Z).
+  - Activation: a cell at step k ≥ 1 leads iff π > ε, in place of the mean-path entry test, for adjacent cut-in hypotheses and the ego-lane lead's lane keeping and cut-out.
+  - Unchanged: the mode mapping (which trajectories are a cut-in or a cut-out; it reads the mean-path test), `aheadonly`, `nolkentry`, the target selection, `leadmerge` / `mergefirst`, step 0's measured lane test and the 0.1 gate.
+  - `lkhold` has no effect: its hold is a rule of the mean-path test.
+  - Margin: the capped row gap ≥ L + d0 + τv + T − short − ξ, 0 ≤ short ≤ τv, priced w·P·short² as before, with T = Φ⁻¹(b)σ_c − ρσ_sE_z and b = 1 − ε/π, guarded at b ≥ 1e-6. σ_c, E_z and ρ are the cell's own trajectory's longitudinal moments given the overlap (`flooreps`'s formulas). At p = Z = 1, ε 0.1: z = 1.2816 in place of `zconf0.95`'s 1.645.
+  - Claim: per active cell P(hypothesis ∧ overlap ∧ gap < L + d0 + τv − short) ≤ ε under the Gaussian prediction model, with the conditional longitudinal law moment-matched (exact at ρ = 0). Cells with π ≤ ε have no row.
+- **Code:**
+  - `NairACCConfig.one_row_pz_risk`; `acc_nair_smpc.one_row_pz_risk_terms`; `floor_eps_tightening(b_min=)`; `PZ_RISK_B_MIN`.
+  - `_cell_tightening` reads the terms through a per-prediction memo.
+  - Solution fields `pz_risk_cells`, `pz_risk_guarded`.
+  - `acc_postprocess.process_vehicle_prediction(pz_risk=)`: the activation, and each mode's `floor_lateral` carries its own Z in place of P_lat; `branch_info["pz_risk"]`.
+  - `acc_adapter.predict_acc(pz_risk=)`, which needs `floor_lateral_fn`.
+  - The agent's `_parse_pz_risk` (whole-token match; refuses `zconf<β>`, `floorsigma`, `flooreps<ε>`, `occin<ε>`, `nocap`, and a string without `onerow` or `noegonoise`). The CARLA agent refuses the token.
+  - The replay passes `floor_lateral_fn` with the token (needs `NGSIM_LANE_TEST=path`) and logs `pz_cells`, `pz_guard`. Backup `replay_backup_20261119_pre_pzrisk/`.
+- **Checks:**
+  - 17 tests (`tests/test_pzrisk.py`): the parser and refusals; T against the formula with the conditional moments; a Monte Carlo of the breach probability (0.0994 at ρ 0, 0.1006 at ρ 0.5, ε 0.1); the guard; activation by p·Z through the adapter; the default unchanged; a solve. The full suite ran 605 tests OK.
+  - Gate: without the token bit-identical to `noegonoise_20261118/srv_smoke_design` on the 5 reproduction runs (lab server and workstation). The token's smoke is bit-identical between the machines.
+  - Full runs (`pz_cutin`, `pz_cutout`): 0 errors, 0 fallback runs after splicing 5 / 22 load-fallback re-runs.
+- **Result** (`result.md`, `paired_cutin.md`, `mechanism.md`), paired against the current final design on the 954 keys (SE in brackets):
+  - critical: δ_max 21.6 → 21.3 % (−0.2, SE 0.3), floor breaches 13 → 12, T_rec −0.02 s (0.02), j_max fair −0.02 (0.02), contacts 0;
+  - mild: j_max fair +0.07 (0.02), runs at the falling jerk bound 21 → 26, δ_max +0.0 (0.2), floor breaches 5 → 6;
+  - no cut-in: δ_max +0.4 %p (0.1), v_avg +0.03 m/s (0.01), phantom_ref −0.008 (0.003), lead ticks inside d_safe 1.0 → 2.0 %.
+  - Against ISA-MPC cap and PC-ACC the margins are the current design's to within about 0.1 (critical δ_max −6.9 / −13.2 %p).
+  - Cut-out (1309 events): δ_max +0.1 %p (0.1), floor breaches 0 → 1, v_avg −0.04 m/s and v_post −0.10 m/s (beyond 2 SE).
+  - Mechanism (workstation probe, bit-identical to the server roots): the event TV's cut-in cells switch on at the same tick (paired mean −0.01 s, SE 0.02; 382 of 512 events at the same tick). The switch-on tick is when the hypothesis's p crosses the gate (median p 0.16–0.18). Once on, its cells start about one horizon step earlier.
+  - The lead's lane-keeping term is 1.28σ in place of 1.645σ (median −0.23 m), which is why the ego follows closer.
+  - 1.6 % of active cells are at the guard on b, all but one of them step-0 cut-out cells, where σ = 0 and so T = 0.
+- **Status:** implemented (67390e8); run on the lab server 2026-11-19; not adopted, the maintainer's decision; off by default; NGSIM replay only (the CARLA agent refuses it).
+
 ## External baselines
 
 Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20, `cutin_verify_20261020` / `cutout_verify_20261020`, and on the NGSIM final set, e.g. `full_v20s0_{isampc,pcacc}_20261028`; `open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint").
