@@ -506,6 +506,10 @@ class NairACCConfig:
     feedback_bound: float = 2.0
     disturbance_feedback_bound: float = 0.5
     optimize_k: bool = False
+    #: ``noramp`` (2026-11-19, student: "free-cruise speed ramps 빼고 실험 돌리면 결과 어떤지"): the free-cruise speed of the
+    #: reference is the set speed ``desired_speed`` at every step, in place of the linear ramp from the current speed to
+    #: it over 2 s (``OldACCReferenceAdapter._old_speed_ramp``).  Off by default.
+    free_cruise_no_ramp: bool = False
 
     def __post_init__(self):
         if self.horizon < 1:
@@ -1727,6 +1731,9 @@ class OldACCReferenceAdapter:
         reach_steps = max(1, int(reach_time / self.config.dt))
         horizon = self.config.horizon
         v_ref = np.zeros(horizon + 1)
+        if self.config.free_cruise_no_ramp:     # noramp: the set speed from step 0
+            v_ref[:] = self.config.desired_speed
+            return v_ref
         if v_ego < self.config.desired_speed:
             ramp_steps = min(reach_steps, horizon + 1)
             v_ref[:ramp_steps] = np.linspace(v_ego, self.config.desired_speed, ramp_steps)
