@@ -1233,7 +1233,7 @@ Braking-distance safety bound (experimental)
   - δ_max +3.8 / +2.9 / +2.4 %p (critical / mild / no cut-in; SE 0.3 / 0.4 / 0.2), floor breaches 9 → 14 / 3 → 4 (all new ones TV entries), T_rec +0.21 / +0.25 s (not recovered 1 → 11 / 0 → 7);
   - j_max fair −0.02 (0.02) / +0.02 (0.02) / +0.03 (0.01), phantom_ref +0.016 (0.006), runs at the falling jerk bound 26 → 31 / 15 → 22 / 13 → 19; contacts 0 / 0 / 0 as before.
   - Why (inferred): the +1.645σ of the lead's priced row was the buffer that kept the steady-state gap at d_safe; without it the price w·P·short² settles the ego slightly inside d_safe, the mechanism of onerow w10 before `zconf`.
-- **Status:** implemented (dddead3); run on the lab server 2026-11-18 (cut-in set; with `flooreps0.05` also the cut-out set); not adopted, the maintainer's decision; off by default; not run in CARLA (the agent parses it).
+- **Status:** implemented (dddead3); run on the lab server 2026-11-18 (cut-in set; with `flooreps0.05` also the cut-out set); dropped 2026-11-19 (maintainer: "floorsigma는 버려"; it read "not adopted, the maintainer's decision"); off by default; not run in CARLA (the agent parses it).
 
 ### `flooreps<ε>`
 
