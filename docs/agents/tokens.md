@@ -1299,7 +1299,7 @@ Braking-distance safety bound (experimental)
   - Mechanism (workstation probe, bit-identical to the server roots): the event TV's cut-in cells switch on at the same tick (paired mean −0.01 s, SE 0.02; 382 of 512 events at the same tick). The switch-on tick is when the hypothesis's p crosses the gate (median p 0.16–0.18). Once on, its cells start about one horizon step earlier.
   - The lead's lane-keeping term is 1.28σ in place of 1.645σ (median −0.23 m), which is why the ego follows closer.
   - 1.6 % of active cells are at the guard on b, all but one of them step-0 cut-out cells, where σ = 0 and so T = 0.
-- **Status:** implemented (67390e8); run on the lab server 2026-11-19; not adopted, the maintainer's decision; off by default; NGSIM replay only (the CARLA agent refuses it).
+- **Status:** implemented (67390e8); run on the lab server 2026-11-19; adopted as the thesis design 2026-11-19 (maintainer: "이 방법을 논문 설계로 채택할건데"; it read "not adopted, the maintainer's decision"); not the replay default yet; off by default; NGSIM replay only (the CARLA agent refuses it).
 
 ## External baselines
 
