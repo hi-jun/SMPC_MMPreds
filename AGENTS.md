@@ -28,22 +28,26 @@ It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Whe
 
 ### Current design (2026-11-12)
 
-**Thesis design and NGSIM replay default since 2026-11-19** (student: "S를 논문 설계에 넣기 (주 표 설계 행·그림·재생기 기본값 갱신)"). This block supersedes the design statements below. The string, with no variable set:
+**Thesis design and NGSIM replay default since 2026-11-19** (student: "S를 논문 설계에 넣기 (주 표 설계 행·그림·재생기 기본값 갱신)", then "넣고 ㄱㄱ" for `pzjoint`). This block supersedes the design statements below. The string, with no variable set (`_pzjoint` since the evening of 2026-11-19):
 
 ```
-acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_leadmerge_mergefirst_lkhold_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_onerow_pzrisk0.1_snap160_aheadonly_noegonoise
+acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_leadmerge_mergefirst_lkhold_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_onerow_pzrisk0.1_snap160_aheadonly_noegonoise_pzjoint
 ```
 
 The condition adds `NGSIM_SUBLEAD_TARGET` (on by default). It makes the in-lane lead's own lead S a predictor target, so the lead's cut-out hypothesis hands the lane to S. It applies to D-opt only, not to the ISA-MPC or CV-ACC baselines.
+
+`pzjoint` (eee8104) makes `pzrisk`'s switch-on the only gate: no separate 0.1 probability gate. A cell is on at step k ≥ 1 iff π = p·Z > ε. A cell seen past ego-lane vehicles that have left the path (S behind a departing V) takes as p the joint probability p_V·p_S.
 
 The path from the 2026-11-13 night design:
 - the safety layer dropped (2026-11-16);
 - `nocutout` dropped (2026-11-18);
 - `noegonoise` (2026-11-18);
 - `pzrisk0.1` in place of `zconf0.95` (2026-11-19);
-- S (2026-11-19).
+- S (2026-11-19);
+- `pzjoint` (2026-11-19 evening).
 
 Records:
+- `replay_out/pzjoint_20261119/result.md`: `pzjoint` on the final sets. No measurable change against `pzrisk0.1` + S (critical δ_max 21.2 = 21.2 %; cut-outs equal to two decimals).
 - `replay_out/pzsub_20261119/result.md`: the final sets with S — 954-key main table within 0.1 %p of `pzrisk0.1`; cut-outs δ_max 1.8 → 1.6 %, v_post −0.12 m/s;
 - `replay_out/sublead_20261119/result.md`;
 - `docs/agents/ngsim_replay_defaults.md` 2026-11-19: the switch and its gates. All pass.
@@ -392,7 +396,8 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `noegonoise` | The margin's σ drops the ego's process-noise term (`process_noise_cov` = 0, 0.164 m before): σ is the predicted lead position's standard deviation alone | decided by the maintainer 2026-11-18 ("ego 잡음은 빼"); implemented; run on the lab server 2026-11-18 (`replay_out/noegonoise_20261118/`: final design critical δ_max 21.1 → 21.2 %, floor breaches 8 → 9, no cut-in identical; unpaired) |
 | `floorsigma` | With `onerow` and `zconf<β>` or `flooreps<ε>`: the σ term only on the floor; the priced row gap ≥ L + d0 + τv − short − ξ with short uncapped, plus a hard floor row gap ≥ L + d0 + T − ξ (T = zσ or `flooreps`'s), sharing ξ | experiment 2026-11-18 (`replay_out/floorA_20261118/`: the ego follows closer, δ_max +2.4–3.8 %p, critical floor breaches 9 → 14); dropped 2026-11-19 (maintainer: "floorsigma는 버려") |
 | `flooreps<ε>` | With `floorsigma`: the floor's T = Φ⁻¹(b)σ_c − ρσ_sE_z, b = clip(1 − ε/P_lat, 0.1, 1 − ε), P_lat the vehicle's lateral path-overlap probability over all its trajectories, σ_c and E_z its own trajectory's longitudinal moments given the overlap | experiment 2026-11-18 (with `floorsigma`, δ_max −0.3–0.4 %p against `floorsigma` alone); not adopted; NGSIM replay only (the CARLA agent refuses it) |
-| `pzrisk<ε>` | With `onerow` (its cap) and `noegonoise`, in place of `zconf<β>`: every lead cell (adjacent cut-in hypotheses, the ego-lane lead's lane keeping and cut-out) is active iff π = p·Z > ε, p the cell's lead-mode probability and Z its own trajectory's lateral path-overlap probability, in place of the mean-path entry; the capped row's σ term is T = Φ⁻¹(1 − ε/π)σ_c − ρσ_sE_z (the own trajectory's moments given the overlap; b ≥ 1e-6), so P(hypothesis ∧ overlap ∧ gap < L + d0 + τv − short) ≤ ε per cell | experiment 2026-11-19 (`replay_out/pzrisk_20261119/`, `pzrisk0.1` on the 954 keys: cut-ins within noise but mild j_max fair +0.07; without a cut-in the ego follows closer, δ_max +0.4 %p; the TV's cut-in cells switch on at the same tick); **adopted as the thesis design** 2026-11-19 (maintainer: "이 방법을 논문 설계로 채택할건데"); not the replay default yet; NGSIM replay only (the CARLA agent refuses it) |
+| `pzrisk<ε>` | With `onerow` (its cap) and `noegonoise`, in place of `zconf<β>`: every lead cell (adjacent cut-in hypotheses, the ego-lane lead's lane keeping and cut-out) is active iff π = p·Z > ε, p the cell's lead-mode probability and Z its own trajectory's lateral path-overlap probability, in place of the mean-path entry; the capped row's σ term is T = Φ⁻¹(1 − ε/π)σ_c − ρσ_sE_z (the own trajectory's moments given the overlap; b ≥ 1e-6), so P(hypothesis ∧ overlap ∧ gap < L + d0 + τv − short) ≤ ε per cell | experiment 2026-11-19 (`replay_out/pzrisk_20261119/`, `pzrisk0.1` on the 954 keys: cut-ins within noise but mild j_max fair +0.07; without a cut-in the ego follows closer, δ_max +0.4 %p; the TV's cut-in cells switch on at the same tick); **adopted as the thesis design** 2026-11-19 (maintainer: "이 방법을 논문 설계로 채택할건데"); not the replay default yet; NGSIM replay only (the CARLA agent refuses it) (updated 2026-11-19 evening: in the replay default, with S and `pzjoint`) |
+| `pzjoint` | With `pzrisk<ε>`: no separate 0.1 probability gate (pzrisk's p·Z > ε is the only switch-on), and a cell seen past ego-lane vehicles that have left the path (S behind a departing V) takes the joint probability p_V·p_S as its p (eee8104) | **design** and replay default since 2026-11-19 evening (student: "넣고 ㄱㄱ"); no measurable change against pzrisk0.1 + S (`replay_out/pzjoint_20261119/result.md`); NGSIM replay only |
 
 Matching is by substring. The predictor is chosen in the order `const_lead` > `iaimm` > `lstm_vel` > `lstm` > `stdan_vel` > `stdan_3int` > synthetic, and any `_ol` in the string selects the open-loop variant.
 

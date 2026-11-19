@@ -188,6 +188,26 @@ The student chose "S를 논문 설계에 넣기 (주 표 설계 행·그림·재
 
 **To reproduce a D-opt root made before this change:** set `NGSIM_SUBLEAD_TARGET=0`. Also set `NGSIM_POLICY_TAIL` to that root's tail (`run_info.json` `policy_example`). The pre-switch roots of 2026-11-19, `sublead_20261119` and `pzsub_20261119`, set the variable to 1 explicitly.
 
+### 2026-11-19 evening
+
+The student adopted `pzjoint` ("넣고 ㄱㄱ"; `docs/agents/tokens.md`, `replay_out/pzjoint_20261119/result.md`).
+
+**The edit.** The default `POLICY_TAIL` gets `_pzjoint` at its end. That is the only edit.
+- `ngsim_replay.py` md5 9327f1d2 → 49a03e10 on the workstation and the lab server.
+- Backups: `results/ngsim_lambda_cal_20261019/replay_backup_20261119_pre_pzj_default/` on both machines.
+- Before that edit, the same day, `predictor_options` started reading the token (8aef08a6 → 9327f1d2, backup `replay_backup_20261119_pre_pzjoint/`).
+- The repo code is eee8104, copied to the server with backup `/data/users/sjun0803/ACC/SMPC_MMPreds/repo_backup_20261119_pre_pzjoint/`. Its `WORKSTATION_HEAD.txt` was updated.
+
+**Gates** (`replay_out/default_pzj_20261119/pzj_default_server.sh`, `.log`; lab server; the 5 reproduction episodes, v3 table). Each has max |Δa_cmd| 0:
+
+| condition | against |
+|---|---|
+| no variable set | `pzjoint_20261119/pzj_cutin` |
+| the previous default tail (without `_pzjoint`) | `pzsub_20261119/pzsub_cutin` |
+| that tail with `NGSIM_DOPT_PREDICTOR=iaimm` and the ablation's `ISAMPC_IAIMM_CFG` (`proj_horizon_s` 3.0) | `pzsub_20261119/iaimm_cutin` |
+
+**To reproduce a root of `pzsub_20261119`:** set `NGSIM_POLICY_TAIL` to the default tail without `_pzjoint`.
+
 ### Condition of older roots
 
 - `NGSIM_V_SET=20 NGSIM_SPAWN_MARGIN=0` gives the condition of every root from 2026-10-27 to 2026-11-10, including the paper roots and the baseline roots of the earlier tables.

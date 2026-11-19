@@ -1299,7 +1299,24 @@ Braking-distance safety bound (experimental)
   - Mechanism (workstation probe, bit-identical to the server roots): the event TV's cut-in cells switch on at the same tick (paired mean −0.01 s, SE 0.02; 382 of 512 events at the same tick). The switch-on tick is when the hypothesis's p crosses the gate (median p 0.16–0.18). Once on, its cells start about one horizon step earlier.
   - The lead's lane-keeping term is 1.28σ in place of 1.645σ (median −0.23 m), which is why the ego follows closer.
   - 1.6 % of active cells are at the guard on b, all but one of them step-0 cut-out cells, where σ = 0 and so T = 0.
-- **Status:** implemented (67390e8); run on the lab server 2026-11-19; adopted as the thesis design 2026-11-19 (maintainer: "이 방법을 논문 설계로 채택할건데"; it read "not adopted, the maintainer's decision"); not the replay default yet; off by default; NGSIM replay only (the CARLA agent refuses it).
+- **Status:** implemented (67390e8); run on the lab server 2026-11-19; adopted as the thesis design 2026-11-19 (maintainer: "이 방법을 논문 설계로 채택할건데"; it read "not adopted, the maintainer's decision"); not the replay default yet; off by default; NGSIM replay only (the CARLA agent refuses it). (updated 2026-11-19 evening: in the replay default since that day, with `NGSIM_SUBLEAD_TARGET` and then with `pzjoint`; `docs/agents/ngsim_replay_defaults.md` 2026-11-19.)
+
+### `pzjoint`
+
+- **What it does** (with `pzrisk<ε>`; eee8104, student 2026-11-19: "S의 π를 결합 확률로 바꾸고 문턱을 없앤 뒤 다시 돌리기"):
+  - There is no separate 0.1 probability gate. `cutin_probability_threshold` is not applied:
+    - the cut-in gate, redundant with p·Z > ε at ε 0.1;
+    - the ego-lane lead's lane-keeping vanish. The measured step-0 cell now stays, as pzrisk's step-0 rule says;
+    - the vacating vanish of `_inherit_vacating_confidence`.
+  - A cell whose lead is seen past ego-lane vehicles that have left the path (`_vacating_modes`: the next vehicle ahead S behind a departing preceding vehicle V) takes the joint probability. Its `lead_mode_probability` is p_V·p_S. It leads iff that times its own Z exceeds ε, so pzrisk's T and its chance statement use the joint π.
+  - Code: `acc_postprocess.build_multitarget_lead_prediction(joint_pz_risk=)`, `acc_adapter.predict_acc(pz_joint=)`, the agent's `_parse_pz_joint` (refuses the token without `pzrisk<ε>`), and the replay's `predictor_options`.
+- **Why:** under pzrisk alone, S's π was p_S·Z_S. V's departure probability entered S's cells only through the separate 0.1 gate.
+- **Tests:** `tests/test_pzjoint.py`, 8 tests; full suite 613 OK.
+- **Results** (`replay_out/pzjoint_20261119/result.md`), against `pzrisk0.1` + S (`pzsub_20261119`):
+  - no measurable change: 954-key critical δ_max 21.2 = 21.2 %, floor breaches 12 = 12;
+  - cut-outs (342) equal to two decimals;
+  - max |Δa_cmd| 0.10 (cut-in) and 0.23 (cut-out).
+- **Status:** adopted 2026-11-19 evening (student: "넣고 ㄱㄱ"). In the replay default since then (`replay_out/default_pzj_20261119/`). NGSIM replay only.
 
 ## External baselines
 
