@@ -210,6 +210,8 @@ class ACCNairSMPCAgent(object):
         if self._parse_pz_risk(smpc_config) is not None:
             raise ValueError("pzrisk<eps> needs a probabilistic ego-path test of every target's predicted "
                              "trajectories (floor_lateral_fn); the CARLA agent has none (NGSIM replay only)")
+        # pzjoint (2026-11-19) needs pzrisk<eps>, refused just above; alone its parser raises
+        self._parse_pz_joint(smpc_config)
         # pcal (2026-11-05): the calibration maps are fitted on natural NGSIM traffic and read NGSIM's lateral
         # features; the replay applies them, and CARLA has neither a map nor those features
         if self._parse_probability_calibration(smpc_config):
@@ -2105,6 +2107,22 @@ class ACCNairSMPCAgent(object):
         if missing:
             raise ValueError("pzrisk<eps> needs " + " and ".join(missing))
         return float(match.group(1))
+
+    @staticmethod
+    def _parse_pz_joint(smpc_config):
+        """Read ``pzjoint`` from the config string (False = off).
+
+        With ``pzrisk<eps>``, 2026-11-19 (student: "S의 π를 결합 확률로 바꾸고 문턱을 없앤 뒤 다시 돌리기"): pzrisk's switch-on
+        ``p Z > eps`` is the only gate (no separate probability gate ``cutin_gate``/0.1), and a lead cell seen past
+        ego-lane vehicles that have left the path takes as ``p`` the joint probability of their modes and its own
+        (``predict_acc(pz_joint=)``, ``build_multitarget_lead_prediction(joint_pz_risk=)``).  Raises ValueError without
+        ``pzrisk<eps>``; NGSIM replay only, as pzrisk.  Whole-token match.
+        """
+        config = str(smpc_config)
+        present = re.search(r"(?:^|_)pzjoint(?=_|$)", config) is not None
+        if present and ACCNairSMPCAgent._parse_pz_risk(config) is None:
+            raise ValueError("pzjoint needs pzrisk<eps>")
+        return present
 
     @staticmethod
     def _parse_branch_time_miqp(smpc_config):

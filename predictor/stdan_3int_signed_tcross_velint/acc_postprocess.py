@@ -1571,8 +1571,16 @@ def build_multitarget_lead_prediction(
     pass_slots: int = 0,
     pass_plan: Optional[Dict[int, np.ndarray]] = None,
     ahead_only: bool = False,
+    joint_pz_risk: Optional[float] = None,
 ) -> tuple[MultimodalLeadPrediction, List[dict]]:
     """Joint scenarios over targets, each step's nearest active mode as the lead.
+
+    ``joint_pz_risk`` (``pzjoint``, with ``pzrisk<eps>``, 2026-11-19, student: "S의 π를 결합 확률로 바꾸고 문턱을 없앤
+    뒤 다시 돌리기") is ``eps``: a cell at step k >= 1 whose lead is seen past vacating ego-lane vehicles
+    (``_vacating_modes``) has a joint hypothesis, every vacating vehicle's mode and its own, so its
+    ``lead_mode_probability`` is the product of their probabilities, and it leads iff that product times its own
+    ``Z`` (``floor_lateral[k, 0]``) exceeds ``eps``; otherwise the scenario has no lead at that step.  The caller
+    passes ``vanish_threshold`` 0 with it (no separate probability gate); without it nothing changes.
 
     ``ahead_only`` (``aheadonly``, 2026-11-13) is ISA-MPC's obstacle rule (Zhou et al.'s ``ISA_MPC.py``,
     ``Obst_k[i][0,0] >= x_EV_k``): a target is an obstacle only while its current position (``frenet[0, 0]``) is at
@@ -1777,16 +1785,26 @@ def build_multitarget_lead_prediction(
                 and step >= branch_floor_by_vehicle.get(int(mode.vehicle_id), horizon + 1)
             )
             cell = None
+            lead_p = None
             if candidates:
                 _, selected = min(candidates, key=lambda item: item[0])
                 scale = np.asarray(selected.clearance_scale, dtype=float)
                 cell = (float(selected.chance_confidence), float(scale[step] if scale.ndim else scale))
-                if reference_beta > 0.0 or vanish_threshold > 0.0:
+                lead_p = float(selected.probability)
+                if reference_beta > 0.0 or vanish_threshold > 0.0 or joint_pz_risk is not None:
                     vacating = _vacating_modes(selected, step, combo, targets, ego_s)
                     if vacating:
                         vacated_lane_steps.append(step)
                     cell = _inherit_vacating_confidence(
                         cell, vacating, reference_beta, vanish_threshold, sigma_cap)
+                    if cell is not None and joint_pz_risk is not None and vacating and step >= 1:
+                        # pzjoint: the joint hypothesis' probability, and its switch-on p Z > eps with the own Z
+                        lead_p *= float(np.prod([float(mode.probability) for mode in vacating]))
+                        lat = selected.floor_lateral
+                        z = (float(lat[step, 0]) if lat is not None and step < lat.shape[0]
+                             and np.isfinite(lat[step, 0]) else 1.0)
+                        if not lead_p * z > float(joint_pz_risk):
+                            cell = None
             if cell is None:
                 selected_ids.append(None)
                 selected_modes.append(None)
@@ -1803,7 +1821,7 @@ def build_multitarget_lead_prediction(
             sigma_confidence[scenario_out_idx, step] = float(selected.sigma_confidence)
             lead_mode_lk[scenario_out_idx, step] = selected.mode_name == "lk"
             lead_vehicle_ids[scenario_out_idx, step] = int(selected.vehicle_id)
-            lead_mode_probability[scenario_out_idx, step] = float(selected.probability)
+            lead_mode_probability[scenario_out_idx, step] = lead_p
             if floor_lateral is not None and selected.floor_lateral is not None and step < selected.floor_lateral.shape[0]:
                 floor_lateral[scenario_out_idx, step] = selected.floor_lateral[step]
             if id(selected) in pass_slot_of_mode:
