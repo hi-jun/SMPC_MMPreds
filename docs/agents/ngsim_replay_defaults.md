@@ -234,7 +234,43 @@ The student adopted `noramp` ("노램프 채택해"; `docs/agents/tokens.md`, `r
 - Since 2026-11-19 evening its root is `replay_out/cvnr_20261119/cvz_cutin` / `cvz_cutout`: `NGSIM_DOPT_PREDICTOR=cv` with the old CV tail (`noegonoise_20261118/cv_cutin`'s `policy_example` tail) + `_noramp` (`cvnr_20261119/cvz_server.sh`).
 - With the default tail, `pzrisk0.1`'s Z of the CV lead's frozen lateral position (zero covariance) switched the in-lane lead's cell off on 1,134 scored ticks in 186 of the 1,014 cut-in runs (`cvnr_20261119/result.md`).
 
+### 2026-11-20, the target window: no band behind, and the in-lane range
+
+The student decided both through session smpc-mmpreds-82:
+- "뒤쪽 구간 없애기(코드 수정과 ISA-MPC 재실행 필요) 이걸로 하자 ... 실험은 서버에서 돌려"
+- "ego lane에 대해선 200m 안의 차량만 고려한다는 내용도 추가해줘", then, after the check, "9런만 재실행하면 되지? 그럼 진행시켜 서버에서"
+
+Record: `replay_out/adjwin_20261120/result.md`.
+
+**The edits** (`ngsim_replay.py` 372aa4dc → bed4c0cd → 5cbdb6c2; `run_replay.py` e14eb621 → 8df9e4ea → 8f71814e; backups `results/replay_backup_20261120_pre_adjwin/` and `results/replay_backup_20261120_pre_laneahead/`; both machines):
+- `NGSIM_ADJ_BEHIND_M`, default 0 (5 before): an adjacent target needs rear bumper + L ≥ the ego's front − this band. At 0 that is the point `aheadonly` compares.
+- `NGSIM_ADJ_AHEAD_M`, default 30: d_adj, the adjacent targets' centre gap. Unchanged in value, now settable.
+- `NGSIM_LANE_AHEAD_M`, default 200 (no bound before): the in-lane targets, the lead and D-opt's S, only within this centre gap.
+  - The metrics' lead (`lead_id`, `gap`) stays the nearest in-lane vehicle.
+- run_info.json records `adj_ahead_m`, `adj_behind_m` and `lane_ahead_m`. Their absence means 30 / 5 / no bound.
+
+**Who reads the window:**
+- D-opt (STDAN, IAIMM-KF and CV predictors) and ISA-MPC take their targets from it.
+- PC-ACC (its own perception), phantom_ref's reference roots and `pred_testset_20261116` do not.
+
+**Gates** (lab server; the 5 reproduction cut-ins and the 5 cut-out smoke events; max |Δa_cmd| 0 each):
+
+| condition | against |
+|---|---|
+| `NGSIM_ADJ_BEHIND_M=5` (the window code) | `noramp_20261119/nr_cutin`, `nr_cutout`, `cap_20261113/isa_cap55`, `cutout_20261117/isa`, `default_nr_20261119/iaimm_cutin` |
+| `NGSIM_LANE_AHEAD_M` inf, and the default 200 (the range code) | the adjwin roots below, every arm and set |
+
+**Roots with the new defaults:** `replay_out/adjwin_20261120/{design,isa,cv}_{cutin,cutout}` and `iaimm_cutin`.
+- They were run with the window code.
+- The 8 runs in which the 200 m range binds (`check_lane_ahead.py`, exact on every logged tick) were re-run with it and spliced in (`SPLICE_CAP200.md` in each root; run_info.json `lane_ahead_m` 200).
+- Against the old roots: ISA-MPC and ablation (b) change in most runs (up to 3.9 m/s²). The design and Conventional ACC change by ≤ 1.3e-3 m/s², except one design cut-in run (0.60).
+- The thesis tables' cells move by ≤ 0.3 %p in δ_max, ≤ 0.05 m/s³ in j_max fair, and ≤ 0.009 in phantom_ref. No contact or floor-breach count changes.
+
+**To reproduce a root made before 2026-11-20:** set `NGSIM_ADJ_BEHIND_M=5 NGSIM_LANE_AHEAD_M=inf`.
+
 ### Condition of older roots
+
+- `NGSIM_ADJ_BEHIND_M=5 NGSIM_LANE_AHEAD_M=inf` gives the target window of every root made before 2026-11-20.
 
 - `NGSIM_V_SET=20 NGSIM_SPAWN_MARGIN=0` gives the condition of every root from 2026-10-27 to 2026-11-10, including the paper roots and the baseline roots of the earlier tables.
 

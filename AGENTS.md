@@ -38,6 +38,12 @@ The condition adds `NGSIM_SUBLEAD_TARGET` (on by default). It makes the in-lane 
 
 `pzjoint` (eee8104) makes `pzrisk`'s switch-on the only gate: no separate 0.1 probability gate. A cell is on at step k ≥ 1 iff π = p·Z > ε. A cell seen past ego-lane vehicles that have left the path (S behind a departing V) takes as p the joint probability p_V·p_S.
 
+The replay's target window since 2026-11-20 (student, via smpc-mmpreds-82: "뒤쪽 구간 없애기 ... 이걸로 하자", "ego lane에 대해선 200m 안의 차량만 고려한다는 내용도 추가해줘"):
+- An adjacent vehicle is a target iff its rear bumper + L reaches the ego's front bumper, with no 5 m band behind (`NGSIM_ADJ_BEHIND_M`, 5 before), and its centre gap is ≤ d_adj = 30 m (`NGSIM_ADJ_AHEAD_M`).
+- The in-lane lead, and S, are targets only within 200 m centre gap (`NGSIM_LANE_AHEAD_M`, no bound before).
+- `NGSIM_ADJ_BEHIND_M=5 NGSIM_LANE_AHEAD_M=inf` reproduces every older root.
+- The thesis arms re-run with it: `replay_out/adjwin_20261120/` (record `result.md`; `docs/agents/ngsim_replay_defaults.md` 2026-11-20).
+
 The path from the 2026-11-13 night design:
 - the safety layer dropped (2026-11-16);
 - `nocutout` dropped (2026-11-18);
@@ -45,9 +51,11 @@ The path from the 2026-11-13 night design:
 - `pzrisk0.1` in place of `zconf0.95` (2026-11-19);
 - S (2026-11-19);
 - `pzjoint` (2026-11-19 evening);
-- `noramp` (2026-11-19 evening): the reference's free-cruise speed is v_set from step 0, without the 2 s ramp.
+- `noramp` (2026-11-19 evening): the reference's free-cruise speed is v_set from step 0, without the 2 s ramp;
+- the target window without its band behind, and the 200 m in-lane range (2026-11-20; replay settings, not tokens).
 
 Records:
+- `replay_out/adjwin_20261120/result.md`: the window and the range on the final sets. Against the old roots, ISA-MPC and ablation (b) change in most runs; the design and Conventional ACC move by ≤ 1.3e-3 m/s², except one design cut-in run. Table cells move by ≤ 0.3 %p in δ_max. The range binds in 8 runs and changes no cell.
 - `replay_out/noramp_20261119/result.md`: `noramp` on the final sets. Cut-out v_post +0.05 m/s, cut-in δ_max +0.9 / +1.0 %p, one new critical side contact, against the design with the ramp.
 - `replay_out/pzjoint_20261119/result.md`: `pzjoint` on the final sets. No measurable change against `pzrisk0.1` + S (critical δ_max 21.2 = 21.2 %; cut-outs equal to two decimals).
 - `replay_out/pzsub_20261119/result.md`: the final sets with S — 954-key main table within 0.1 %p of `pzrisk0.1`; cut-outs δ_max 1.8 → 1.6 %, v_post −0.12 m/s;
