@@ -274,6 +274,7 @@ Record: `replay_out/adjwin_20261120/result.md`.
 - The token is not in the default tail; `NGSIM_POLICY_TAIL` = the default tail + `_refhold` switches it on.
 - md5 `ngsim_replay.py` 5cbdb6c2 → 3ddeab03 (backup `results/replay_backup_20261120_pre_refhold/`); `run_replay.py` unchanged (8f71814e). The lab server got it through `setup_acc_replay_env.sh push`, HEAD 1cf1c65.
 - Gate (`replay_out/refhold_20261120/refhold_server.log`): without the token, REP and CO5 are bit-identical to `adjwin_20261120/design_cutin` and `design_cutout`.
+- Declined by the student the same day (through smpc-mmpreds-82: "refhold: 채택하지마"). The line stays; the default does not use the token.
 
 ### Condition of older roots
 

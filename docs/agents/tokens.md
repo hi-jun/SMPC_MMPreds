@@ -1344,7 +1344,7 @@ Braking-distance safety bound (experimental)
   - no cut-in: phantom_ref +0.006 *, δ_max −0.1 %p *;
   - cut-out (342): j_max fair +0.02 *, v_post −0.02 *, δ_max equal; one new side-entry contact outside the 342.
   - Against the baselines every starred paired cell keeps its sign and star.
-- **Status:** experiment 2026-11-20, not adopted (the student decides). Adopting it means re-running ablation (b) and Conventional ACC, which share this MPC's reference.
+- **Status:** experiment 2026-11-20; declined by the student the same day (through smpc-mmpreds-82: "refhold: 채택하지마"). No `_refhold` re-runs; the thesis keeps the previous-solution reference (Sec. 4.5), its tables and figures. The token stays in the code, off by default.
 
 ## External baselines
 
