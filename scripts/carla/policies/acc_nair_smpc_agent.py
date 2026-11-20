@@ -384,6 +384,8 @@ class ACCNairSMPCAgent(object):
             self.controller_config.process_noise_cov = ((0.0, 0.0), (0.0, 0.0))
         # noramp (2026-11-19): the reference's free-cruise speed is the set speed from step 0 (no 2 s ramp)
         self.controller_config.free_cruise_no_ramp = self._parse_no_speed_ramp(smpc_config)
+        # refhold (2026-11-20): the reference's ego speeds are the measured speed held, not the previous solve's plan
+        self.controller_config.reference_hold_speed = self._parse_reference_hold(smpc_config)
         # floorsigma (2026-11-18): onerow's sigma term only in a hard floor row; the priced row asks for the plain d_safe
         self.controller_config.one_row_floor_sigma = self._parse_floor_sigma(smpc_config)
         if self.controller_config.one_row_floor_sigma and not self.controller_config.one_row:
@@ -2061,6 +2063,16 @@ class ACCNairSMPCAgent(object):
         speed to it over 2 s (``NairACCConfig.free_cruise_no_ramp``), 2026-11-19. Whole-token match.
         """
         return re.search(r"(?:^|_)noramp(?=_|$)", str(smpc_config)) is not None
+
+    @staticmethod
+    def _parse_reference_hold(smpc_config):
+        """Read ``refhold`` from the config string (default: off).
+
+        The reference's ego speeds (``OldACCReferenceAdapter.planned_speed``: the time gap ``tau v`` and the ego's
+        predicted position in the blend) are the measured speed held at every step, in place of the previous solve's
+        plan (``NairACCConfig.reference_hold_speed``), 2026-11-20. Whole-token match.
+        """
+        return re.search(r"(?:^|_)refhold(?=_|$)", str(smpc_config)) is not None
 
     @staticmethod
     def _parse_floor_sigma(smpc_config):

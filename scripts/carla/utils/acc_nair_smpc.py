@@ -510,6 +510,11 @@ class NairACCConfig:
     #: reference is the set speed ``desired_speed`` at every step, in place of the linear ramp from the current speed to
     #: it over 2 s (``OldACCReferenceAdapter._old_speed_ramp``).  Off by default.
     free_cruise_no_ramp: bool = False
+    #: ``refhold`` (2026-11-20, student through session smpc-mmpreds-82: "이거 꼭 이전 솔루션 써야되냐고 해결해보라고"): the
+    #: reference's ego speeds ``OldACCReferenceAdapter.planned_speed`` are the measured speed held at every step, the
+    #: first solve's rule on every solve, in place of the previous solve's plan; the reference then needs no previous
+    #: solution.  Off by default.
+    reference_hold_speed: bool = False
 
     def __post_init__(self):
         if self.horizon < 1:
@@ -1700,7 +1705,7 @@ class OldACCReferenceAdapter:
         speeds (``NairACCSMPC._solve_feedback_scalar_chance_qp_cached``)."""
         v_ego = float(ego_state[1])
         horizon = self.config.horizon
-        if self.previous_planned_speed is None:
+        if self.previous_planned_speed is None or self.config.reference_hold_speed:    # refhold: always held
             return np.full(horizon + 1, v_ego)
         planned_v = np.asarray(self.previous_planned_speed, dtype=float)
         if planned_v.shape[0] != horizon + 1:
