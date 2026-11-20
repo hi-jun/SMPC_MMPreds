@@ -1334,6 +1334,18 @@ Braking-distance safety bound (experimental)
   - δ_max is below ISA-MPC's in every group.
 - **Status:** adopted 2026-11-19 evening (student: "노램프 채택해"). In the replay default since then (`replay_out/default_nr_20261119/`).
 
+### `refhold`
+
+- **What it does** (35dc80f, student 2026-11-20 through smpc-mmpreds-82: "이거 꼭 이전 솔루션 써야되냐고 해결해보라고"): the reference's ego speeds (`OldACCReferenceAdapter.planned_speed`) are the measured speed held at every step, the first solve's rule on every solve, in place of the previous solve's plan (scenario 0's `x_nominal`). It sets the ego's predicted position in the blend and the reference's time gap τv. The QP does not otherwise depend on the previous solve. The flag is `NairACCConfig.reference_hold_speed`, parsed by the agent's `_parse_reference_hold`; the replay reads it in `build_controller` (2026-11-20, `ngsim_replay_defaults.md`).
+- **Tests:** `tests/test_refhold.py`, 5 tests; full suite 622 OK.
+- **Results** (`replay_out/refhold_20261120/result.md`, the adjcap condition, paired against the current design on the thesis sets):
+  - critical cut-in: within noise (δ_max +0.1 %p, j_max fair +0.01), floor breaches 12 → 14;
+  - mild cut-in: δ_max +0.8 %p *, j_max fair +0.02 *, a_min −0.03 *;
+  - no cut-in: phantom_ref +0.006 *, δ_max −0.1 %p *;
+  - cut-out (342): j_max fair +0.02 *, v_post −0.02 *, δ_max equal; one new side-entry contact outside the 342.
+  - Against the baselines every starred paired cell keeps its sign and star.
+- **Status:** experiment 2026-11-20, not adopted (the student decides). Adopting it means re-running ablation (b) and Conventional ACC, which share this MPC's reference.
+
 ## External baselines
 
 Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20, `cutin_verify_20261020` / `cutout_verify_20261020`, and on the NGSIM final set, e.g. `full_v20s0_{isampc,pcacc}_20261028`; `open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint").
