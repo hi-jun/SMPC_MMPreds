@@ -28,10 +28,10 @@ It describes the state on 2026-11-12, branch `feat/probability-gated-cutin`. Whe
 
 ### Current design (2026-11-12)
 
-**Thesis design and NGSIM replay default since 2026-11-19** (student: "S를 논문 설계에 넣기 (주 표 설계 행·그림·재생기 기본값 갱신)", then "넣고 ㄱㄱ" for `pzjoint`). This block supersedes the design statements below. The string, with no variable set (`_pzjoint` since the evening of 2026-11-19):
+**Thesis design and NGSIM replay default since 2026-11-19** (student: "S를 논문 설계에 넣기 (주 표 설계 행·그림·재생기 기본값 갱신)", then "넣고 ㄱㄱ" for `pzjoint` and "노램프 채택해" for `noramp`). This block supersedes the design statements below. The string, with no variable set (`_pzjoint` and `_noramp` since the evening of 2026-11-19):
 
 ```
-acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_leadmerge_mergefirst_lkhold_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_onerow_pzrisk0.1_snap160_aheadonly_noegonoise_pzjoint
+acc_nair_smpc_stdan_3int_fixed_risk_nominal_safe_distance_modes8_chancecells_dopt10_trajcutin_ctx0_latgate_rmove1000_rjerk40_jinput_ra0_fullfoot_l1slack1e6_leadmerge_mergefirst_lkhold_bcts_nolkentry_amin3.5_amax2_jlim2.5_jlimup5_onerow_pzrisk0.1_snap160_aheadonly_noegonoise_pzjoint_noramp
 ```
 
 The condition adds `NGSIM_SUBLEAD_TARGET` (on by default). It makes the in-lane lead's own lead S a predictor target, so the lead's cut-out hypothesis hands the lane to S. It applies to D-opt only, not to the ISA-MPC or CV-ACC baselines.
@@ -44,9 +44,11 @@ The path from the 2026-11-13 night design:
 - `noegonoise` (2026-11-18);
 - `pzrisk0.1` in place of `zconf0.95` (2026-11-19);
 - S (2026-11-19);
-- `pzjoint` (2026-11-19 evening).
+- `pzjoint` (2026-11-19 evening);
+- `noramp` (2026-11-19 evening): the reference's free-cruise speed is v_set from step 0, without the 2 s ramp.
 
 Records:
+- `replay_out/noramp_20261119/result.md`: `noramp` on the final sets. Cut-out v_post +0.05 m/s, cut-in δ_max +0.9 / +1.0 %p, one new critical side contact, against the design with the ramp.
 - `replay_out/pzjoint_20261119/result.md`: `pzjoint` on the final sets. No measurable change against `pzrisk0.1` + S (critical δ_max 21.2 = 21.2 %; cut-outs equal to two decimals).
 - `replay_out/pzsub_20261119/result.md`: the final sets with S — 954-key main table within 0.1 %p of `pzrisk0.1`; cut-outs δ_max 1.8 → 1.6 %, v_post −0.12 m/s;
 - `replay_out/sublead_20261119/result.md`;
@@ -398,6 +400,7 @@ Every token's full record (results, checks, commits) is its subsection, under th
 | `flooreps<ε>` | With `floorsigma`: the floor's T = Φ⁻¹(b)σ_c − ρσ_sE_z, b = clip(1 − ε/P_lat, 0.1, 1 − ε), P_lat the vehicle's lateral path-overlap probability over all its trajectories, σ_c and E_z its own trajectory's longitudinal moments given the overlap | experiment 2026-11-18 (with `floorsigma`, δ_max −0.3–0.4 %p against `floorsigma` alone); not adopted; NGSIM replay only (the CARLA agent refuses it) |
 | `pzrisk<ε>` | With `onerow` (its cap) and `noegonoise`, in place of `zconf<β>`: every lead cell (adjacent cut-in hypotheses, the ego-lane lead's lane keeping and cut-out) is active iff π = p·Z > ε, p the cell's lead-mode probability and Z its own trajectory's lateral path-overlap probability, in place of the mean-path entry; the capped row's σ term is T = Φ⁻¹(1 − ε/π)σ_c − ρσ_sE_z (the own trajectory's moments given the overlap; b ≥ 1e-6), so P(hypothesis ∧ overlap ∧ gap < L + d0 + τv − short) ≤ ε per cell | experiment 2026-11-19 (`replay_out/pzrisk_20261119/`, `pzrisk0.1` on the 954 keys: cut-ins within noise but mild j_max fair +0.07; without a cut-in the ego follows closer, δ_max +0.4 %p; the TV's cut-in cells switch on at the same tick); **adopted as the thesis design** 2026-11-19 (maintainer: "이 방법을 논문 설계로 채택할건데"); not the replay default yet; NGSIM replay only (the CARLA agent refuses it) (updated 2026-11-19 evening: in the replay default, with S and `pzjoint`) |
 | `pzjoint` | With `pzrisk<ε>`: no separate 0.1 probability gate (pzrisk's p·Z > ε is the only switch-on), and a cell seen past ego-lane vehicles that have left the path (S behind a departing V) takes the joint probability p_V·p_S as its p (eee8104) | **design** and replay default since 2026-11-19 evening (student: "넣고 ㄱㄱ"); no measurable change against pzrisk0.1 + S (`replay_out/pzjoint_20261119/result.md`); NGSIM replay only |
+| `noramp` | The reference's free-cruise speed is the set speed from step 0, in place of the linear ramp from the current speed over 2 s (`NairACCConfig.free_cruise_no_ramp`; 1e5284e) | **design** and replay default since 2026-11-19 evening (student: "노램프 채택해"); `replay_out/noramp_20261119/result.md` |
 
 Matching is by substring. The predictor is chosen in the order `const_lead` > `iaimm` > `lstm_vel` > `lstm` > `stdan_vel` > `stdan_3int` > synthetic, and any `_ol` in the string selects the open-loop variant.
 

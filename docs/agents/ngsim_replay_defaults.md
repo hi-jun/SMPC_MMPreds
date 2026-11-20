@@ -208,6 +208,32 @@ The student adopted `pzjoint` ("넣고 ㄱㄱ"; `docs/agents/tokens.md`, `replay
 
 **To reproduce a root of `pzsub_20261119`:** set `NGSIM_POLICY_TAIL` to the default tail without `_pzjoint`.
 
+### 2026-11-19 evening, `noramp`
+
+The student adopted `noramp` ("노램프 채택해"; `docs/agents/tokens.md`, `replay_out/noramp_20261119/result.md`).
+
+**The edit.** The default `POLICY_TAIL` gets `_noramp` after `_pzjoint`. That is the only change to the default.
+- `ngsim_replay.py` md5 b877a72c → 372aa4dc on the workstation and the lab server.
+- Backups: `results/ngsim_lambda_cal_20261019/replay_backup_20261119_pre_nr_default/` on both machines.
+- Before that edit, the same day, the replay's config started reading the token: `cfg.free_cruise_no_ramp = A._parse_no_speed_ramp(policy)`, md5 49a03e10 → b877a72c.
+  - Its backup, `replay_backup_20261119_pre_noramp/`, is on the workstation only. It was rebuilt by removing that one line, and its md5 equals the server's copy before the edit.
+- The repo code is 1e5284e, copied to the server with backup `/data/users/sjun0803/ACC/SMPC_MMPreds/repo_backup_20261119_pre_noramp/`. Its `WORKSTATION_HEAD.txt` was updated.
+- `run_replay.py` is unchanged (e14eb621).
+
+**Gates** (`replay_out/default_nr_20261119/nr_default_server.sh`, `.log`; lab server; the 5 reproduction episodes, v3 table). Each has max |Δa_cmd| 0:
+
+| condition | against |
+|---|---|
+| no variable set | `noramp_20261119/nr_cutin` |
+| the previous default tail (with `_pzjoint`, without `_noramp`) | `pzjoint_20261119/pzj_cutin` |
+| that tail with `NGSIM_DOPT_PREDICTOR=iaimm` and the ablation's `ISAMPC_IAIMM_CFG` (`proj_horizon_s` 3.0) | `default_pzj_20261119/iaimm_cutin` |
+
+**To reproduce a root of `pzjoint_20261119` or `default_pzj_20261119`:** set `NGSIM_POLICY_TAIL` to the default tail without `_noramp`.
+
+**CV-ACC ("Conventional ACC" in the thesis) does not take the default tail.**
+- Since 2026-11-19 evening its root is `replay_out/cvnr_20261119/cvz_cutin` / `cvz_cutout`: `NGSIM_DOPT_PREDICTOR=cv` with the old CV tail (`noegonoise_20261118/cv_cutin`'s `policy_example` tail) + `_noramp` (`cvnr_20261119/cvz_server.sh`).
+- With the default tail, `pzrisk0.1`'s Z of the CV lead's frozen lateral position (zero covariance) switched the in-lane lead's cell off on 1,134 scored ticks in 186 of the 1,014 cut-in runs (`cvnr_20261119/result.md`).
+
 ### Condition of older roots
 
 - `NGSIM_V_SET=20 NGSIM_SPAWN_MARGIN=0` gives the condition of every root from 2026-10-27 to 2026-11-10, including the paper roots and the baseline roots of the earlier tables.

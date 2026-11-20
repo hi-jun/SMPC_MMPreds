@@ -1318,6 +1318,22 @@ Braking-distance safety bound (experimental)
   - max |Δa_cmd| 0.10 (cut-in) and 0.23 (cut-out).
 - **Status:** adopted 2026-11-19 evening (student: "넣고 ㄱㄱ"). In the replay default since then (`replay_out/default_pzj_20261119/`). NGSIM replay only.
 
+### `noramp`
+
+- **What it does** (1e5284e, student 2026-11-19: "free-cruise speed ramps 빼고 실험 돌리면 결과 어떤지"): the reference's free-cruise speed is the set speed at every step, in place of the linear ramp from the current speed to it over 2 s (`OldACCReferenceAdapter._old_speed_ramp`). The flag is `NairACCConfig.free_cruise_no_ramp`, parsed by the agent's `_parse_no_speed_ramp`.
+- **Tests:** `tests/test_noramp.py`, 4 tests; full suite 617 OK.
+- **Results** (`replay_out/noramp_20261119/result.md`), against the design with the ramp:
+  - cut-out v_post 7.37 → 7.42 m/s (+0.05 *). Against ISA-MPC it is +0.15 (SE 0.06) *, from +0.10 n.s.;
+  - cut-in δ_max +0.9 / +1.0 %p (critical / mild) *, j_max +0.03 / +0.04 *;
+  - one new critical side contact (ds5_v2266);
+  - no cut-in v_avg +0.02 m/s *.
+- **By the revealed vehicle's speed** (342 cut-outs, v_post against ISA-MPC):
+  - S slower than V by >= 2 m/s (82): −0.21 (0.13);
+  - 0–2 m/s slower (129): +0.01 (0.08);
+  - S faster (126): +0.51 (0.10) *;
+  - δ_max is below ISA-MPC's in every group.
+- **Status:** adopted 2026-11-19 evening (student: "노램프 채택해"). In the replay default since then (`replay_out/default_nr_20261119/`).
+
 ## External baselines
 
 Two external baselines (added 2026-10-19, smoke-tested on one run each, no sweep yet) (updated 2026-11-12: both have since run in the CARLA verification sweep of 2026-10-20, `cutin_verify_20261020` / `cutout_verify_20261020`, and on the NGSIM final set, e.g. `full_v20s0_{isampc,pcacc}_20261028`; `open_items.md`, "Verification sweep" and "Final NGSIM paper set and checkpoint").
